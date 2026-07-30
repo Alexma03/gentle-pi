@@ -668,6 +668,33 @@ test("native review status uses the anticipated v2.1.5 contract, preserves Windo
 	}
 });
 
+test("native review status decodes and retains the v2.2.2 compact snapshot identity", async () => {
+	const snapshotIdentity = "sha256:0586c3d40c3acf3db92214ddaf07afe44ad862518b48d608ae4157377ab2f3cc";
+	const entry = {
+		version: "compact-v2",
+		lineage_id: "issue-136-v2-1-2-final",
+		path: "C:\\repo with spaces\\.git\\gentle-ai\\review-transactions\\v2\\issue-136-v2-1-2-final",
+		status: "active",
+		state: "reviewing",
+		revision: "sha256:8103efb360d10d1717a4d22e38c8b75074f99680ed6a5eb3ab40e0ed9fb69931",
+		snapshot_identity: snapshotIdentity,
+		problems: [],
+	};
+	const status = { ...JSON.parse(REVIEW_STATUS.stdout), status: "active", entries: [entry] };
+	const queue = queuedAdapter([{ stdout: "gentle-ai 2.2.2\n" }, { stdout: JSON.stringify(status) }]);
+	const decoded = await new NativeReviewCliV213(queue.adapter).reviewStatus({ cwd: "C:\\repo with spaces" });
+	assert.equal(decoded.entries[0]?.snapshotIdentity, snapshotIdentity);
+
+	const malformed = queuedAdapter([{ stdout: "gentle-ai 2.2.2\n" }, { stdout: JSON.stringify({ ...status, entries: [{ ...entry, snapshot_identity: snapshotIdentity.slice("sha256:".length) }] }) }]);
+	await assert.rejects(
+		() => new NativeReviewCliV213(malformed.adapter).reviewStatus({ cwd: "C:\\repo with spaces" }),
+		(error: unknown) => error instanceof NativeReviewCliError
+			&& error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE
+			&& error.operation === "review/status"
+			&& error.mutationOutcome === "none",
+	);
+});
+
 test("native review status decodes 2.1.8 released lock residue and keeps unknown lock statuses fail-closed", async () => {
 	// gentle-ai 2.1.8 leaves review-transactions/v2/LOCK behind after ORDINARY
 	// successful operations and reports it as {"status":"released"} without

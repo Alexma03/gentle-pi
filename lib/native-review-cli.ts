@@ -480,6 +480,7 @@ export interface NativeReviewAuthorityEntry {
 	status: NativeReviewAuthorityEntryStatus;
 	state?: string;
 	revision?: string;
+	snapshotIdentity?: string;
 	chainIdentity?: string;
 	recovery?: NativeReviewRecovery;
 	problems: readonly string[];
@@ -748,6 +749,7 @@ function exactObject(value: unknown, required: readonly string[], optional: read
 }
 function requiredString(value: unknown): string { if (typeof value !== "string" || value.length === 0) throw new Error("expected string"); return value; }
 function stringValue(value: unknown): string { if (typeof value !== "string") throw new Error("expected string"); return value; }
+function sha256Identity(value: unknown): string { const parsed = requiredString(value); if (!/^sha256:[0-9a-f]{64}$/.test(parsed)) throw new Error("expected canonical SHA-256 identity"); return parsed; }
 function booleanValue(value: unknown): boolean { if (typeof value !== "boolean") throw new Error("expected boolean"); return value; }
 function nonNegativeInteger(value: unknown): number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error("expected safe non-negative integer"); return value; }
 function positiveInteger(value: unknown): number { if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) throw new Error("expected safe positive integer"); return value; }
@@ -957,7 +959,7 @@ function decodeNativeReviewRecovery(value: unknown): NativeReviewRecovery {
 	};
 }
 function decodeNativeReviewStatusEntry(value: unknown): NativeReviewAuthorityEntry {
-	const entry = exactObject(value, ["version", "path", "status", "problems"], ["lineage_id", "state", "revision", "chain_identity", "recovery"]);
+	const entry = exactObject(value, ["version", "path", "status", "problems"], ["lineage_id", "state", "revision", "snapshot_identity", "chain_identity", "recovery"]);
 	return {
 		version: enumString(entry.version, Object.values(NATIVE_REVIEW_AUTHORITY_ENTRY_VERSION)) as NativeReviewAuthorityEntryVersion,
 		...(entry.lineage_id === undefined ? {} : { lineageId: requiredString(entry.lineage_id) }),
@@ -965,6 +967,7 @@ function decodeNativeReviewStatusEntry(value: unknown): NativeReviewAuthorityEnt
 		status: enumString(entry.status, Object.values(NATIVE_REVIEW_AUTHORITY_ENTRY_STATUS)) as NativeReviewAuthorityEntryStatus,
 		...(entry.state === undefined ? {} : { state: requiredString(entry.state) }),
 		...(entry.revision === undefined ? {} : { revision: requiredString(entry.revision) }),
+		...(entry.snapshot_identity === undefined ? {} : { snapshotIdentity: sha256Identity(entry.snapshot_identity) }),
 		...(entry.chain_identity === undefined ? {} : { chainIdentity: requiredString(entry.chain_identity) }),
 		...(entry.recovery === undefined ? {} : { recovery: decodeNativeReviewRecovery(entry.recovery) }),
 		problems: stringArray(entry.problems),
