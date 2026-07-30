@@ -5,19 +5,23 @@ import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix, win32 } from "node:path";
 import { promisify } from "node:util";
-import { PackageLocalGentleAiBinaryMissingError, resolveGentleAiBinary } from "./gentle-ai-binary.ts";
+import { GENTLE_AI_VERSION, PackageLocalGentleAiBinaryMissingError, resolveGentleAiBinary } from "./gentle-ai-binary.ts";
 import {
 	REVIEW_INTEGRATION_CONTRACT,
-	decodeReviewCapabilitiesV1,
-	decodeReviewFailureV1,
-	decodeReviewOperationV1,
-	decodeReviewStartV1,
-	decodeReviewStatusV1,
-	type ReviewCapabilitiesV1,
-	type ReviewFailureV1,
+	decodeReviewCapabilitiesV2,
+	decodeReviewConsentV2,
+	decodeReviewFailureV2,
+	decodeReviewOperationV2,
+	decodeReviewRepairV2,
+	decodeReviewStartV3,
+	decodeReviewStatusV3,
+	type ReviewCapabilitiesV2,
+	type ReviewConsentV2,
+	type ReviewFailureV2,
+	type ReviewRepairV2,
 	type ReviewStartState,
-	type ReviewStatusV1,
-} from "./review-integration-v1.ts";
+	type ReviewStatusV3,
+} from "./review-integration-v2.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -35,6 +39,10 @@ export const NATIVE_REVIEW_OPERATION = {
 	QUARANTINE_LEGACY: "review/quarantine-legacy",
 	RECONCILE_AUTHORITY: "review/reconcile-authority",
 	REPAIR_LEGACY_ALIAS: "review/repair-legacy-alias",
+	MODE: "review/mode",
+	REPAIR: "review/repair",
+	CAPTURE_EVIDENCE: "review/capture-evidence",
+	CAPTURE_RESULT: "review/capture-result",
 } as const;
 export type NativeReviewOperation = (typeof NATIVE_REVIEW_OPERATION)[keyof typeof NATIVE_REVIEW_OPERATION];
 
@@ -52,6 +60,7 @@ export const NATIVE_REVIEW_ERROR_CODE = {
 	VERSION_INCOMPATIBLE: "version-incompatible",
 	CANCELLED: "cancelled",
 	PACKAGE_BINARY_MISSING: "package-local-binary-missing",
+	UNSUPPORTED_TRANSITION_OPERATION: "unsupported-transition-operation",
 } as const;
 export type NativeReviewErrorCode = (typeof NATIVE_REVIEW_ERROR_CODE)[keyof typeof NATIVE_REVIEW_ERROR_CODE];
 
@@ -95,14 +104,100 @@ export interface NativeReviewCli {
 	bindSdd(request: NativeBindSddRequest): Promise<NativeBindSddResult>;
 	sddStatus(request: NativeSddStatusRequest): Promise<NativeSddStatusResult>;
 	reviewStatus(request: NativeReviewStatusRequest): Promise<NativeReviewStatusResult>;
-	capabilities?(request?: NativeCapabilitiesRequest): Promise<ReviewCapabilitiesV1>;
-	targetStatus?(request: NativeTargetStatusRequest): Promise<ReviewStatusV1>;
+	capabilities?(request?: NativeCapabilitiesRequest): Promise<ReviewCapabilitiesV2>;
+	targetStatus?(request: NativeTargetStatusRequest): Promise<ReviewStatusV3>;
 	reclaim?(request: NativeReviewReclaimRequest): Promise<NativeReviewRecoveryResult>;
 	recover?(request: NativeReviewRecoverRequest): Promise<NativeReviewRecoveryResult>;
 	abandon?(request: NativeReviewAbandonRequest): Promise<NativeReviewRecoveryResult>;
 	quarantineLegacy?(request: NativeReviewLegacyQuarantineRequest): Promise<NativeReviewRecoveryResult>;
 	reconcileAuthority?(request: NativeReviewReconcileAuthorityRequest): Promise<NativeReviewRecoveryResult>;
 	repairLegacyAlias?(request: NativeReviewLegacyAliasRepairRequest): Promise<NativeReviewRecoveryResult>;
+	// Net-new negotiated operations (contract v2 only): `review.repair` is
+	// advertised in the v2 operation list; `capture-evidence` is the
+	// evidence-first correction lifecycle's collection step.
+	repair?(request: NativeReviewRepairRequest): Promise<ReviewRepairV2>;
+	captureEvidence?(request: NativeReviewCaptureEvidenceRequest): Promise<NativeReviewVerificationEvidenceV2>;
+	// Dark until a negotiated version reports the `mode` capability true
+	// (Design Decision #7, organic-rdd-parity). Plain versioned CLI operation,
+	// outside the negotiated review-integration protocol — same shape as
+	// reviewStatus/sddStatus/reclaim above.
+	reviewMode?(request: NativeReviewModeRequest): Promise<NativeReviewModeResult>;
+}
+
+export const NATIVE_REVIEW_MODE_OPERATION = {
+	STATUS: "status",
+	ENABLE: "enable",
+	DISABLE: "disable",
+} as const;
+export type NativeReviewModeOperation = (typeof NATIVE_REVIEW_MODE_OPERATION)[keyof typeof NATIVE_REVIEW_MODE_OPERATION];
+
+export const NATIVE_REVIEW_MODE_VALUE = {
+	UNSET: "",
+	ON: "on",
+	OFF: "off",
+} as const;
+export type NativeReviewModeValue = (typeof NATIVE_REVIEW_MODE_VALUE)[keyof typeof NATIVE_REVIEW_MODE_VALUE];
+
+export const NATIVE_REVIEW_MODE_SOURCE = {
+	DEFAULT: "default",
+	GLOBAL: "global",
+	CLONE_LOCAL: "clone_local",
+} as const;
+export type NativeReviewModeSource = (typeof NATIVE_REVIEW_MODE_SOURCE)[keyof typeof NATIVE_REVIEW_MODE_SOURCE];
+
+export const NATIVE_REVIEW_MODE_SCOPE = {
+	GLOBAL: "global",
+	CLONE: "clone",
+	BOTH: "both",
+} as const;
+export type NativeReviewModeScope = (typeof NATIVE_REVIEW_MODE_SCOPE)[keyof typeof NATIVE_REVIEW_MODE_SCOPE];
+
+export interface NativeReviewModeRequest {
+	cwd: string;
+	operation: NativeReviewModeOperation;
+	signal?: AbortSignal;
+}
+
+export interface NativeReviewModeStatus {
+	global: NativeReviewModeValue;
+	cloneLocal: NativeReviewModeValue;
+	effective: "on" | "off";
+	source: NativeReviewModeSource;
+	revision?: string;
+}
+
+export interface NativeReviewModeResult {
+	operation: NativeReviewModeOperation;
+	scope: NativeReviewModeScope;
+	status: NativeReviewModeStatus;
+}
+
+// Exact-match tolerated-stderr allowlist for START only, gated on the `mode`
+// capability being true (Design Decision #6, organic-rdd-parity). Byte-exact
+// against gentle-ai's headless notice (internal/cli/review_mode.go
+// reviewConsentSkippedNotice) written when the switch is on but no interactive
+// terminal answered the one-time consent question — which is always true when
+// Pi spawns gentle-ai without a TTY. Any other text still fails closed as
+// UNEXPECTED_STDERR.
+// Each entry is one whole line gentle-ai may write to the console stream while
+// still succeeding. The provenance line rides with the skip notice whenever the
+// resolved mode source is `default`, so a headless START legitimately emits two
+// lines; they are separate Fprintln calls, never one joined string.
+export const REVIEW_CONSENT_NOTICES = Object.freeze([
+	"Gentle AI reviewed this change without asking, because this session has no terminal to answer on. Run 'gentle-ai review mode disable' to turn reviews off, or 'gentle-ai review mode status' to see the current setting.",
+	"Reviews are on by default; this was never explicitly chosen. Run 'gentle-ai review mode enable' to make reviews an explicit choice, or 'gentle-ai review mode disable' to turn them off.",
+	"Gentle AI could not read an answer, so it reviewed this change and will ask again next time.",
+	"Gentle AI did not recognize that answer, so it reviewed this change and will ask again next time.",
+	"Review skipped for this candidate at your request. It will be offered again on the next change.",
+]);
+
+// Every non-empty line must be allowlisted. Matching the whole stderr blob as
+// one string only worked while exactly one notice could appear; the moment a
+// second legitimate line joined it, an otherwise successful START was reported
+// as unexpected-stderr.
+function stderrIsTolerated(stderr: string, tolerated: readonly string[]): boolean {
+	const lines = stderr.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+	return lines.length > 0 && lines.every((line) => tolerated.includes(line));
 }
 
 export const NATIVE_REVIEW_RECOVER_DISPOSITION = ["scope_changed", "invalidated", "escalated"] as const;
@@ -196,9 +291,88 @@ export interface NativeReviewLegacyAliasRepairRequest {
 /** Raw audited native record; Pi relays it verbatim and never reinterprets it. */
 export interface NativeReviewRecoveryResult { record: Record<string, unknown>; }
 
-export interface NativeStartRequest { cwd: string; baseRef?: string; committedOnly?: boolean; lineageId?: string; policyPath?: string; focus?: string; signal?: AbortSignal; }
+// Net-new negotiated `review.repair` (contract v2). `repair(request)` always
+// runs a `--mode preflight` first; only an eligible assessment is ever
+// executed, using the exact provider_inputs that assessment published — Pi's
+// own NATIVE_REVIEW_LEGACY_ALIAS_REPAIR constants are never a source, only a
+// disagreement check (Design Decision #6, migrate-review-integration-v2).
+export interface NativeReviewRepairRequest {
+	cwd: string;
+	actor: string;
+	reason: string;
+	maintainerAuthorization: string;
+	signal?: AbortSignal;
+}
+
+// `review capture-evidence` argv and response shape are pinned to a real
+// v2.2.2 review run (lineage review-b39d803b68a90767): exactly
+// --cwd/--lineage/--target/--expected-revision/--outcome/--input, no
+// --contract, and the `gentle-ai.review-verification-evidence/v2` record
+// returned directly (not wrapped in an operation/v2 envelope).
+export const NATIVE_REVIEW_CAPTURE_OUTCOME = ["passed", "verification_failed", "procedural_tooling_failed"] as const;
+export type NativeReviewCaptureOutcome = (typeof NATIVE_REVIEW_CAPTURE_OUTCOME)[number];
+
+// `capture-result` is an additive headless command, NOT a negotiated
+// repository operation: it accepts no --contract, and the provider's own
+// transition tokens already carry the repository context -- it takes that or
+// --cwd, never both. So Pi passes the tokens through verbatim and adds only
+// --input. Reconstructing them would mean re-deriving a lineage, revision,
+// target, lens slot, and subject hash the provider already issued.
+// Added for the v2 finalize transport. `capturedResults` asks the provider to
+// discover every manifest it already admitted; `resultArtifactFiles` hands them
+// over explicitly in lens order. Both replace the retired `--result`.
+export interface NativeReviewFinalizeCapturedResults {
+	readonly capturedResults?: boolean;
+	readonly resultArtifactFiles?: readonly string[];
+}
+
+export interface NativeReviewCaptureResultRequest {
+	readonly argumentTokens: readonly string[];
+	readonly resultDocument: string;
+	// Only for the compatibility path-manifest mode, when the tokens carry no
+	// repository context. Supplying both is refused by the provider.
+	readonly cwd?: string;
+	readonly signal?: AbortSignal;
+}
+
+export interface NativeReviewAdmittedResultManifest {
+	readonly schema: string;
+	readonly subjectHash: string;
+	readonly admissionDecision: string;
+	readonly lens?: string;
+	readonly path?: string;
+	readonly reference?: string;
+}
+
+export interface NativeReviewCaptureEvidenceRequest {
+	cwd: string;
+	lineageId: string;
+	targetIdentity: string;
+	expectedRevision: string;
+	outcome: NativeReviewCaptureOutcome;
+	evidenceDocument: string;
+	signal?: AbortSignal;
+}
+
+export interface NativeReviewVerificationEvidenceV2 {
+	schema: "gentle-ai.review-verification-evidence/v2";
+	version: 2;
+	lineageId: string;
+	authorityRevision: string;
+	targetIdentity: string;
+	candidateTree: string;
+	pathsDigest: string;
+	paths: readonly string[];
+	ledgerIds: readonly string[];
+	rawPayloadSha256: string;
+	rawPayloadBytes: number;
+	outcome: NativeReviewCaptureOutcome;
+	recordDigest: string;
+}
+
+export interface NativeStartRequest { cwd: string; baseRef?: string; committedOnly?: boolean; lineageId?: string; policyPath?: string; focus?: string; projection?: "workspace" | "staged"; signal?: AbortSignal; }
 export interface NativeFinalizeLensResult { lens: string; document: unknown; }
-export interface NativeFinalizeRequest {
+export interface NativeFinalizeRequest extends NativeReviewFinalizeCapturedResults {
 	cwd: string;
 	lineageId?: string;
 	resultFiles?: readonly string[];
@@ -318,9 +492,9 @@ export interface NativeReviewStatusResult {
 }
 export const NATIVE_START_ACTION = { CREATED: "created", RESUMED: "resumed", REUSE_RECEIPT: "reuse-receipt", BLOCKED_SCOPE_ACTION: "blocked-scope-action" } as const;
 export type NativeStartAction = (typeof NATIVE_START_ACTION)[keyof typeof NATIVE_START_ACTION];
-export interface NativeStartResult { lineageId: string; state: ReviewStartState; riskLevel: string; selectedLenses: readonly string[]; changedFiles: number; changedLines: number; correctionBudget: number; action: NativeStartAction; lensesRequired: boolean; riskReasons?: readonly Record<string, unknown>[]; raw?: Readonly<Record<string, unknown>>; }
-export interface NativeValidateResult { allowed: boolean; result: "allow" | "scope-changed" | "invalidated" | "escalated"; action: string; reason: string; gateContext: NativeGateContext; }
-export interface NativeFinalizeResult { lineageId: string; state: string; action: string; storeRevision: string; receiptPath?: string; }
+export interface NativeStartResult { lineageId: string; state: ReviewStartState; riskLevel: string; selectedLenses: readonly string[]; changedFiles: number; changedLines: number; correctionBudget: number; action: NativeStartAction; lensesRequired: boolean; riskReasons?: readonly Record<string, unknown>[]; raw?: Readonly<Record<string, unknown>>; riskEvidence?: readonly string[]; hint?: string; }
+export interface NativeValidateResult { allowed: boolean; result: "allow" | "scope-changed" | "invalidated" | "escalated"; action: string; reason: string; gateContext: NativeGateContext; delivery?: "disabled/unmanaged"; }
+export interface NativeFinalizeResult { lineageId: string; state: string; action: string; storeRevision: string; receiptPath?: string; validationRequest?: Readonly<Record<string, unknown>>; escalation?: string; }
 export interface NativeBindSddResult {
 	revision: string;
 	change: string;
@@ -342,6 +516,76 @@ export function isCanonicalProcessString(value: unknown): value is string {
 }
 
 const NATIVE_RISK_LEVEL = ["low", "medium", "high"] as const;
+
+// gentle-ai's negotiated `start/v2` envelope is a closed schema
+// (`additionalProperties: false`), so the two projections its plain sibling
+// carries cannot be added to it without a new contract version. Both are
+// projections of facts `start/v2` already reports as required fields, so a
+// negotiated caller reconstructs them here instead of ending up with a worse
+// recovery story than a plain one. These are Pi-side renderings of native
+// facts, never a claim that the CLI sent them: the `riskEvidence`/`hint`
+// capability rows stay dark for every version whose envelope omits them.
+//
+// Byte-for-byte mirrors of internal/cli/review_mode.go and review_facade.go.
+// `reviewConsentEvidencePhrases` is documented there as the single phrasing
+// source so its surfaces cannot drift, which makes this a second surface: an
+// unrecognized reason code therefore renders nothing rather than guessing, and
+// nativeRiskEvidencePhrases is pinned against a gentle-ai fixture in
+// tests/native-review-parity.test.ts so a vocabulary change fails loudly.
+const REVIEW_EMPTY_CANDIDATE_HINT =
+	"the candidate has no pending changes; already-committed work can be reviewed by rerunning review start with --base-ref <commit> naming the base to compare against";
+const REVIEW_MEDIUM_RISK_REASON = "this change is not purely passive documentation, so it gets one consolidated review.";
+const REVIEW_EMPTY_CONTENT_CODE = "empty_content";
+const REVIEW_RISK_SUBJECT_BY_CODE: Readonly<Record<string, string>> = Object.freeze({
+	service_token: "service credentials",
+	shell_source: "shell scripting",
+	process_boundary: "code that starts other processes",
+	process_scan_limit: "code that starts other processes",
+	executable_mode: "an executable permission change",
+	executable_change: "an executable change",
+	configuration_change: "a configuration change",
+});
+const REVIEW_RISK_SUBJECT_BY_SIGNAL: Readonly<Record<string, string>> = Object.freeze({
+	auth: "authentication",
+	update: "the update path",
+	security: "security",
+	payments: "payments",
+	data_exposure: "data exposure",
+	data_loss: "data loss",
+	permissions: "permissions",
+	shell_process: "shell or process execution",
+});
+// The Go signal switch has no empty default: every hot_path reason speaks, and
+// an unmapped signal degrades to this rather than dropping the path entirely.
+const REVIEW_RISK_UNKNOWN_SIGNAL_SUBJECT = "a sensitive area";
+
+function nativeRiskEvidenceSubject(reason: Record<string, unknown>): string {
+	const code = typeof reason.code === "string" ? reason.code : "";
+	if (code === "hot_path") {
+		const signal = typeof reason.signal === "string" ? reason.signal : "";
+		return REVIEW_RISK_SUBJECT_BY_SIGNAL[signal] ?? REVIEW_RISK_UNKNOWN_SIGNAL_SUBJECT;
+	}
+	return REVIEW_RISK_SUBJECT_BY_CODE[code] ?? "";
+}
+
+function nativeRiskEvidencePhrase(reason: Record<string, unknown>): string {
+	const path = typeof reason.path === "string" ? reason.path.trim() : "";
+	// An empty file is named first and described second. Every other subject
+	// reads "<what changed> in <path>", which for a file with no bytes would
+	// assert something about content that is not there.
+	if (reason.code === REVIEW_EMPTY_CONTENT_CODE) {
+		return path === "" ? "" : `${path}, an empty file whose type cannot be determined from its content`;
+	}
+	const subject = nativeRiskEvidenceSubject(reason);
+	if (subject === "" || path === "") return subject;
+	return `${subject} in ${path}`;
+}
+
+export function nativeRiskEvidencePhrases(riskLevel: string, reasons: readonly Record<string, unknown>[]): readonly string[] {
+	if (riskLevel !== "high" && riskLevel !== "medium") return [];
+	const phrases = reasons.map((reason) => nativeRiskEvidencePhrase(reason)).filter((phrase) => phrase !== "");
+	return riskLevel === "medium" ? [REVIEW_MEDIUM_RISK_REASON, ...phrases] : phrases;
+}
 const NATIVE_REVIEW_LENS = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
 const NATIVE_FINALIZE_STATE = ["reviewing", "correction_required", "validating", "approved", "escalated"] as const;
 const NATIVE_START_ACTION_VALUES = Object.values(NATIVE_START_ACTION);
@@ -350,17 +594,70 @@ const NATIVE_GATE = ["post-apply", "pre-commit", "pre-push", "pre-pr", "release"
 const NATIVE_SDD_NEXT_ACTION = ["apply", "verify", "remediate", "archive", "review", "resolve-review", "resolve-blockers", "sdd-new", "select-change", "propose", "spec", "design", "tasks"] as const;
 const NATIVE_SDD_POST_REVIEW_ACTION = ["verify", "archive"] as const;
 
+// Organic-parity columns (mode, riskEvidence, hint, delivery) stay false on
+// every shipped row, including "2.1.11". PI-2 adds the first capability-true
+// row (and bumps the triple pin) in one dedicated commit — never one without
+// the other. See Design Decision #1 (organic-rdd-parity).
+const ORGANIC_PARITY_DARK = { mode: false, riskEvidence: false, hint: false, delivery: false } as const;
+
 export const NATIVE_CLI_CONTRACTS = Object.freeze({
-	"2.1.4": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: false, inventory: false, reclaim: false, recover: false, abandon: false, quarantineLegacy: false, reconcileAuthority: false, repairLegacyAlias: false }),
-	"2.1.5": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: false, recover: false, abandon: false, quarantineLegacy: false, reconcileAuthority: false, repairLegacyAlias: false }),
-	"2.1.6": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: false, recover: false, abandon: false, quarantineLegacy: false, reconcileAuthority: false, repairLegacyAlias: false }),
-	"2.1.7": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: false, recover: false, abandon: false, quarantineLegacy: false, reconcileAuthority: false, repairLegacyAlias: false }),
-	"2.1.8": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: false, quarantineLegacy: false, reconcileAuthority: true, repairLegacyAlias: false }),
-	"2.1.9": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: false }),
-	"2.1.10": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true }),
-	"2.1.11": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true }),
+	"2.1.4": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: false, inventory: false, reclaim: false, recover: false, abandon: false, quarantineLegacy: false, reconcileAuthority: false, repairLegacyAlias: false, ...ORGANIC_PARITY_DARK }),
+	"2.1.5": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: false, recover: false, abandon: false, quarantineLegacy: false, reconcileAuthority: false, repairLegacyAlias: false, ...ORGANIC_PARITY_DARK }),
+	"2.1.6": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: false, recover: false, abandon: false, quarantineLegacy: false, reconcileAuthority: false, repairLegacyAlias: false, ...ORGANIC_PARITY_DARK }),
+	"2.1.7": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: false, recover: false, abandon: false, quarantineLegacy: false, reconcileAuthority: false, repairLegacyAlias: false, ...ORGANIC_PARITY_DARK }),
+	"2.1.8": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: false, quarantineLegacy: false, reconcileAuthority: true, repairLegacyAlias: false, ...ORGANIC_PARITY_DARK }),
+	"2.1.9": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: false, ...ORGANIC_PARITY_DARK }),
+	"2.1.10": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, ...ORGANIC_PARITY_DARK }),
+	"2.1.11": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, ...ORGANIC_PARITY_DARK }),
+	// First capability-true row, paired with the triple pin bump in this same
+	// commit as Design Decision #1 requires.
+	//
+	// Only two of the four organic-parity columns are lit, because a capability
+	// row is a promise and these are the two whose data was proven to reach the
+	// negotiated path Pi actually consumes:
+	//
+	//   mode      `gentle-ai review mode status` answers the review-mode/v1
+	//             envelope directly.
+	//   delivery  the gate result carries `delivery` ("disabled/unmanaged" when
+	//             the kill switch is off), verified against v2.2.0.
+	//
+	// riskEvidence and hint stay dark deliberately. Both exist in gentle-ai
+	// v2.2.0 but only on the PLAIN start envelope; the negotiated
+	// `review-integration.start/v2` that NativeReviewCliV216 decodes carries
+	// `risk_reasons` instead of `risk_evidence` and omits `hint` entirely.
+	// Lighting them would advertise data that cannot arrive. Closing that gap
+	// needs the negotiated start envelope extended upstream, which moves a
+	// byte-pinned fixture and therefore belongs to a gentle-ai release, not to
+	// a Pi capability flip.
+	"2.2.0": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
+	// 2.2.1 repeats 2.2.0 because the wire did not move for the lane Pi speaks.
+	// v2.2.1 advertises capabilities/v1.5 (protocol minor 5) on
+	// review-integration/v1, but the negotiated start envelope is still the
+	// closed `start/v2`, so riskEvidence and hint stay dark for the same reason
+	// they are dark on 2.2.0. The release does publish a second contract,
+	// review-integration/v2, whose `start/v3` carries base/candidate trees --
+	// but Pi does not negotiate it yet, and a row must describe the lane in use.
+	"2.2.1": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
+	// 2.2.2 repeats 2.2.1 for the same reason, confirmed against the released
+	// v2.2.2 binary rather than assumed: on review-integration/v1 it still
+	// advertises capabilities/v1.5 and the negotiated start envelope is still
+	// the closed `start/v2`, so riskEvidence and hint still cannot arrive.
+	"2.2.2": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
 });
 type NativeCliCapability = keyof (typeof NATIVE_CLI_CONTRACTS)[keyof typeof NATIVE_CLI_CONTRACTS];
+
+// Testing-only capability overlay: lets tests exercise mode/riskEvidence/hint/
+// delivery decode paths under a synthetic version key without ever making a
+// shipped row (including "2.1.11") capability-true. Production code never
+// calls the setter, so this is inert outside test files.
+const nativeCliContractsTestingOverlay = new Map<string, Record<NativeCliCapability, boolean>>();
+export function setNativeCliContractForTesting(version: string, contract: Record<NativeCliCapability, boolean> | undefined): void {
+	if (contract === undefined) nativeCliContractsTestingOverlay.delete(version);
+	else nativeCliContractsTestingOverlay.set(version, contract);
+}
+function resolvedNativeCliContract(version: string): Record<NativeCliCapability, boolean> | undefined {
+	return nativeCliContractsTestingOverlay.get(version) ?? (NATIVE_CLI_CONTRACTS as Record<string, Record<NativeCliCapability, boolean> | undefined>)[version];
+}
 
 export interface NativeReviewStructuredDenial {
 	schema: "gentle-ai.review-gate-result/v1";
@@ -536,6 +833,49 @@ function decodeLegacyReconcileAudit(value: unknown): NativeReviewRecoveryResult 
 	for (const field of ["predecessor_lineage", "successor_lineage", "outcome"]) requiredString(record[field]);
 	return { record };
 }
+function decodeNativeReviewVerificationEvidence(value: unknown): NativeReviewVerificationEvidenceV2 {
+	const body = exactObject(value, ["schema", "version", "lineage_id", "authority_revision", "target_identity", "candidate_tree", "paths_digest", "paths", "ledger_ids", "raw_payload_sha256", "raw_payload_bytes", "outcome", "record_digest"]);
+	if (body.schema !== "gentle-ai.review-verification-evidence/v2") throw new Error("wrong verification evidence schema");
+	return {
+		schema: "gentle-ai.review-verification-evidence/v2",
+		// verification-evidence.schema.json pins `version` to {"const": 2} -- the
+		// NUMBER two, not the string. It was written as a string from a handoff
+		// that listed the observed field NAMES without their types.
+		version: (() => { if (body.version !== 2) throw new Error(`native verification evidence version must be the number 2, received ${JSON.stringify(body.version)}`); return 2 as const; })(),
+		lineageId: requiredString(body.lineage_id),
+		authorityRevision: requiredString(body.authority_revision),
+		targetIdentity: requiredString(body.target_identity),
+		candidateTree: requiredString(body.candidate_tree),
+		pathsDigest: requiredString(body.paths_digest),
+		paths: stringArray(body.paths),
+		// The schema requires ledger_ids to be an array, but v2.2.2 emits null when
+		// there are none. Tolerated deliberately: refusing here would reject a
+		// response the provider actually sends, and the provider violating its own
+		// published schema is its defect to fix, not a reason to break the client.
+		ledgerIds: body.ledger_ids === null || body.ledger_ids === undefined ? [] : stringArray(body.ledger_ids),
+		rawPayloadSha256: requiredString(body.raw_payload_sha256),
+		rawPayloadBytes: nonNegativeInteger(body.raw_payload_bytes),
+		outcome: enumString(body.outcome, NATIVE_REVIEW_CAPTURE_OUTCOME) as NativeReviewCaptureOutcome,
+		recordDigest: requiredString(body.record_digest),
+	};
+}
+// Unimplemented next_transition.execute.operation values must never reach
+// argv synthesis. Checked against the raw pre-decode body so an operation
+// gentle-pi does not implement (e.g. a future `dispose-result`) fails with a
+// named, typed refusal instead of a generic schema-incompatible error, and
+// before any client ever tries to build an invocation for it (Design
+// Decision #6, migrate-review-integration-v2).
+const NATIVE_REVIEW_SUPPORTED_TRANSITION_OPERATIONS = new Set(["review.start", "review.finalize", "review.recover", "review.repair", "review.validate"]);
+function assertSupportedNextTransitionOperation(body: Record<string, unknown>): void {
+	const nextTransition = body.next_transition;
+	if (typeof nextTransition !== "object" || nextTransition === null || Array.isArray(nextTransition)) return;
+	const execute = (nextTransition as Record<string, unknown>).execute;
+	if (typeof execute !== "object" || execute === null || Array.isArray(execute)) return;
+	const operation = (execute as Record<string, unknown>).operation;
+	if (typeof operation === "string" && !NATIVE_REVIEW_SUPPORTED_TRANSITION_OPERATIONS.has(operation)) {
+		throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNSUPPORTED_TRANSITION_OPERATION, NATIVE_REVIEW_OPERATION.STATUS, false, `unsupported-transition-operation: gentle-pi does not implement the next_transition operation "${operation}"; refusing rather than synthesizing an invocation for it`);
+	}
+}
 function decode<T>(operation: NativeReviewOperation, mutating: boolean, callback: () => T, diagnostics = nativeProcessDiagnostics(operation, NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE)): T {
 	try { return callback(); } catch (error) { if (error instanceof NativeReviewCliError) throw error; throw new NativeReviewCliError(NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE, operation, true, mutating, "native response is schema incompatible", { ...diagnostics, error_code: NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE }); }
 }
@@ -634,6 +974,28 @@ function decodeNativeReviewStatusDiagnostic(value: unknown): NativeReviewAuthori
 	const diagnostic = exactObject(value, ["path", "problem"]);
 	return { path: requiredString(diagnostic.path), problem: requiredString(diagnostic.problem) };
 }
+function decodeNativeReviewModeStatus(value: unknown): NativeReviewModeStatus {
+	const status = exactObject(value, ["schema", "global", "clone_local", "effective", "source"], ["revision"]);
+	if (status.schema !== "gentle-ai.rdd-mode-status/v1") throw new Error("wrong review mode status schema");
+	return {
+		global: enumString(status.global, Object.values(NATIVE_REVIEW_MODE_VALUE)) as NativeReviewModeValue,
+		cloneLocal: enumString(status.clone_local, Object.values(NATIVE_REVIEW_MODE_VALUE)) as NativeReviewModeValue,
+		effective: enumString(status.effective, ["on", "off"]) as "on" | "off",
+		source: enumString(status.source, Object.values(NATIVE_REVIEW_MODE_SOURCE)) as NativeReviewModeSource,
+		...(status.revision === undefined ? {} : { revision: requiredString(status.revision) }),
+	};
+}
+
+function decodeNativeReviewMode(value: unknown, expectedOperation: NativeReviewModeOperation): NativeReviewModeResult {
+	const body = exactObject(value, ["schema", "operation", "scope", "status"]);
+	if (body.schema !== "gentle-ai.review-mode/v1" || body.operation !== expectedOperation) throw new Error("wrong review mode discriminator");
+	return {
+		operation: expectedOperation,
+		scope: enumString(body.scope, Object.values(NATIVE_REVIEW_MODE_SCOPE)) as NativeReviewModeScope,
+		status: decodeNativeReviewModeStatus(body.status),
+	};
+}
+
 function decodeNativeReviewStatus(value: unknown): NativeReviewStatusResult {
 	const body = exactObject(value, ["schema", "operation", "repository", "complete", "authoritative", "status", "entries", "locks", "diagnostics"]);
 	if (body.schema !== "gentle-ai.review-authority-status/v1" || body.operation !== "review/status") throw new Error("wrong review status discriminator");
@@ -790,7 +1152,12 @@ export class NativeReviewCliV214 {
 		}
 	}
 
-	private async execute(operation: NativeReviewOperation, cwd: string, arguments_: readonly string[], mutating: boolean, signal?: AbortSignal): Promise<NativeJsonExecution> {
+	// toleratedStderr is an exact-match, operation-scoped allowlist (Design
+	// Decision #6, organic-rdd-parity): only START passes a non-empty list, and
+	// only when the negotiated version's `mode` capability is true. A near-miss,
+	// prefixed, or multi-line stderr is never tolerated — only byte-exact
+	// membership in the frozen set.
+	private async execute(operation: NativeReviewOperation, cwd: string, arguments_: readonly string[], mutating: boolean, signal?: AbortSignal, toleratedStderr: readonly string[] = []): Promise<NativeJsonExecution> {
 		let result: ExecFileResult;
 		try { result = await this.adapter({ file: this.executablePath(operation, mutating), arguments: arguments_, cwd, timeoutMs: mutating ? undefined : this.timeoutMs, maxBufferBytes: this.maxBufferBytes, signal }); }
 		catch (error) {
@@ -804,8 +1171,9 @@ export class NativeReviewCliV214 {
 		if (result.signal) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SIGNAL, operation, mutating, "native process was signalled", result);
 		const structuredValidateDenial = operation === NATIVE_REVIEW_OPERATION.VALIDATE && result.exitCode === 1;
 		const maintenancePartialFailure = [NATIVE_REVIEW_OPERATION.ABANDON, NATIVE_REVIEW_OPERATION.QUARANTINE_LEGACY, NATIVE_REVIEW_OPERATION.RECONCILE_AUTHORITY, NATIVE_REVIEW_OPERATION.REPAIR_LEGACY_ALIAS].includes(operation) && result.exitCode !== 0;
+		const toleratedNotice = stderrIsTolerated(result.stderr, toleratedStderr);
 		if (result.exitCode !== 0 && !structuredValidateDenial && !maintenancePartialFailure) throw nativeError(NATIVE_REVIEW_ERROR_CODE.NON_ZERO, operation, mutating, "native process failed", result);
-		if (result.stderr.trim().length > 0 && !structuredValidateDenial && !maintenancePartialFailure) throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNEXPECTED_STDERR, operation, mutating, "native process wrote stderr", result);
+		if (result.stderr.trim().length > 0 && !structuredValidateDenial && !maintenancePartialFailure && !toleratedNotice) throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNEXPECTED_STDERR, operation, mutating, "native process wrote stderr", result);
 		return { body: parseJson(result.stdout, operation, mutating, diagnostics), exitCode: result.exitCode, process: result };
 	}
 
@@ -822,8 +1190,8 @@ export class NativeReviewCliV214 {
 		if (result.signal) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SIGNAL, NATIVE_REVIEW_OPERATION.VERSION, false, "version process was signalled", result);
 		if (result.exitCode !== 0) throw nativeError(NATIVE_REVIEW_ERROR_CODE.NON_ZERO, NATIVE_REVIEW_OPERATION.VERSION, false, "version process failed", result);
 		const version = /^gentle-ai ([0-9]+\.[0-9]+\.[0-9]+)\n$/.exec(result.stdout.replace(/\r\n$/, "\n"))?.[1];
-		const contract = version === undefined ? undefined : NATIVE_CLI_CONTRACTS[version as keyof typeof NATIVE_CLI_CONTRACTS];
-		if (result.stderr.trim().length > 0 || contract === undefined || capabilities.some((capability) => !contract[capability])) throw nativeError(NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VERSION, false, "native gentle-ai lacks required capabilities");
+		const contract = version === undefined ? undefined : resolvedNativeCliContract(version);
+		if (result.stderr.trim().length > 0 || contract === undefined || capabilities.some((capability) => !contract[capability])) throw nativeError(NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VERSION, false, `native gentle-ai lacks required capabilities: expected v${GENTLE_AI_VERSION}, found v${version ?? "unparseable"}`);
 		return version as keyof typeof NATIVE_CLI_CONTRACTS;
 	}
 
@@ -832,10 +1200,18 @@ export class NativeReviewCliV214 {
 		if (request.committedOnly !== undefined && typeof request.committedOnly !== "boolean") throw new TypeError("Native START committedOnly must be a boolean when supplied");
 		if (request.baseRef !== undefined && request.committedOnly !== true) throw new TypeError("Native START baseRef requires explicit committedOnly acknowledgement");
 		if (request.baseRef === undefined && request.committedOnly !== undefined) throw new TypeError("Native START committedOnly requires an explicit baseRef");
-		await this.verifyVersion(request.cwd, request.signal, ["start"]);
-		const { body: result } = await this.execute(NATIVE_REVIEW_OPERATION.START, request.cwd, ["review", "start", "--cwd", request.cwd, ...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef, "--committed-only"]), ...(request.lineageId ? ["--lineage", request.lineageId] : []), ...(request.policyPath ? ["--policy", request.policyPath] : []), ...(request.focus ? ["--focus", request.focus] : [])], true, request.signal);
+		const version = await this.verifyVersion(request.cwd, request.signal, ["start"]);
+		const toleratedStderr = resolvedNativeCliContract(version)?.mode === true ? REVIEW_CONSENT_NOTICES : [];
+		const { body: result } = await this.execute(NATIVE_REVIEW_OPERATION.START, request.cwd, ["review", "start", "--cwd", request.cwd, ...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef, "--committed-only"]), ...(request.lineageId ? ["--lineage", request.lineageId] : []), ...(request.policyPath ? ["--policy", request.policyPath] : []), ...(request.focus ? ["--focus", request.focus] : [])], true, request.signal, toleratedStderr);
 		return decode(NATIVE_REVIEW_OPERATION.START, true, () => {
-			const body = exactObject(result, ["operation", "lineage_id", "state", "risk_level", "selected_lenses", "changed_files", "changed_lines", "correction_budget", "action", "lenses_required", "projection"]);
+			// `target_identity` and `lens_bindings` are real, unconditionally-present
+			// fields on gentle-ai's plain (non-negotiated) `review start` JSON output
+			// (confirmed against the pinned v2.1.11 Go source and live against a dev
+			// build during Phase 6 dev-binary ground-truthing, organic-rdd-parity) —
+			// tolerated here but not consumed: Pi's negotiated-contract client
+			// (NativeReviewCliV216, the production default) carries lineage/target
+			// identity through its own `review-integration/v1` decoder instead.
+			const body = exactObject(result, ["operation", "lineage_id", "state", "risk_level", "selected_lenses", "changed_files", "changed_lines", "correction_budget", "action", "lenses_required", "projection"], ["risk_evidence", "hint", "target_identity", "lens_bindings"]);
 			if (body.operation !== "review/start" || body.projection !== "workspace" || !(NATIVE_FINALIZE_STATE as readonly string[]).includes(stringValue(body.state))) throw new Error("wrong start discriminator");
 			const lineageId = requiredString(body.lineage_id);
 			if (request.lineageId && lineageId !== request.lineageId) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native start lineage mismatch");
@@ -849,7 +1225,11 @@ export class NativeReviewCliV214 {
 				!hasCanonicalSelectedLenses(riskLevel, selectedLenses) ||
 				!hasValidLensesRequired(action, body.state as string, riskLevel, lensesRequired)
 			) throw new Error("unknown or contradictory start enum");
-			return { lineageId, state: body.state as NativeStartResult["state"], riskLevel, selectedLenses, changedFiles: nonNegativeInteger(body.changed_files), changedLines: nonNegativeInteger(body.changed_lines), correctionBudget: nonNegativeInteger(body.correction_budget), action, lensesRequired };
+			return {
+				lineageId, state: body.state as NativeStartResult["state"], riskLevel, selectedLenses, changedFiles: nonNegativeInteger(body.changed_files), changedLines: nonNegativeInteger(body.changed_lines), correctionBudget: nonNegativeInteger(body.correction_budget), action, lensesRequired,
+				...(body.risk_evidence === undefined ? {} : { riskEvidence: stringArray(body.risk_evidence) }),
+				...(body.hint === undefined ? {} : { hint: requiredString(body.hint) }),
+			};
 		});
 	}
 
@@ -894,18 +1274,31 @@ export class NativeReviewCliV214 {
 		await this.verifyVersion(request.cwd, request.signal, ["validate"]);
 		const execution = await this.execute(NATIVE_REVIEW_OPERATION.VALIDATE, request.cwd, ["review", "validate", "--gate", request.gate, "--cwd", request.cwd, ...(request.lineageId ? ["--lineage", request.lineageId] : []), ...(request.flags ?? [])], false, request.signal);
 		return decode(NATIVE_REVIEW_OPERATION.VALIDATE, false, () => {
-			const body = exactObject(execution.body, ["schema", "result", "allowed", "action", "reason", "context"]);
+			const body = exactObject(execution.body, ["schema", "result", "allowed", "action", "reason", "context"], ["delivery"]);
 			const gateResult = enumString(body.result, NATIVE_GATE_RESULT) as NativeValidateResult["result"];
 			const action = sanitizeNativeDiagnosticText(requiredString(body.action), NATIVE_REVIEW_DENIAL_TEXT_LIMIT);
 			const reason = sanitizeNativeDiagnosticText(requiredString(body.reason), NATIVE_REVIEW_DENIAL_TEXT_LIMIT);
-			const expectedAction = { allow: "continue", "scope-changed": "create-new-lineage", invalidated: "explicit-maintainer-action", escalated: "stop" }[gateResult];
-			const expectedExitCode = gateResult === "allow" ? 0 : 1;
-			if (body.schema !== "gentle-ai.review-gate-result/v1" || typeof body.allowed !== "boolean" || body.allowed !== (gateResult === "allow") || action !== expectedAction || !isCanonicalProcessString(action) || !isCanonicalProcessString(reason) || execution.exitCode !== expectedExitCode) throw new Error("wrong validate discriminator");
+			// `delivery` (Design Decision #9, organic-rdd-parity) is an alternate
+			// discriminator: when present it must be the single literal
+			// "disabled/unmanaged" (gentle-ai's RDDDeliveryDisabledUnmanaged — the
+			// kill switch is off and no receipt governs the candidate), paired
+			// exactly with result:invalidated, allowed:false, action:repository-policy,
+			// and exit 0 — never the strict continue/create-new-lineage/
+			// explicit-maintainer-action/stop pairing used when delivery is absent.
+			const delivery = body.delivery === undefined ? undefined : (enumString(body.delivery, ["disabled/unmanaged"]) as NativeValidateResult["delivery"]);
+			if (body.schema !== "gentle-ai.review-gate-result/v1" || !isCanonicalProcessString(action) || !isCanonicalProcessString(reason)) throw new Error("wrong validate discriminator");
+			if (delivery !== undefined) {
+				if (gateResult !== "invalidated" || body.allowed !== false || action !== "repository-policy" || execution.exitCode !== 0) throw new Error("wrong validate delivery discriminator");
+			} else {
+				const expectedAction = { allow: "continue", "scope-changed": "create-new-lineage", invalidated: "explicit-maintainer-action", escalated: "stop" }[gateResult];
+				const expectedExitCode = gateResult === "allow" ? 0 : 1;
+				if (typeof body.allowed !== "boolean" || body.allowed !== (gateResult === "allow") || action !== expectedAction || execution.exitCode !== expectedExitCode) throw new Error("wrong validate discriminator");
+			}
 			const gateContext = decodeGateContext(body.context);
 			const returnedGate = gateContext.raw.gate;
 			if (returnedGate !== request.gate && (gateResult === "allow" || returnedGate !== "")) throw new Error("native gate context does not match the requested gate");
 			if (request.lineageId && returnedGate !== "" && gateContext.lineageId !== request.lineageId) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.VALIDATE, false, "native gate lineage mismatch");
-			return { allowed: body.allowed, result: gateResult, action, reason, gateContext };
+			return { allowed: body.allowed as boolean, result: gateResult, action, reason, gateContext, ...(delivery === undefined ? {} : { delivery }) };
 		});
 	}
 
@@ -938,6 +1331,24 @@ export class NativeReviewCliV214 {
 		return status;
 	}
 
+	// Dark until the negotiated version reports `mode: true` (Design Decision
+	// #7, organic-rdd-parity). `status` is read-only (no timeout suppression,
+	// exact fixed argv per the design's data flow); `enable`/`disable` mutate
+	// and always pass `--scope clone` so Pi's own kill-switch command surface
+	// never mutates the operator's global gentle-ai state across other clones.
+	async reviewMode(request: NativeReviewModeRequest): Promise<NativeReviewModeResult> {
+		await this.verifyVersion(request.cwd, request.signal, ["mode"]);
+		const mutating = request.operation !== NATIVE_REVIEW_MODE_OPERATION.STATUS;
+		const { body } = await this.execute(
+			NATIVE_REVIEW_OPERATION.MODE,
+			request.cwd,
+			["review", "mode", request.operation, "--cwd", request.cwd, ...(mutating ? ["--scope", "clone"] : []), "--json"],
+			mutating,
+			request.signal,
+		);
+		return decode(NATIVE_REVIEW_OPERATION.MODE, mutating, () => decodeNativeReviewMode(body, request.operation));
+	}
+
 	async sddStatus(request: NativeSddStatusRequest): Promise<NativeSddStatusResult> {
 		await this.verifyVersion(request.cwd, request.signal, ["sddStatus"]);
 		const { body: result } = await this.execute(NATIVE_REVIEW_OPERATION.SDD_STATUS, request.cwd, ["sdd-status", request.change, "--cwd", request.cwd, "--json", "--instructions"], false, request.signal);
@@ -966,9 +1377,16 @@ export class NativeReviewCliV214 {
 			nonNegativeInteger(remediation.generation); nonNegativeInteger(remediation.fixBatch);
 			if (remediation.correctionBudget !== undefined) nonNegativeInteger(remediation.correctionBudget);
 			let reviewGateResult: string | undefined;
+			let reviewGateDelivery: string | undefined;
 			if (body.reviewGate !== undefined) {
-				const gate = exactObject(body.reviewGate, ["result", "reason"]);
+				// `delivery` (present since 09e4b14c, gentle-ai v2.2.0+) is emitted
+				// when the kill switch is off: gentle-ai's status struct carries
+				// `Delivery` with `json:"delivery,omitempty"`, so an exact-key decode
+				// without it rejects that payload outright. Pre-existing bug fix
+				// (Phase 13.13, migrate-review-integration-v2).
+				const gate = exactObject(body.reviewGate, ["result", "reason"], ["delivery"]);
 				reviewGateResult = enumString(gate.result, NATIVE_GATE_RESULT); requiredString(gate.reason);
+				if (gate.delivery !== undefined) reviewGateDelivery = enumString(gate.delivery, ["disabled/unmanaged"]);
 			}
 			if (body.reviewTransaction !== undefined) decodeReviewTransaction(body.reviewTransaction);
 			if (body.phaseInstructions !== undefined) {
@@ -986,7 +1404,13 @@ export class NativeReviewCliV214 {
 				ready:
 					(NATIVE_SDD_POST_REVIEW_ACTION as readonly string[]).includes(nextRecommended) &&
 					blockedReasons.length === 0 &&
-					reviewGateResult === "allow",
+					// With the kill switch off, the gate result can never become
+					// "allow" (delivery follows ordinary repository policy instead) —
+					// gated only on `result === "allow"` this deadlocked `ready`
+					// forever, the same deadlock gentle-ai fixed upstream in 2c18fa10.
+					// `disabled/unmanaged` delivery is the legitimate non-blocking
+					// terminal state and must also unblock readiness.
+					(reviewGateResult === "allow" || reviewGateDelivery === "disabled/unmanaged"),
 			};
 		});
 	}
@@ -1179,11 +1603,11 @@ export function nativeReviewLegacyAliasRepairAuthorization(request: Pick<NativeR
 }
 
 export class NativeReviewIntegrationError extends Error {
-	readonly failureEnvelope: ReviewFailureV1;
-	readonly mutationOutcome: ReviewFailureV1["mutationOutcome"];
+	readonly failureEnvelope: ReviewFailureV2;
+	readonly mutationOutcome: ReviewFailureV2["mutationOutcome"];
 	readonly nextAction: string;
 	readonly launchAttempted = true;
-	constructor(failure: ReviewFailureV1) {
+	constructor(failure: ReviewFailureV2) {
 		super(failure.message);
 		this.name = "NativeReviewIntegrationError";
 		this.failureEnvelope = failure;
@@ -1192,8 +1616,22 @@ export class NativeReviewIntegrationError extends Error {
 	}
 }
 
+// Raised when negotiated START answers `consent/v2` (action:
+// "consent_required") instead of `start/v3`. Pi stays headless and never
+// sends `--consent relay`, so this is a blocking question surfaced to the
+// caller rather than answered on its behalf.
+export class NativeReviewConsentRequiredError extends Error {
+	readonly consent: ReviewConsentV2;
+	readonly launchAttempted = true;
+	constructor(consent: ReviewConsentV2) {
+		super(consent.headline);
+		this.name = "NativeReviewConsentRequiredError";
+		this.consent = consent;
+	}
+}
+
 type NativeExecutableDigestResolver = (path: string) => string;
-const nativeCapabilitiesByDigest = new Map<string, Promise<ReviewCapabilitiesV1>>();
+const nativeCapabilitiesByDigest = new Map<string, Promise<ReviewCapabilitiesV2>>();
 
 export function clearNativeReviewCapabilitiesCacheForTesting(): void {
 	nativeCapabilitiesByDigest.clear();
@@ -1215,6 +1653,31 @@ function defaultExecutableDigest(path: string): string {
 interface NegotiatedExecution {
 	body: Record<string, unknown>;
 	exitCode: number;
+}
+
+function decodeNativeAdmittedResultManifest(value: unknown): NativeReviewAdmittedResultManifest {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("native capture-result manifest must be an object");
+	const body = value as Record<string, unknown>;
+	const text = (key: string): string => {
+		const found = body[key];
+		if (typeof found !== "string" || found.trim() !== found || found.length === 0) throw new TypeError(`native capture-result manifest ${key} must be a non-empty trimmed string`);
+		return found;
+	};
+	const schema = text("schema");
+	if (schema !== "gentle-ai.review-result-artifact/v2") throw new TypeError(`native capture-result manifest schema must be gentle-ai.review-result-artifact/v2, received ${schema}`);
+	const admission = text("admission_decision");
+	if (admission !== "completed") throw new TypeError(`native capture-result manifest admission_decision must be completed, received ${admission}`);
+	// Exactly one locator: a provider-owned path OR an opaque reference. Both or
+	// neither means the manifest cannot be handed to FINALIZE.
+	const hasPath = body.path !== undefined, hasReference = body.reference !== undefined;
+	if (hasPath === hasReference) throw new TypeError("native capture-result manifest must carry exactly one of path or reference");
+	return Object.freeze({
+		schema,
+		subjectHash: text("subject_hash"),
+		admissionDecision: admission,
+		...(body.lens === undefined ? {} : { lens: text("lens") }),
+		...(hasPath ? { path: text("path") } : { reference: text("reference") }),
+	});
 }
 
 export class NativeReviewCliV216 implements NativeReviewCli {
@@ -1270,6 +1733,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		mutating: boolean,
 		signal: AbortSignal | undefined,
 		path: string,
+		toleratedStderr: readonly string[] = [],
 	): Promise<NegotiatedExecution> {
 		let result: ExecFileResult;
 		try {
@@ -1285,17 +1749,17 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		const body = parseJson(result.stdout, operation, mutating, diagnostics);
 		if (result.exitCode !== 0) {
 			try {
-				throw new NativeReviewIntegrationError(decodeReviewFailureV1(body));
+				throw new NativeReviewIntegrationError(decodeReviewFailureV2(body));
 			} catch (error) {
 				if (error instanceof NativeReviewIntegrationError) throw error;
 				throw nativeError(NATIVE_REVIEW_ERROR_CODE.NON_ZERO, operation, mutating, "native negotiated operation failed without a valid failure envelope", result);
 			}
 		}
-		if (result.stderr.trim().length > 0) throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNEXPECTED_STDERR, operation, mutating, "native process wrote stderr", result);
+		if (result.stderr.trim().length > 0 && !stderrIsTolerated(result.stderr, toleratedStderr)) throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNEXPECTED_STDERR, operation, mutating, "native process wrote stderr", result);
 		return { body, exitCode: result.exitCode };
 	}
 
-	async capabilities(request: NativeCapabilitiesRequest = {}): Promise<ReviewCapabilitiesV1> {
+	async capabilities(request: NativeCapabilitiesRequest = {}): Promise<ReviewCapabilitiesV2> {
 		const executable = this.verifiedExecutable(NATIVE_REVIEW_OPERATION.VERSION, false);
 		const cached = nativeCapabilitiesByDigest.get(executable.digest);
 		if (cached !== undefined) return cached;
@@ -1308,7 +1772,22 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 				request.signal,
 				executable.path,
 			);
-			return decode(NATIVE_REVIEW_OPERATION.VERSION, false, () => decodeReviewCapabilitiesV1(execution.body, executable.digest));
+			// Two distinct half-upgraded-install failures (Design Decision #7,
+			// migrate-review-integration-v2): a decode failure means the installed
+			// runtime cannot even answer this shape (an older `.gentle-ai/` payload
+			// that still speaks `unsupported_contract` for v2); a successful decode
+			// whose package.version disagrees with the pin names both versions.
+			let capabilities: ReviewCapabilitiesV2;
+			try {
+				capabilities = decodeReviewCapabilitiesV2(execution.body, executable.digest);
+			} catch (error) {
+				if (error instanceof NativeReviewCliError) throw error;
+				throw nativeError(NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VERSION, false, `expected gentle-ai v${GENTLE_AI_VERSION}; the installed runtime is incompatible — reinstall gentle-pi`);
+			}
+			if (capabilities.packageVersion !== GENTLE_AI_VERSION) {
+				throw nativeError(NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VERSION, false, `expected gentle-ai v${GENTLE_AI_VERSION}, provider reported v${capabilities.packageVersion}`);
+			}
+			return capabilities;
 		})();
 		nativeCapabilitiesByDigest.set(executable.digest, negotiation);
 		try {
@@ -1325,6 +1804,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		arguments_: readonly string[],
 		mutating: boolean,
 		signal?: AbortSignal,
+		toleratedStderr: readonly string[] = [],
 	): Promise<NegotiatedExecution> {
 		const executable = this.verifiedExecutable(operation, mutating);
 		await this.capabilities({ cwd, ...(signal === undefined ? {} : { signal }) });
@@ -1332,21 +1812,47 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		if (afterNegotiation.path !== executable.path || afterNegotiation.digest !== executable.digest) {
 			throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, operation, mutating, "native executable was replaced after capability negotiation", undefined, false);
 		}
-		return this.invoke(operation, cwd, arguments_, mutating, signal, executable.path);
+		return this.invoke(operation, cwd, arguments_, mutating, signal, executable.path, toleratedStderr);
 	}
 
 	async start(request: NativeStartRequest): Promise<NativeStartResult> {
 		if (request.baseRef !== undefined && !isCanonicalProcessString(request.baseRef)) throw new TypeError("Native START baseRef must be a non-empty, trimmed, NUL-free string");
 		if (request.baseRef !== undefined && request.committedOnly !== true) throw new TypeError("Native START baseRef requires explicit committedOnly acknowledgement");
 		if (request.baseRef === undefined && request.committedOnly !== undefined) throw new TypeError("Native START committedOnly requires an explicit baseRef");
+		// A negotiated START requires exactly one --contract, --target, and
+		// --projection. The target is resolved here, from the same root START is
+		// about to run in, rather than threaded in by the caller: the caller's
+		// root and START's root differ whenever a candidate view is in play, and
+		// a target frozen from the wrong root would name a snapshot this START
+		// never inspects. targetStatus is read-only, so this costs one extra
+		// read and cannot create authority.
+		const projection = request.projection ?? "workspace";
+		const target = await this.targetStatus({
+			cwd: request.cwd,
+			projection,
+			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef }),
+			...(request.lineageId === undefined ? {} : { lineageId: request.lineageId }),
+			...(request.signal === undefined ? {} : { signal: request.signal }),
+		});
 		const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.START, request.cwd, [
 			"review", "start", "--contract", REVIEW_INTEGRATION_CONTRACT, "--cwd", request.cwd,
+			"--target", target.targetIdentity, "--projection", projection,
 			...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef, "--committed-only"]),
 			...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
 			...(request.policyPath === undefined ? [] : ["--policy", request.policyPath]),
 			...(request.focus === undefined ? [] : ["--focus", request.focus]),
-		], true, request.signal);
-		const result = decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeReviewStartV1(execution.body));
+			// A headless START that reviews without asking still succeeds; its
+			// consent notices are console output, never a failure signal.
+		], true, request.signal, REVIEW_CONSENT_NOTICES);
+		// A negotiated v2 START may answer `consent/v2` (action:
+		// "consent_required") instead of `start/v3` when the provider needs an
+		// explicit answer it cannot infer. Discriminated BEFORE decode: the two
+		// envelopes share no required shape, and Pi never sends `--consent
+		// relay`, so this is always surfaced to the caller, never answered here.
+		if (execution.body.action === "consent_required") {
+			throw new NativeReviewConsentRequiredError(decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeReviewConsentV2(execution.body)));
+		}
+		const result = decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeReviewStartV3(execution.body));
 		if (request.lineageId !== undefined && result.lineageId !== request.lineageId) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native start lineage mismatch");
 		return {
 			lineageId: result.lineageId,
@@ -1359,6 +1865,19 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			action: result.action as NativeStartAction,
 			lensesRequired: result.lensesRequired,
 			riskReasons: result.riskReasons.map((reason) => ({ ...reason })),
+			// Derived, not received. `risk_reasons` is a required start/v2 field
+			// already recomputed against the authoritative frozen snapshot, so
+			// these phrases describe the same candidate the lenses will review.
+			...(() => {
+				const evidence = nativeRiskEvidencePhrases(result.riskLevel, result.riskReasons);
+				return evidence.length === 0 ? {} : { riskEvidence: evidence };
+			})(),
+			// Only the empty-candidate recovery is reconstructed. Its sibling
+			// tells a plain caller to rerun under the negotiated contract, which
+			// this client already did, so relaying it would name a step that
+			// changes nothing. A committed-only start (baseRef) is already the
+			// recovery, and reporting zero changes there is a real answer.
+			...(result.changedFiles === 0 && request.baseRef === undefined ? { hint: REVIEW_EMPTY_CANDIDATE_HINT } : {}),
 			raw: result.raw,
 		};
 	}
@@ -1390,14 +1909,20 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.FINALIZE, request.cwd, [
 				"review", "finalize", "--contract", REVIEW_INTEGRATION_CONTRACT, "--cwd", request.cwd,
 				...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
-				...resultFiles.flatMap((path) => ["--result", path]),
+				// `--result` is RETIRED. A reviewer result supplied that way carries
+				// no provider-owned admission, so it cannot prove the lens inspected
+				// the frozen candidate. Results reach authority through
+				// `review capture-result`, and FINALIZE either discovers them
+				// (`--captured-results`) or is handed each manifest in lens order.
+				...(request.capturedResults === true ? ["--captured-results=true"] : []),
+				...(request.resultArtifactFiles ?? []).flatMap((path) => ["--result-artifact-file", path]),
 				...(refuterFile === undefined ? [] : ["--refuter", refuterFile]),
 				...(request.correctionLines === undefined ? [] : ["--correction-lines", String(request.correctionLines)]),
 				...(validationFile === undefined ? [] : ["--validation", validationFile]),
 				...(evidenceFile === undefined ? [] : ["--evidence", evidenceFile]),
 				...(request.failed === true ? ["--failed"] : []),
 			], true, request.signal);
-			const envelope = decode(NATIVE_REVIEW_OPERATION.FINALIZE, true, () => decodeReviewOperationV1(execution.body));
+			const envelope = decode(NATIVE_REVIEW_OPERATION.FINALIZE, true, () => decodeReviewOperationV2(execution.body));
 			if (envelope.operation !== "review.finalize") throw new Error("wrong finalize operation envelope");
 			const body = envelope.result;
 			const lineageId = requiredString(body.lineage_id);
@@ -1407,6 +1932,12 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 				state: requiredString(body.state),
 				action: requiredString(body.action),
 				storeRevision: requiredString(body.store_revision),
+				// Present only when state is correction_required (validated by
+				// decodeReviewOperationV2); carried through as the raw validated
+				// shape rather than re-decoded, since the typed decoder for this
+				// nested object is private to lib/review-integration-v2.ts.
+				...(body.validation_request === undefined ? {} : { validationRequest: body.validation_request as Readonly<Record<string, unknown>> }),
+				...(body.escalation === undefined ? {} : { escalation: requiredString(body.escalation) }),
 			};
 		} finally {
 			if (directory !== undefined) await this.cleanupDirectory(directory).catch(() => undefined);
@@ -1419,7 +1950,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
 			...(request.flags ?? []),
 		], false, request.signal);
-		const envelope = decode(NATIVE_REVIEW_OPERATION.VALIDATE, false, () => decodeReviewOperationV1(execution.body));
+		const envelope = decode(NATIVE_REVIEW_OPERATION.VALIDATE, false, () => decodeReviewOperationV2(execution.body));
 		if (envelope.operation !== "review.validate") throw new Error("wrong validate operation envelope");
 		const body = envelope.result;
 		const gateContext = decodeGateContext(body.context);
@@ -1429,6 +1960,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			action: requiredString(body.action),
 			reason: requiredString(body.reason),
 			gateContext,
+			...(body.delivery === undefined ? {} : { delivery: enumString(body.delivery, ["disabled/unmanaged"]) as NativeValidateResult["delivery"] }),
 		};
 	}
 
@@ -1438,7 +1970,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			"--change", request.change, "--lineage", request.lineage,
 			`--expected-binding-revision=${request.expectedBindingRevision}`,
 		], true, request.signal);
-		const envelope = decode(NATIVE_REVIEW_OPERATION.BIND_SDD, true, () => decodeReviewOperationV1(execution.body));
+		const envelope = decode(NATIVE_REVIEW_OPERATION.BIND_SDD, true, () => decodeReviewOperationV2(execution.body));
 		if (envelope.operation !== "review.bind_sdd") throw new Error("wrong bind-sdd operation envelope");
 		const body = envelope.result;
 		const gateContext = decodeGateContext(body.gate_context);
@@ -1455,14 +1987,97 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		};
 	}
 
-	async targetStatus(request: NativeTargetStatusRequest): Promise<ReviewStatusV1> {
+	async targetStatus(request: NativeTargetStatusRequest): Promise<ReviewStatusV3> {
 		const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.STATUS, request.cwd, [
 			"review", "status", "--contract", REVIEW_INTEGRATION_CONTRACT, "--cwd", request.cwd,
 			"--projection", request.projection ?? "workspace",
 			...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef]),
 			...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
+			"--next-transition",
 		], false, request.signal);
-		return decode(NATIVE_REVIEW_OPERATION.STATUS, false, () => decodeReviewStatusV1(execution.body));
+		assertSupportedNextTransitionOperation(execution.body);
+		return decode(NATIVE_REVIEW_OPERATION.STATUS, false, () => decodeReviewStatusV3(execution.body));
+	}
+
+	// Net-new negotiated `review.repair`: preflight first, execute only when
+	// the assessment is eligible, using exactly the provider_inputs that
+	// preflight published (Design Decision #6, migrate-review-integration-v2).
+	// Argv shape beyond --mode is inferred from provider_inputs' own field
+	// names — no repair/v2 fixture is mirrored upstream to ground-truth it
+	// against (design.md Open Questions); this is a documented risk.
+	async repair(request: NativeReviewRepairRequest): Promise<ReviewRepairV2> {
+		const preflightExecution = await this.negotiated(NATIVE_REVIEW_OPERATION.REPAIR, request.cwd, [
+			"review", "repair", "--contract", REVIEW_INTEGRATION_CONTRACT, "--cwd", request.cwd, "--mode", "preflight",
+		], false, request.signal);
+		const preflight = decode(NATIVE_REVIEW_OPERATION.REPAIR, false, () => decodeReviewRepairV2(preflightExecution.body));
+		if (preflight.mode !== "preflight") throw new Error("wrong repair preflight discriminator");
+		if (preflight.assessment.status !== "eligible" || preflight.providerInputs === undefined) return preflight;
+		const providerInputs = preflight.providerInputs;
+		const executeExecution = await this.negotiated(NATIVE_REVIEW_OPERATION.REPAIR, request.cwd, [
+			"review", "repair", "--contract", REVIEW_INTEGRATION_CONTRACT, "--cwd", request.cwd, "--mode", "execute",
+			"--lineage", providerInputs.lineageId,
+			"--expected-revision", providerInputs.expectedRevision,
+			"--cause", providerInputs.cause,
+			"--disposition", providerInputs.disposition,
+			"--repository-binding", providerInputs.repositoryBinding,
+			"--actor", request.actor,
+			"--reason", request.reason,
+			"--maintainer-authorization", request.maintainerAuthorization,
+		], true, request.signal);
+		return decode(NATIVE_REVIEW_OPERATION.REPAIR, true, () => decodeReviewRepairV2(executeExecution.body));
+	}
+
+	// `review capture-evidence`: the evidence-first correction lifecycle's
+	// collection step. Confirmed argv and response shape against a real v2.2.2
+	// review run (lineage review-b39d803b68a90767): exactly
+	// --cwd/--lineage/--target/--expected-revision/--outcome/--input, no
+	// --contract, and the verification-evidence/v2 record returned DIRECTLY —
+	// not wrapped in an operation/v2 envelope. Evidence is staged through the
+	// same 0o600 tmpfile discipline FINALIZE uses.
+	async captureResult(request: NativeReviewCaptureResultRequest): Promise<NativeReviewAdmittedResultManifest> {
+		if (request.argumentTokens.length === 0) throw new TypeError("Native CAPTURE_RESULT requires the provider-issued argument tokens");
+		if (request.argumentTokens.some((token) => typeof token !== "string" || token.length === 0)) throw new TypeError("Native CAPTURE_RESULT argument tokens must all be non-empty strings");
+		if (request.resultDocument.length === 0) throw new TypeError("Native CAPTURE_RESULT result document must contain at least one byte");
+		const carriesContext = request.argumentTokens.some((token) => token === "--repository-context" || token.startsWith("--repository-context="));
+		if (carriesContext && request.cwd !== undefined) throw new TypeError("Native CAPTURE_RESULT takes a repository context or --cwd, never both");
+		const directory = await mkdtemp(join(tmpdir(), "gentle-ai-capture-result-"));
+		try {
+			await chmod(directory, 0o700);
+			const resultFile = join(directory, "result.json");
+			await writeFile(resultFile, request.resultDocument, { encoding: "utf8", mode: 0o600 });
+			await chmod(resultFile, 0o600);
+			const executable = this.verifiedExecutable(NATIVE_REVIEW_OPERATION.CAPTURE_RESULT, true);
+			const execution = await this.invoke(NATIVE_REVIEW_OPERATION.CAPTURE_RESULT, request.cwd ?? process.cwd(), [
+				"review", "capture-result",
+				...request.argumentTokens,
+				...(carriesContext || request.cwd === undefined ? [] : ["--cwd", request.cwd]),
+				"--input", resultFile,
+			], true, request.signal, executable.path);
+			return decode(NATIVE_REVIEW_OPERATION.CAPTURE_RESULT, true, () => decodeNativeAdmittedResultManifest(execution.body));
+		} finally {
+			await this.cleanupDirectory(directory).catch(() => undefined);
+		}
+	}
+
+	async captureEvidence(request: NativeReviewCaptureEvidenceRequest): Promise<NativeReviewVerificationEvidenceV2> {
+		if (!(NATIVE_REVIEW_CAPTURE_OUTCOME as readonly string[]).includes(request.outcome)) throw new TypeError("Native CAPTURE_EVIDENCE outcome must be passed, verification_failed, or procedural_tooling_failed");
+		if (request.evidenceDocument.length === 0) throw new TypeError("Native CAPTURE_EVIDENCE evidence must contain at least one byte");
+		const directory = await mkdtemp(join(tmpdir(), "gentle-ai-capture-evidence-"));
+		try {
+			await chmod(directory, 0o700);
+			const evidenceFile = await this.stageEvidence(directory, request.evidenceDocument);
+			const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, request.cwd, [
+				"review", "capture-evidence", "--cwd", request.cwd,
+				"--lineage", request.lineageId,
+				"--target", request.targetIdentity,
+				"--expected-revision", request.expectedRevision,
+				"--outcome", request.outcome,
+				"--input", evidenceFile,
+			], true, request.signal);
+			return decode(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, true, () => decodeNativeReviewVerificationEvidence(execution.body));
+		} finally {
+			await this.cleanupDirectory(directory).catch(() => undefined);
+		}
 	}
 
 	reviewStatus(request: NativeReviewStatusRequest): Promise<NativeReviewStatusResult> {
@@ -1471,6 +2086,13 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 
 	sddStatus(request: NativeSddStatusRequest): Promise<NativeSddStatusResult> {
 		return this.legacy.sddStatus(request);
+	}
+
+	// Same plain-CLI delegation as reviewStatus/sddStatus above: `review mode`
+	// is dark until the negotiated version reports `mode: true` and stays
+	// outside the negotiated integration-v1 contract.
+	reviewMode(request: NativeReviewModeRequest): Promise<NativeReviewModeResult> {
+		return this.legacy.reviewMode(request);
 	}
 
 	// Recovery commands are version-gated plain CLI operations outside the

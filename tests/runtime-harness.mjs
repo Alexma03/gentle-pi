@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -10,6 +11,7 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 import { domainHashV1 } from "../lib/review-canonical.ts";
+import { NativeReviewCliV216, NATIVE_REVIEW_ERROR_CODE, NativeReviewCliError } from "../lib/native-review-cli.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const EXTENSIONS = [
@@ -169,6 +171,10 @@ function readAgentDefinition(source) {
 
 function sha256(content) {
 	return createHash("sha256").update(content).digest("hex");
+}
+
+function gitSync(cwd, ...arguments_) {
+	return execFileSync("git", arguments_, { cwd, encoding: "utf8" }).trim();
 }
 
 async function tempWorkspace() {
@@ -401,6 +407,187 @@ async function run() {
 		assert.match(commitGate.reason, /exactly derive/i);
 	} finally {
 		await rm(toolCwd, { recursive: true, force: true });
+	}
+
+	// review-candidate-view Phase 3.6 settling test: a contributor edit landing
+	// strictly between the controller-owned candidate binding and reviewer
+	// dispatch must diverge the live candidate tree from the frozen one, and
+	// dispatch must fail closed rather than expose a substituted view to the
+	// lens sub-agent. This drives the real `createGentleAiExtension` tool_call
+	// wiring (not the bare library function tested in
+	// tests/review-candidate-view.test.ts) with an injected candidate-view
+	// registry, so the actual production dispatch path is exercised.
+	const candidateDriftCwd = await tempWorkspace();
+	try {
+		const { createGentleAiExtension } = await import(
+			pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href
+		);
+		const { CandidateViewRegistry } = await import(
+			pathToFileURL(join(ROOT, "lib/review-candidate-view.ts")).href
+		);
+
+		gitSync(candidateDriftCwd, "init", "-b", "main");
+		await writeFile(join(candidateDriftCwd, "tracked.txt"), "base\n");
+		gitSync(candidateDriftCwd, "add", "tracked.txt");
+		gitSync(
+			candidateDriftCwd,
+			"-c", "user.name=Runtime Harness",
+			"-c", "user.email=runtime-harness@example.invalid",
+			"commit", "-m", "base",
+		);
+
+		const registry = new CandidateViewRegistry();
+		const view = registry.create({ contributorRoot: candidateDriftCwd });
+		registry.bindCurrent({ token: view.token, lineageId: "harness-candidate-drift", selectedLenses: ["review-risk"] });
+
+		const dispatchPi = createPi();
+		createGentleAiExtension({ candidateViews: registry })(dispatchPi.pi);
+		const dispatchToolHook = dispatchPi.hooks.get("tool_call")[0];
+
+		// The contributor edits the tracked file strictly after the candidate
+		// view was bound (START) and strictly before dispatch would run.
+		await writeFile(join(candidateDriftCwd, "tracked.txt"), "drifted after bind, before dispatch\n");
+
+		const dispatchInput = { agent: "review-risk", task: "review", mode: "task" };
+		const dispatchResult = await dispatchToolHook(
+			{ toolName: "subagent_run", input: dispatchInput },
+			createCtx(candidateDriftCwd),
+		);
+		assert.equal(dispatchResult?.block, true, "dispatch must fail closed when the candidate tree diverges between bind and dispatch");
+		assert.match(dispatchResult.reason, /live candidate|drift/i);
+		assert.equal(
+			dispatchInput.task,
+			"review",
+			"a failed-closed dispatch must never mutate the child dispatch input",
+		);
+		assert.doesNotMatch(
+			dispatchInput.task,
+			/Controller-owned review lineage/,
+			"a failed-closed dispatch must never inject a substituted candidate view into the lens sub-agent's task",
+		);
+		registry.cleanup(view.token);
+	} finally {
+		await rm(candidateDriftCwd, { recursive: true, force: true });
+	}
+
+	// Corrective v2 lifecycle settling test: the real controller must call the
+	// native evidence surface before it accepts a targeted-validation document.
+	// This is intentionally controller-level rather than a pure resolver test;
+	// the ordered call trace proves production wiring and the fail-closed gate.
+	const correctionCwd = await tempWorkspace();
+	try {
+		const { createGentleAiExtension } = await import(pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href);
+		const { CandidateViewRegistry } = await import(pathToFileURL(join(ROOT, "lib/review-candidate-view.ts")).href);
+		gitSync(correctionCwd, "init", "-b", "main");
+		await writeFile(join(correctionCwd, "app.ts"), "export const value = 1;\n");
+		gitSync(correctionCwd, "add", "app.ts");
+		gitSync(correctionCwd, "-c", "user.name=Runtime Harness", "-c", "user.email=runtime-harness@example.invalid", "commit", "-m", "base");
+		await writeFile(join(correctionCwd, "app.ts"), "export const value = 2;\n");
+		const frozen = new CandidateViewRegistry().create({ contributorRoot: correctionCwd });
+		const sha = (digit) => `sha256:${digit.repeat(64)}`;
+		const repair = { schema: "gentle-ai.review-authority-repair-assessment/v1", status: "unsupported", counts: { lineages: 0, compactLineages: 0, legacyLineages: 0, events: 0, bytes: 0, eligibleCandidates: 0, unsupportedLineages: 0, conflicts: 0 }, supportedOperations: ["review/complete-fix", "review/validate-fix"], authorizationSchema: "gentle-ai.review-repair-authorization/v1" };
+		const projection = { schema: "gentle-ai.review-integration.projection/v1", kind: "current-changes", projection: "workspace", baseTree: frozen.baseTree, initialReviewTree: frozen.candidateTree, currentCandidateTree: frozen.candidateTree, pathsDigest: sha("a"), paths: frozen.paths, intendedUntracked: [], intendedUntrackedProof: sha("b"), initialSnapshotIdentity: sha("c"), currentSnapshotIdentity: sha("c") };
+		const status = { contract: "gentle-ai.review-integration/v2", applicability: "current_target", authority: { version: "compact-v2", lineageId: "runtime-correction", state: "correction_required", generation: 1, revision: sha("d") }, receipt: { status: "expected_missing" }, action: "finalize", replayability: "not_replayable", frozen: { tier: "medium", originalChangedLines: 1, correctionBudget: 1 }, targetIdentity: sha("e"), projection, repair, candidates: [], nextTransition: { kind: "collect", reasonCode: "verification_evidence_required", collect: { inputs: [{ name: "verification_evidence", schema: "gentle-ai.review-verification-evidence/v2", captureOperation: "review.capture-evidence", arguments: [{ name: "lineage", value: "runtime-correction" }] }] } }, raw: {} };
+		const validationRequest = { schema: "gentle-ai.review-targeted-validation-request/v1", requestHash: sha("f"), lineageId: "runtime-correction", expectedRevision: sha("d"), targetIdentity: sha("e"), fixFindingIds: [], projection: "workspace", correctionCandidateTree: frozen.candidateTree, correctionTargetIdentity: sha("e"), correctionPaths: frozen.paths, correctionPathsDigest: sha("a") };
+		const afterCapture = { ...status, authority: { ...status.authority, state: "validating" }, validationRequest, nextTransition: { kind: "collect", reasonCode: "targeted_validation_required", collect: { inputs: [{ name: "targeted_validation", schema: validationRequest.schema, captureOperation: "external.run_targeted_validation", arguments: [{ name: "lineage", value: "runtime-correction" }], validationRequest }] } } };
+		frozen.cleanup();
+		const calls = [];
+		let statuses = 0;
+		const nativeReviewCli = {
+			async targetStatus() { calls.push("status"); statuses += 1; return statuses === 1 ? status : afterCapture; },
+			async captureEvidence(request) { calls.push("capture-evidence"); return { schema: "gentle-ai.review-verification-evidence/v2", version: 2, lineageId: "runtime-correction", authorityRevision: sha("d"), targetIdentity: sha("e"), candidateTree: frozen.candidateTree, pathsDigest: sha("a"), paths: frozen.paths, ledgerIds: [], rawPayloadSha256: sha("1"), rawPayloadBytes: request.evidenceDocument.length, outcome: "passed", recordDigest: sha("2") }; },
+			async finalize() { calls.push("finalize"); return { lineageId: "runtime-correction", state: "approved", action: "approved", storeRevision: sha("3") }; },
+			async start() { throw new Error("not expected"); }, async validate() { throw new Error("not expected"); }, async bindSdd() { throw new Error("not expected"); }, async sddStatus() { return { ready: false }; }, async reviewStatus() { throw new Error("not expected"); },
+		};
+		const correctionPi = createPi();
+		createGentleAiExtension({ nativeReviewCli, candidateViews: new CandidateViewRegistry() })(correctionPi.pi);
+		const controller = correctionPi.tools.get("gentle_review");
+		const response = await controller.execute("runtime-correction", { operation: "finalize", lineageId: "runtime-correction", input: JSON.stringify({ final_evidence: "focused verification passed", final_verification_outcome: "passed", validation: { request_hash: "f".repeat(64), correction_ids: [], original_criteria: { passed: true, evidence: ["acceptance passes"] }, correction_regression: { passed: true, evidence: ["regression passes"] }, fix_caused_findings: [], follow_ups: [] } }) }, undefined, undefined, createCtx(correctionCwd));
+		assert.deepEqual(calls, ["status", "capture-evidence", "status", "finalize"]);
+		assert.equal(response.details.result.state, "approved");
+	} finally {
+		await rm(correctionCwd, { recursive: true, force: true });
+	}
+
+	// Task 11.2 (migrate-review-integration-v2): an unimplemented
+	// next_transition.execute.operation (e.g. a future "dispose-result") must
+	// raise a typed, named unsupported-transition-operation refusal and stop —
+	// never fall through to a generic schema-incompatible error, and never
+	// synthesize an invocation for it. Drives the real negotiated STATUS decode
+	// path (NativeReviewCliV216.targetStatus) against a stubbed adapter, so no
+	// live binary needs to advertise the unimplemented operation to prove this.
+	{
+		const capabilitiesFixturePath = join(
+			ROOT, "contracts", "review-integration", "v2", "fixtures", "capabilities.fixture.json",
+		);
+		const capabilitiesFixture = JSON.parse(await readFile(capabilitiesFixturePath, "utf8"));
+		const executableDigest = "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705";
+		const capabilitiesBody = {
+			...capabilitiesFixture,
+			package: { ...capabilitiesFixture.package, version: "2.2.2" },
+		};
+		const statusBody = {
+			schema: "gentle-ai.review-integration.status/v3",
+			contract: "gentle-ai.review-integration/v2",
+			operation: "review.status",
+			applicability: "unrelated",
+			receipt: { status: "not_applicable" },
+			action: "start",
+			replayability: "not_replayable",
+			target_identity: `sha256:${"a".repeat(64)}`,
+			repair: {
+				schema: "gentle-ai.review-authority-repair-assessment/v1",
+				status: "unsupported",
+				counts: { lineages: 0, compact_lineages: 0, legacy_lineages: 0, events: 0, bytes: 0, eligible_candidates: 0, unsupported_lineages: 0, conflicts: 0 },
+				supported_operations: ["review/complete-fix", "review/validate-fix"],
+				authorization_schema: "gentle-ai.review-repair-authorization/v1",
+			},
+			projection: {
+				schema: "gentle-ai.review-integration.projection/v1",
+				kind: "current-changes",
+				projection: "workspace",
+				base_tree: "b".repeat(40),
+				initial_review_tree: "b".repeat(40),
+				current_candidate_tree: "b".repeat(40),
+				paths_digest: `sha256:${"a".repeat(64)}`,
+				paths: [],
+				intended_untracked: [],
+				intended_untracked_proof: `sha256:${"a".repeat(64)}`,
+				initial_snapshot_identity: `sha256:${"a".repeat(64)}`,
+				current_snapshot_identity: `sha256:${"a".repeat(64)}`,
+			},
+			candidates: [],
+			next_transition: {
+				kind: "execute",
+				reason_code: "disposable_result_pending",
+				execute: {
+					operation: "review.dispose-result",
+					arguments: [],
+					preconditions: [],
+					binding: { target_identity: `sha256:${"a".repeat(64)}` },
+				},
+			},
+		};
+		const calls = [];
+		const adapter = async (request) => {
+			calls.push(request.arguments);
+			const body = calls.length === 1 ? capabilitiesBody : statusBody;
+			return { stdout: JSON.stringify(body), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+		};
+		const client = new NativeReviewCliV216(
+			adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024,
+			async () => undefined, () => executableDigest,
+		);
+		let thrown;
+		try {
+			await client.targetStatus({ cwd: "/repo" });
+		} catch (error) {
+			thrown = error;
+		}
+		assert.ok(thrown instanceof NativeReviewCliError, "an unimplemented next_transition.execute.operation must raise a typed NativeReviewCliError");
+		assert.equal(thrown.code, NATIVE_REVIEW_ERROR_CODE.UNSUPPORTED_TRANSITION_OPERATION);
+		assert.match(thrown.message, /review\.dispose-result/, "the refusal must name the specific unimplemented operation");
+		assert.equal(calls.length, 2, "capabilities negotiation plus one STATUS call — never a third call synthesizing the unimplemented operation");
 	}
 
 	const bannerCwd = await tempWorkspace();

@@ -116,6 +116,18 @@ export interface NativeCandidateProjectionDescriptor {
 	paths: readonly string[];
 	intendedUntracked: readonly string[];
 	projection: "workspace" | "staged";
+	// Optional so Phase 3 stays additive: existing callers keep the legacy
+	// sorted-path behavior until the v2 switchover supplies a manifest.
+	manifest?: readonly ChangedPathEntry[];
+	// The provider artifact-subject's `changed_path_manifest_sha256` claim.
+	// Production callers verify this field across all collect inputs and their
+	// artifact subjects; hand-built descriptors may still use Pi's local digest
+	// as a self-consistency check.
+	manifestSha256?: string;
+	// Set only by the production status adapter after it has checked every
+	// provider-issued collect input and artifact subject for one identical hash.
+	// Provider canonicalization is intentionally not reimplemented here.
+	providerManifestHashVerified?: true;
 }
 
 export class CandidateViewError extends Error {
@@ -231,6 +243,109 @@ function parseTree(cwd: string, tree: string, executor: CandidateGitExecutor): P
 function gitPathTokens(cwd: string, arguments_: readonly string[], executor: CandidateGitExecutor): Buffer[] {
 	const raw = candidateGit(cwd, arguments_, process.env, "buffer", executor) as Buffer;
 	return splitNulTerminated(raw, "candidate scope Git output is not NUL-terminated");
+}
+
+// One manifest entry per changed path, carrying the state contract v2 ships in
+// `changed_path_manifest`. `deriveChangedScope` cannot produce this: it runs
+// `--name-status`, which reports a status and a path but never an old mode, so
+// a mode-only or type change is invisible to it. `--raw` carries both modes and
+// both blob ids, which is what makes `modeOnly` decidable at all.
+export interface ChangedPathEntry {
+	readonly path: string;
+	readonly status: string;
+	readonly oldMode: string;
+	readonly newMode: string;
+	readonly deleted: boolean;
+	readonly typeChanged: boolean;
+	readonly modeOnly: boolean;
+}
+
+export function deriveChangedPathManifest(cwd: string, baseTree: string, candidateTree: string, executor: CandidateGitExecutor = defaultCandidateGitExecutor): readonly ChangedPathEntry[] {
+	const tokens = gitPathTokens(cwd, ["diff", "--raw", "-z", "--abbrev=40", "--no-ext-diff", "--find-renames=100%", baseTree, candidateTree], executor);
+	const entries: ChangedPathEntry[] = [];
+	for (let index = 0; index < tokens.length;) {
+		const header = tokens[index++]?.toString("ascii");
+		if (header === undefined) break;
+		// `:<old_mode> <new_mode> <old_sha> <new_sha> <status>`
+		const match = /^:([0-7]{6}) ([0-7]{6}) ([0-9a-f]{7,64}) ([0-9a-f]{7,64}) ([AMDT]|R[0-9]{3})$/.exec(header);
+		if (match === null) throw new CandidateViewError("candidate manifest Git output contains an unsafe raw header", "manifest-derivation-invalid");
+		const [, oldMode, newMode, oldSha, newSha, status] = match;
+		const firstPath = tokens[index++];
+		if (firstPath === undefined) throw new CandidateViewError("candidate manifest Git output is incomplete", "manifest-derivation-invalid");
+		// A rename emits both the old and the new path; the new one is the scope.
+		const path = status.startsWith("R") ? decodeCanonicalPath(tokens[index++] ?? firstPath) : decodeCanonicalPath(firstPath);
+		entries.push(Object.freeze({
+			path,
+			status: status.startsWith("R") ? "A" : status,
+			oldMode,
+			newMode,
+			deleted: status === "D",
+			typeChanged: status === "T",
+			// Identical blob on both sides with different modes is the case the
+			// sorted-path comparison could never see.
+			modeOnly: oldSha === newSha && oldMode !== newMode,
+		}));
+	}
+	return Object.freeze([...entries].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)));
+}
+
+// Pi's own canonical digest of a changed-path manifest: sorted by path, with
+// the wire (snake_case) field names the v2 `changed_path` schema uses. This
+// is deliberately NOT an attempt to reproduce the provider's undocumented
+// `changed_path_manifest_sha256` canonicalization byte-for-byte (design.md's
+// open question). It is Pi's own self-consistency check: does the manifest a
+// descriptor carries digest to the same value the descriptor claims for it?
+// A caller (or a corrupted transport) that supplies a manifest and a claimed
+// digest that disagree with each other is caught here, independent of and
+// before any comparison against live Git content.
+export function digestChangedPathManifest(manifest: readonly ChangedPathEntry[]): string {
+	const canonical = [...manifest]
+		.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+		.map((entry) => ({
+			path: entry.path,
+			status: entry.status,
+			old_mode: entry.oldMode,
+			new_mode: entry.newMode,
+			deleted: entry.deleted,
+			type_changed: entry.typeChanged,
+			mode_only: entry.modeOnly,
+		}));
+	return `sha256:${createHash("sha256").update(JSON.stringify(canonical)).digest("hex")}`;
+}
+
+function assertManifestMatchesGit(descriptor: NativeCandidateProjectionDescriptor, derived: readonly ChangedPathEntry[]): void {
+	const claimed = descriptor.manifest;
+	if (claimed === undefined) return;
+
+	// Self-consistency: does the manifest digest to what the subject claims
+	// for it? Checked before any Git comparison, same as input-divergence.
+	if (descriptor.manifestSha256 !== undefined && descriptor.providerManifestHashVerified !== true && digestChangedPathManifest(claimed) !== descriptor.manifestSha256) {
+		throw new CandidateViewError("native manifest does not digest to its own artifact-subject claim", "manifest-subject-drift");
+	}
+
+	// First: is the provider's own input self-consistent? A manifest that does
+	// not describe the descriptor's paths is not a drift observation, it is a
+	// malformed input, and saying so separately keeps the diagnosis honest.
+	const claimedPaths = [...claimed.map((entry) => entry.path)].sort();
+	if (JSON.stringify(claimedPaths) !== JSON.stringify([...descriptor.paths].sort())) {
+		throw new CandidateViewError("native manifest does not describe the same paths as its own projection", "manifest-input-divergence");
+	}
+
+	const derivedByPath = new Map(derived.map((entry) => [entry.path, entry]));
+	if (JSON.stringify(claimedPaths) !== JSON.stringify(derived.map((entry) => entry.path))) {
+		throw new CandidateViewError("native manifest paths do not match Git content", "manifest-path-set-drift");
+	}
+
+	for (const entry of claimed) {
+		const actual = derivedByPath.get(entry.path);
+		if (actual === undefined) throw new CandidateViewError("native manifest paths do not match Git content", "manifest-path-set-drift");
+		if (entry.status !== actual.status || entry.deleted !== actual.deleted) {
+			throw new CandidateViewError(`native manifest status for ${entry.path} does not match Git content`, "manifest-status-drift");
+		}
+		if (entry.oldMode !== actual.oldMode || entry.newMode !== actual.newMode || entry.modeOnly !== actual.modeOnly || entry.typeChanged !== actual.typeChanged) {
+			throw new CandidateViewError(`native manifest mode state for ${entry.path} does not match Git content`, "manifest-mode-drift");
+		}
+	}
 }
 
 function deriveChangedScope(cwd: string, baseCommit: string, candidateTree: string, entries: readonly CandidateTreeEntry[], executor: CandidateGitExecutor): CandidateViewScope {
@@ -683,9 +798,24 @@ export class CandidateViewRegistry {
 		const base = head.tree === descriptor.baseTree ? head : resolveCandidateBaseTree(root, descriptor.baseTree, this.gitExecutor);
 		const committedOnly = head.tree === descriptor.currentCandidateTree && base.tree !== head.tree;
 		if (!committedOnly && head.tree !== descriptor.baseTree) throw new CandidateViewError("native projection base no longer matches HEAD");
+		// The descriptor's own `projection` label ("staged" = a committed range,
+		// "workspace" = dirty-inclusive) must agree with what Pi independently
+		// derives from the base/candidate/HEAD relationship. Neither trusting
+		// nor silently overriding a mislabeled claim is safe: fail closed.
+		if ((descriptor.projection === "staged") !== committedOnly) {
+			throw new CandidateViewError("native projection commit-state does not match its declared projection kind", "projection-kind-drift");
+		}
 		const tree = parseTree(root, descriptor.currentCandidateTree, this.gitExecutor);
 		const scope = deriveChangedScope(root, descriptor.baseTree, descriptor.currentCandidateTree, [...tree.entries, ...tree.gitlinks], this.gitExecutor);
-		if (JSON.stringify(scope.paths) !== JSON.stringify([...descriptor.paths].sort())) throw new CandidateViewError("native projection paths do not match Git content");
+		// A manifest SUBSUMES the sorted-path comparison rather than stacking on
+		// top of it: it checks the same path set plus the mode, status, and
+		// type state the path set cannot express, and it names which of those
+		// drifted. Descriptors without a manifest keep the legacy check.
+		if (descriptor.manifest !== undefined) {
+			assertManifestMatchesGit(descriptor, deriveChangedPathManifest(root, descriptor.baseTree, descriptor.currentCandidateTree, this.gitExecutor));
+		} else if (JSON.stringify(scope.paths) !== JSON.stringify([...descriptor.paths].sort())) {
+			throw new CandidateViewError("native projection paths do not match Git content");
+		}
 		this.projections.set(lineageId, {
 			contributorRoot: root,
 			baseCommit: base.commit,
