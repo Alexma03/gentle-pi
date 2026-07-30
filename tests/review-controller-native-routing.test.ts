@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
@@ -267,7 +267,7 @@ function fakeNative(overrides: Partial<NativeReviewCli> = {}): NativeReviewCli {
 		targetStatus: async (request) => {
 			const lineageId = request.lineageId ?? "";
 			return lineageId === ""
-				? targetStatusFixture({ applicability: "unrelated", action: "start" })
+				? candidateStartTargetStatus(request)
 				: targetStatusFixture({ lineageId });
 		},
 		...overrides,
@@ -376,6 +376,28 @@ function targetStatusFixture(options: {
 		candidates: applicability === "ambiguous" ? [lineageId, "other-lineage"] : [],
 		raw,
 	};
+}
+
+function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0]): ReviewStatusV3 {
+	let candidate: ReturnType<CandidateViewRegistry["create"]> | undefined;
+	try {
+		candidate = new CandidateViewRegistry().create({
+			contributorRoot: request.cwd,
+			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef, committedOnly: true }),
+		});
+		return targetStatusFixture({
+			applicability: "unrelated",
+			action: "start",
+			baseTree: candidate.baseTree,
+			currentCandidateTree: candidate.candidateTree,
+			paths: candidate.paths,
+			projection: request.projection ?? "workspace",
+		});
+	} catch {
+		return targetStatusFixture({ applicability: "unrelated", action: "start" });
+	} finally {
+		candidate?.cleanup();
+	}
 }
 
 function bindReviewerManifest(status: ReviewStatusV3, cwd: string, manifestHash = `sha256:${"7".repeat(64)}`): ReviewStatusV3 {
@@ -613,7 +635,7 @@ test("fresh registry reload restores the native resumed lineage only while the l
 		stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false,
 	}));
 	native.targetStatus = async (request) => request.lineageId === undefined
-		? targetStatusFixture({ applicability: "unrelated", action: "start" })
+		? candidateStartTargetStatus(request)
 		: targetStatusFixture({ lineageId: request.lineageId });
 	const { controller, toolCall } = runtime(native, undefined, undefined, undefined, candidateViews);
 	await controller.execute("reload-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
@@ -860,10 +882,10 @@ test("ambiguous native START runs target status first and follows only its decla
 	let statuses = 0;
 	const reconciled = targetStatusFixture({ action: "finalize", lineageId: "resumed-lineage" });
 	const { controller } = runtime(fakeNative({
-		targetStatus: async () => {
+		targetStatus: async (request) => {
 			calls.push("status");
 			statuses += 1;
-			return statuses === 1 ? targetStatusFixture({ applicability: "unrelated", action: "start" }) : reconciled;
+			return statuses === 1 ? candidateStartTargetStatus(request) : reconciled;
 		},
 		start: async (request) => {
 			calls.push("start");
@@ -886,7 +908,9 @@ test("ambiguous native START runs target status first and follows only its decla
 		authority_applicability: "current_target",
 		provider_action: "finalize",
 	});
-	candidateViews.cleanup(basename(requests[0]!.cwd));
+	assert.equal(requests[0]?.cwd, cwd);
+	const replayKey = JSON.stringify({ cwd, lineageId: null, input: request.input, inputPath: null });
+	candidateViews.createOrReuse({ contributorRoot: cwd, replayKey }).cleanup();
 });
 
 test("ambiguous native FINALIZE returns the target-status action without a second mutation", async (t) => {
@@ -1558,8 +1582,8 @@ test("native START uses the default policy or a canonical safe policy path, and 
 	await controller.execute("default-policy", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	await controller.execute("custom-policy", { operation: "start", input: JSON.stringify({ mode: "ordinary", policyPath: ".gentle-ai/policies/team policy.json" }) }, undefined, undefined, context(cwd));
 	assert.deepEqual(requests, [
-		{ cwd },
-		{ cwd, policyPath },
+		{ cwd, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" },
+		{ cwd, policyPath, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" },
 	]);
 	for (const [input, outcome, reason] of [
 		[{ mode: "ordinary", policyHash: "legacy" }, "native-start-legacy-policy-hash-unsupported", "legacy-policy-hash-unsupported"],
@@ -1595,12 +1619,18 @@ test("native START preserves the default dirty-inclusive candidate without base 
 			return { lineageId: "default-dirty-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
 	}), undefined, undefined, undefined, candidateViews);
-	await controller.execute("default-dirty", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const started = await controller.execute("default-dirty", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const view = candidateViews.resolveForLens("default-dirty-lineage", "review-reliability");
 	try {
 		assert.deepEqual(view.paths, ["app.ts", "untracked.ts"]);
 		assert.equal(view.committedOnly, false);
-		assert.deepEqual(requests, [{ cwd: view.root }]);
+		assert.deepEqual(requests, [{ cwd, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" }]);
+		const actorBinding = (started.details as { actor_binding: { workspace_root: string; candidate_root: string; candidate_tree: string; candidate_paths: readonly string[] } }).actor_binding;
+		assert.equal(actorBinding.workspace_root, cwd);
+		assert.equal(actorBinding.candidate_root, view.root);
+		assert.notEqual(actorBinding.candidate_root, requests[0]?.cwd);
+		assert.equal(actorBinding.candidate_tree, view.candidateTree);
+		assert.deepEqual(actorBinding.candidate_paths, view.paths);
 	} finally {
 		view.cleanup();
 	}
@@ -1626,10 +1656,66 @@ test("native START binds an acknowledged committed range and native identity to 
 		assert.deepEqual(view.paths, ["committed-after-base.ts"]);
 		assert.equal(view.committedOnly, true);
 		assert.equal(view.baseCommit, baseCommit);
-		assert.deepEqual(requests, [{ cwd: view.root, baseRef: view.baseCommit, committedOnly: true }]);
+		assert.deepEqual(requests, [{ cwd, baseRef: view.baseCommit, committedOnly: true, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" }]);
 	} finally {
 		view.cleanup();
 	}
+});
+
+test("native START fails closed before mutation when the workspace target and immutable candidate view differ", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	let starts = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => targetStatusFixture({
+			applicability: "unrelated",
+			action: "start",
+			baseTree: git(cwd, "rev-parse", "HEAD^{tree}"),
+			currentCandidateTree: "b".repeat(40),
+			paths: ["app.ts"],
+		}),
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	const result = await controller.execute("target-view-drift", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	assert.equal((result.details as { outcome: string }).outcome, "native-operation-failed");
+	assert.deepEqual((result.details as { diagnostics: unknown }).diagnostics, {
+		code: "candidate-target-projection-drift",
+		message: "candidate view rejected before native START",
+	});
+	assert.equal(starts, 0);
+});
+
+test("native START re-verifies candidate-view integrity before granting workspace authority", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	class DriftingCandidateViewRegistry extends CandidateViewRegistry {
+		override createOrReuse(request: Parameters<CandidateViewRegistry["createOrReuse"]>[0]): ReturnType<CandidateViewRegistry["createOrReuse"]> {
+			const candidate = super.createOrReuse(request);
+			chmodSync(candidate.root, 0o755);
+			chmodSync(join(candidate.root, "app.ts"), 0o644);
+			writeFileSync(join(candidate.root, "app.ts"), "corrupted frozen content\n");
+			chmodSync(join(candidate.root, "app.ts"), 0o444);
+			chmodSync(candidate.root, 0o555);
+			return candidate;
+		}
+	}
+	let starts = 0;
+	const { controller } = runtime(fakeNative({
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}), undefined, undefined, undefined, new DriftingCandidateViewRegistry());
+	const result = await controller.execute("candidate-view-drift", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	assert.equal((result.details as { outcome: string }).outcome, "native-operation-failed");
+	assert.deepEqual((result.details as { diagnostics: unknown }).diagnostics, {
+		code: "candidate-view-invalid",
+		message: "candidate view rejected before native START",
+	});
+	assert.equal(starts, 0);
 });
 
 test("native START rejects an unresolvable explicit base before native mutation", async (t) => {
@@ -1698,7 +1784,7 @@ test("native START forwards an acknowledged base ref and rejects invalid values 
 		},
 	}));
 	await controller.execute("committed-base", { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef: "refs/heads/main", committedOnly: true }) }, undefined, undefined, context(cwd));
-	assert.deepEqual(requests, [{ cwd, baseRef: git(cwd, "rev-parse", "refs/heads/main"), committedOnly: true }]);
+	assert.deepEqual(requests, [{ cwd, baseRef: git(cwd, "rev-parse", "refs/heads/main"), committedOnly: true, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" }]);
 	for (const baseRef of ["", "   ", " origin/main", "origin/main ", "origin\0main", "origin\nmain", "origin\rmain", "origin\tmain", "origin\u007fmain", 42, [], {}]) {
 		const rejected = await controller.execute("invalid-base", { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef }) }, undefined, undefined, context(cwd));
 		assert.deepEqual(rejected.details, {
@@ -4032,7 +4118,7 @@ test("RECOVER rechecks a committed range against its frozen base instead of the 
 	const { controller } = runtime(fakeNative({
 		targetStatus: async (request) => {
 			statusRequests.push(request as Record<string, unknown>);
-			if (request.lineageId === undefined) return targetStatusFixture({ applicability: "unrelated", action: "start" });
+			if (request.lineageId === undefined) return candidateStartTargetStatus(request);
 			assert.equal(request.baseRef, baseRef);
 			const status = targetStatusFixture({ lineageId: "native-lineage", action: "recover" });
 			return { ...status, actionDisposition: "invalidated", authority: { ...status.authority!, revision: "rev-1" } };

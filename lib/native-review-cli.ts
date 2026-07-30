@@ -371,7 +371,7 @@ export interface NativeReviewVerificationEvidenceV2 {
 	recordDigest: string;
 }
 
-export interface NativeStartRequest { cwd: string; baseRef?: string; committedOnly?: boolean; lineageId?: string; policyPath?: string; focus?: string; projection?: "workspace" | "staged"; signal?: AbortSignal; }
+export interface NativeStartRequest { cwd: string; baseRef?: string; committedOnly?: boolean; lineageId?: string; policyPath?: string; focus?: string; targetIdentity?: string; projection?: "workspace" | "staged"; signal?: AbortSignal; }
 export const NATIVE_REVIEW_CONSENT_ANSWER = { GRANTED: "granted", DECLINED: "declined" } as const;
 export type NativeReviewConsentAnswer = (typeof NATIVE_REVIEW_CONSENT_ANSWER)[keyof typeof NATIVE_REVIEW_CONSENT_ANSWER];
 export interface NativeReviewConsentAnswerRequest { cwd: string; consent: ReviewConsentV2; answer: NativeReviewConsentAnswer; signal?: AbortSignal; }
@@ -1954,24 +1954,21 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		if (request.baseRef !== undefined && !isCanonicalProcessString(request.baseRef)) throw new TypeError("Native START baseRef must be a non-empty, trimmed, NUL-free string");
 		if (request.baseRef !== undefined && request.committedOnly !== true) throw new TypeError("Native START baseRef requires explicit committedOnly acknowledgement");
 		if (request.baseRef === undefined && request.committedOnly !== undefined) throw new TypeError("Native START committedOnly requires an explicit baseRef");
-		// A negotiated START requires exactly one --contract, --target, and
-		// --projection. The target is resolved here, from the same root START is
-		// about to run in, rather than threaded in by the caller: the caller's
-		// root and START's root differ whenever a candidate view is in play, and
-		// a target frozen from the wrong root would name a snapshot this START
-		// never inspects. targetStatus is read-only, so this costs one extra
-		// read and cannot create authority.
+		if (request.targetIdentity !== undefined && !/^sha256:[0-9a-f]{64}$/.test(request.targetIdentity)) throw new TypeError("Native START targetIdentity must be a canonical sha256 identity");
+		// The controller supplies the target it already projected from the
+		// authority workspace after proving its immutable actor view is identical.
+		// Direct adapter callers may omit it and retain the same-root projection.
 		const projection = request.projection ?? "workspace";
-		const target = await this.targetStatus({
+		const targetIdentity = request.targetIdentity ?? (await this.targetStatus({
 			cwd: request.cwd,
 			projection,
 			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef }),
 			...(request.lineageId === undefined ? {} : { lineageId: request.lineageId }),
 			...(request.signal === undefined ? {} : { signal: request.signal }),
-		});
+		})).targetIdentity;
 		const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.START, request.cwd, [
 			"review", "start", "--contract", REVIEW_INTEGRATION_CONTRACT, "--cwd", request.cwd,
-			"--target", target.targetIdentity, "--projection", projection,
+			"--target", targetIdentity, "--projection", projection,
 			...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef, "--committed-only"]),
 			...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
 			...(request.policyPath === undefined ? [] : ["--policy", request.policyPath]),
@@ -1983,10 +1980,14 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		// explicit answer it cannot infer. Discriminate before decode and surface
 		// the complete envelope; only the caller can map a human answer.
 		if (execution.body.action === "consent_required") {
-			throw new NativeReviewConsentRequiredError(decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeReviewConsentV2(execution.body)));
+			const consent = decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeReviewConsentV2(execution.body));
+			if (consent.targetIdentity !== targetIdentity || consent.projection !== projection) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native consent target binding mismatch");
+			throw new NativeReviewConsentRequiredError(consent);
 		}
 		const result = decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeReviewStartV3(execution.body));
 		if (request.lineageId !== undefined && result.lineageId !== request.lineageId) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native start lineage mismatch");
+		const resultTarget = result.targetIdentity ?? result.repositoryContext?.targetIdentity;
+		if (resultTarget !== undefined && resultTarget !== targetIdentity) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native start target mismatch");
 		return {
 			lineageId: result.lineageId,
 			state: result.state as NativeStartResult["state"],

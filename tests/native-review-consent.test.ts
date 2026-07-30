@@ -79,6 +79,22 @@ test("negotiated ordinary START declares relay and preserves the complete target
 		"review", "start", "--contract", "gentle-ai.review-integration/v2", "--cwd", "/repo",
 		"--target", target, "--projection", "workspace", "--consent", "relay",
 	]);
+	assert.equal(queue.calls.some((arguments_) => arguments_[1] === "status"), true);
+});
+
+test("controller-prebound START target is used without projecting a second workspace candidate", async () => {
+	const consent = fixture<Record<string, unknown>>("consent.fixture.json");
+	const target = String(consent.target_identity);
+	const queue = queuedAdapter([capabilities(), consent]);
+	await assert.rejects(
+		() => client(queue.adapter).start({ cwd: "/repo", targetIdentity: target, projection: "workspace" }),
+		(error: unknown) => error instanceof NativeReviewConsentRequiredError,
+	);
+	assert.deepEqual(queue.calls.at(-1), [
+		"review", "start", "--contract", "gentle-ai.review-integration/v2", "--cwd", "/repo",
+		"--target", target, "--projection", "workspace", "--consent", "relay",
+	]);
+	assert.equal(queue.calls.some((arguments_) => arguments_[1] === "status"), false, "a prebound START target must not be projected again");
 });
 
 test("consent follow-up executes the provider-named invocation exactly once and refuses a changed target binding", async () => {

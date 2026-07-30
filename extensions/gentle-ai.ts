@@ -4559,6 +4559,7 @@ const PENDING_REVIEW_CONSENT_TTL_MS = 10 * 60 * 1000;
 interface PendingReviewConsent {
 	id: string;
 	repositoryCwd: string;
+	authorityCwd: string;
 	candidateView: CandidateView;
 	consent: ReviewConsentV2;
 	consentDigest: string;
@@ -4583,6 +4584,19 @@ function cleanupAllPendingReviewConsents(pendingReviewConsents: Map<string, Pend
 
 function reviewConsentDigest(consent: ReviewConsentV2): string {
 	return createHash("sha256").update(JSON.stringify(consent)).digest("hex");
+}
+
+function assertNativeStartCandidateBinding(candidateView: CandidateView, target: ReviewStatusV3): void {
+	candidateView.verify();
+	if (
+		target.projection.projection !== "workspace" ||
+		target.projection.baseTree !== candidateView.baseTree ||
+		target.projection.initialReviewTree !== candidateView.candidateTree ||
+		target.projection.currentCandidateTree !== candidateView.candidateTree ||
+		JSON.stringify([...target.projection.paths].sort()) !== JSON.stringify([...candidateView.paths].sort())
+	) {
+		throw new CandidateViewError("native START workspace target does not match the immutable reviewer candidate view", "candidate-target-projection-drift");
+	}
 }
 
 function completeNativeStart(
@@ -5104,7 +5118,7 @@ async function executeReviewControllerOperation(
 		consumePendingReviewConsent(pending, pendingReviewConsents);
 		try {
 			const answered = await nativeReviewCli.answerConsent({
-				cwd: pending.candidateView.root,
+				cwd: pending.authorityCwd,
 				consent: pending.consent,
 				answer: input.answer,
 				...(signal === undefined ? {} : { signal }),
@@ -5124,7 +5138,7 @@ async function executeReviewControllerOperation(
 			const value = error as { mutationOutcome?: unknown };
 			if (value.mutationOutcome === "none") candidateViews?.cleanup(pending.candidateView.token);
 			return await reconcileNativeMutationFailure(parameters.operation, error, nativeReviewCli, {
-				cwd: pending.candidateView.root,
+				cwd: pending.authorityCwd,
 				...(pending.candidateView.committedOnly ? { baseRef: pending.candidateView.baseCommit } : {}),
 				projection: "workspace",
 			});
@@ -5163,8 +5177,9 @@ async function executeReviewControllerOperation(
 					return nativeStartRejection("base-ref-unresolvable");
 				}
 			}
+			let target: ReviewStatusV3;
 			try {
-				const target = await nativeReviewCli.targetStatus({
+				target = await nativeReviewCli.targetStatus({
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(canonicalBaseRef === undefined ? {} : { baseRef: canonicalBaseRef }),
@@ -5179,14 +5194,17 @@ async function executeReviewControllerOperation(
 			let nativeStartAttempted = false;
 			try {
 				candidateView = candidateViews?.createOrReuse({ contributorRoot: defaultCwd, replayKey, ...(canonicalBaseRef === undefined ? {} : { baseRef: canonicalBaseRef, committedOnly: true }) });
-				nativeStartAttempted = true;
+				if (candidateView !== undefined) assertNativeStartCandidateBinding(candidateView, target);
 				let result: NativeStartResult;
 				try {
+					nativeStartAttempted = true;
 					result = await nativeReviewCli.start({
-						cwd: candidateView?.root ?? defaultCwd,
+						cwd: defaultCwd,
 						...(canonicalBaseRef === undefined
 							? {}
 							: { baseRef: candidateView?.baseCommit ?? canonicalBaseRef, committedOnly: true }),
+						targetIdentity: target.targetIdentity,
+						projection: target.projection.projection,
 						...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 						...(policy.policyPath === undefined ? {} : { policyPath: policy.policyPath }),
 						...(signal === undefined ? {} : { signal }),
@@ -5201,7 +5219,7 @@ async function executeReviewControllerOperation(
 					if (existing === undefined) for (const pending of [...pendingReviewConsents.values()]) if (pending.candidateView.token === consentCandidateView.token) consumePendingReviewConsent(pending, pendingReviewConsents);
 					const id = existing?.id ?? randomUUID();
 					if (existing === undefined) {
-						const pending: PendingReviewConsent = { id, repositoryCwd, candidateView: consentCandidateView, consent: error.consent, consentDigest, expiresAt: Date.now() + PENDING_REVIEW_CONSENT_TTL_MS };
+						const pending: PendingReviewConsent = { id, repositoryCwd, authorityCwd: defaultCwd, candidateView: consentCandidateView, consent: error.consent, consentDigest, expiresAt: Date.now() + PENDING_REVIEW_CONSENT_TTL_MS };
 						pendingReviewConsents.set(id, pending);
 						pending.expiry = setTimeout(() => cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews), PENDING_REVIEW_CONSENT_TTL_MS);
 						pending.expiry.unref();
@@ -5231,7 +5249,7 @@ async function executeReviewControllerOperation(
 							nextAction: "review.status",
 						});
 				return reconcileNativeMutationFailure(parameters.operation, failure, nativeReviewCli, {
-					cwd: candidateView?.root ?? defaultCwd,
+					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(canonicalBaseRef === undefined ? {} : { baseRef: candidateView?.baseCommit ?? canonicalBaseRef }),
 					projection: "workspace",

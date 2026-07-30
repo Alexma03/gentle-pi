@@ -16,6 +16,8 @@ import {
 	type ExecFileAdapter,
 	type NativeReviewCli,
 	type NativeReviewConsentAnswer,
+	type NativeReviewConsentAnswerRequest,
+	type NativeStartRequest,
 } from "../lib/native-review-cli.ts";
 import { CandidateViewRegistry } from "../lib/review-candidate-view.ts";
 import { recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
@@ -293,18 +295,22 @@ const UNSUPPORTED_REPAIR_ASSESSMENT: AuthorityRepairAssessmentV1 = {
 	authorizationSchema: "gentle-ai.review-repair-authorization/v1",
 };
 
-function unrelatedStartTargetStatus(): ReviewStatusV3 {
+function unrelatedStartTargetStatus(cwd: string): ReviewStatusV3 {
 	const sha = `sha256:${"a".repeat(64)}`;
-	const tree = "b".repeat(40);
+	const candidate = new CandidateViewRegistry().create({ contributorRoot: cwd });
+	const tree = candidate.candidateTree;
+	const baseTree = candidate.baseTree;
+	const paths = candidate.paths;
+	candidate.cleanup();
 	const projection = {
 		schema: "gentle-ai.review-integration.projection/v1" as const,
 		kind: "current-changes" as const,
 		projection: "workspace" as const,
-		baseTree: tree,
+		baseTree,
 		initialReviewTree: tree,
 		currentCandidateTree: tree,
 		pathsDigest: sha,
-		paths: ["app.ts"],
+		paths,
 		intendedUntracked: [],
 		intendedUntrackedProof: sha,
 		initialSnapshotIdentity: sha,
@@ -334,7 +340,7 @@ function unrelatedStartTargetStatus(): ReviewStatusV3 {
 			schema: "gentle-ai.review-integration.status/v3", contract: "gentle-ai.review-integration/v2", operation: "review.status",
 			applicability: "unrelated", receipt: { status: "not_applicable" }, action: "start", replayability: "not_replayable", target_identity: sha,
 			repair: rawRepair,
-			projection: { schema: projection.schema, kind: projection.kind, projection: projection.projection, base_tree: tree, initial_review_tree: tree, current_candidate_tree: tree, paths_digest: sha, paths: ["app.ts"], intended_untracked: [], intended_untracked_proof: sha, initial_snapshot_identity: sha, current_snapshot_identity: sha },
+			projection: { schema: projection.schema, kind: projection.kind, projection: projection.projection, base_tree: baseTree, initial_review_tree: tree, current_candidate_tree: tree, paths_digest: sha, paths, intended_untracked: [], intended_untracked_proof: sha, initial_snapshot_identity: sha, current_snapshot_identity: sha },
 			candidates: [],
 		},
 	};
@@ -370,8 +376,8 @@ function fakeOrganicNative(options: FakeOrganicNativeOptions = {}): { native: Na
 		async bindSdd(): Promise<never> { throw new Error("bindSdd not used in this test"); },
 		async sddStatus(): Promise<never> { throw new Error("sddStatus not used in this test"); },
 		async reviewStatus(): Promise<never> { throw new Error("reviewStatus not used in this test"); },
-		async targetStatus() {
-			return unrelatedStartTargetStatus();
+		async targetStatus(request: { cwd: string }) {
+			return unrelatedStartTargetStatus(request.cwd);
 		},
 		...(reviewModeCapable
 			? {
@@ -535,17 +541,23 @@ function candidateConsent(cwd: string): ReviewConsentV2 {
 	return { schema: "gentle-ai.review-integration.consent/v2", contract: "gentle-ai.review-integration/v2", operation: "review.start", action: "consent_required", blocking: true, targetIdentity, projection: "workspace", riskLevel: "high", changedFiles: 1, changedLines: 1, headline: "Review this candidate", reason: "It changes a process boundary.", value: "Review catches regressions.", riskEvidence: ["shell process"], choices, offPath: { note: "Disable reviews separately.", command: "gentle-ai review mode disable" }, raw };
 }
 
-function relayedConsentNative(cwd: string): { native: NativeReviewCli; answers: NativeReviewConsentAnswer[] } {
+function relayedConsentNative(cwd: string): { native: NativeReviewCli; answers: NativeReviewConsentAnswer[]; startRequests: NativeStartRequest[]; answerRequests: NativeReviewConsentAnswerRequest[] } {
 	const { native } = fakeOrganicNative();
 	const consent = candidateConsent(cwd);
 	const answers: NativeReviewConsentAnswer[] = [];
-	native.start = async () => { throw new NativeReviewConsentRequiredError(consent); };
+	const startRequests: NativeStartRequest[] = [];
+	const answerRequests: NativeReviewConsentAnswerRequest[] = [];
+	native.start = async (request) => {
+		startRequests.push(request);
+		throw new NativeReviewConsentRequiredError(consent);
+	};
 	native.answerConsent = async (request) => {
 		answers.push(request.answer);
+		answerRequests.push(request);
 		if (request.answer === "declined") return { kind: "declined", targetIdentity: consent.targetIdentity, projection: "workspace", riskLevel: "high", changedFiles: 1, changedLines: 1, consent: "declined_this_candidate", raw: { operation: "review/start", action: "declined", consent: "declined_this_candidate" } };
 		return { kind: "started", start: { lineageId: "native-lineage", state: "reviewing", riskLevel: "high", selectedLenses: ["review-risk", "review-resilience", "review-readability", "review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true } };
 	};
-	return { native, answers };
+	return { native, answers, startRequests, answerRequests };
 }
 
 async function answerConsent(controller: RegisteredTool, binding: unknown, answer: unknown, ctx: ExtensionContext): Promise<Record<string, unknown>> {
@@ -579,13 +591,23 @@ test("consent relay returns the identical complete parent-visible envelope with 
 test("explicit consent follow-up grants or declines exactly once", async (t) => {
 	const cwd = repository(t);
 	for (const answer of ["granted", "declined"] as const) {
-		const { native, answers } = relayedConsentNative(cwd);
+		const { native, answers, startRequests, answerRequests } = relayedConsentNative(cwd);
 		const { controller } = runtime(native);
 		const blocked = await blockedConsent(controller, `consent-${answer}`, headlessContext(cwd));
 		const result = await answerConsent(controller, blocked.consent_binding, answer, headlessContext(cwd));
 		assert.deepEqual(answers, [answer]);
-		if (answer === "granted") assert.ok(result.actor_binding);
-		else {
+		assert.equal(startRequests.length, 1);
+		assert.equal(startRequests[0]?.cwd, cwd);
+		assert.equal(startRequests[0]?.targetIdentity, candidateConsent(cwd).targetIdentity);
+		assert.equal(startRequests[0]?.projection, "workspace");
+		assert.equal(answerRequests.length, 1);
+		assert.equal(answerRequests[0]?.cwd, cwd);
+		assert.equal(answerRequests[0]?.consent.targetIdentity, startRequests[0]?.targetIdentity);
+		if (answer === "granted") {
+			const actorBinding = result.actor_binding as { workspace_root: string; candidate_root: string };
+			assert.equal(actorBinding.workspace_root, cwd);
+			assert.notEqual(actorBinding.candidate_root, cwd);
+		} else {
 			assert.equal(result.outcome, "consent-declined-this-candidate");
 			assert.equal(result.lineage_created, false);
 			assert.equal(result.actor_binding, undefined);
