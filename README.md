@@ -11,15 +11,6 @@
 [![SDD/OpenSpec](https://img.shields.io/badge/SDD-OpenSpec-00ADD8)](#sddopenspec-flow)
 [![Subagents](https://img.shields.io/badge/Pi-subagents-brightgreen)](#what-it-adds)
 
-> [!IMPORTANT]
-> **RDD is unstable.** Native Receipt-Driven Development started in `gentle-pi` `v0.15.0`. Every release from `v0.15.0` onward is part of the RDD development line and may change while remaining issues are fixed.
->
-> For a stable installation without RDD, use the last version before native RDD, `v0.14.0`:
-> ```bash
-> pi install npm:gentle-pi@0.14.0
-> ```
-> To test the latest released RDD build, use `@latest`.
-
 **Turn Pi from a powerful coding agent into a controlled development harness.**
 
 `gentle-pi` installs **el Gentleman** in Pi: a senior-architect operating layer for Spec-Driven Development, focused subagents, strict TDD evidence, reviewable work units, safety guards, project/user skill discovery, and bounded native review.
