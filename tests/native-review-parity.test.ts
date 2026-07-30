@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import {
 	NativeReviewConsentBindingError,
 	NativeReviewConsentRequiredError,
 	NativeReviewCliV213 as NativeReviewCliV213Production,
+	normalizeNativeReviewCwd,
 	setNativeCliContractForTesting,
 	type ExecFileAdapter,
 	type NativeReviewCli,
@@ -113,6 +114,26 @@ test("reviewMode status uses the exact fixed argv and decodes the effective mode
 	assert.deepEqual(queue.calls[1]?.arguments, ["review", "mode", "status", "--cwd", "/repo", "--json"]);
 	assert.equal(result.status.effective, "on");
 	assert.equal(result.scope, "both");
+});
+
+test("reviewMode canonicalizes an existing repository cwd before the version probe and status argv", async (t) => {
+	if (process.platform === "win32") return t.skip("directory symlink creation requires elevated Windows privileges");
+	const repository = mkdtempSync(join(tmpdir(), "gentle-pi-review-mode-cwd-"));
+	const alias = `${repository}-alias`;
+	symlinkSync(repository, alias, "dir");
+	t.after(() => { rmSync(alias, { force: true }); rmSync(repository, { recursive: true, force: true }); });
+	const queue = queuedAdapter([CAPABLE_VERSION_LINE, { stdout: JSON.stringify(reviewModeStatusBody("off", { global: "off", source: "global" })) }]);
+	const result = await new NativeReviewCliV213(queue.adapter).reviewMode({ cwd: alias, operation: "status" });
+	assert.equal(result.status.effective, "off");
+	assert.equal(queue.calls.every((call) => call.cwd === repository), true);
+	assert.deepEqual(queue.calls[1]?.arguments, ["review", "mode", "status", "--cwd", repository, "--json"]);
+});
+
+test("native review cwd normalization unifies Git Bash and drive-form Windows paths", () => {
+	const expected = "C:\\Users\\Alan\\worktree B";
+	assert.equal(normalizeNativeReviewCwd("/c/Users/Alan/worktree B", "win32"), expected);
+	assert.equal(normalizeNativeReviewCwd("c:/Users/Alan/worktree B", "win32"), expected);
+	assert.equal(normalizeNativeReviewCwd("/c/Users/Alan/worktree B", "linux"), "/c/Users/Alan/worktree B");
 });
 
 test("reviewMode status decodes an off effective mode with its deciding source", async () => {

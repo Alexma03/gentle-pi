@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
@@ -4181,6 +4181,78 @@ test("out-of-band review-mode disable discards stale lifecycle authorization and
 	effective = "off";
 	assert.equal(await toolCall({ toolName: "bash", input: { command } }, context(cwd)), undefined);
 	assert.equal(validations, 1, "disabled organic delivery must not reuse or revalidate stale review authority");
+});
+
+test("RDD-off commit and push canonicalize a git -C linked-worktree target before native mode reconsult", async (t) => {
+	const sessionCwd = repository(t);
+	const worktreeParent = mkdtempSync(join(tmpdir(), "gentle-pi-lifecycle-worktrees-"));
+	const worktree = join(worktreeParent, "worktree B");
+	const worktreeAlias = join(worktreeParent, "worktree B alias");
+	git(sessionCwd, "worktree", "add", "-b", "issue-246-worktree", worktree);
+	const windowsDrive = /^([A-Za-z]):[\\/](.*)$/.exec(worktree);
+	const worktreeSpelling = process.platform === "win32"
+		? `/${windowsDrive?.[1]?.toLowerCase()}/${windowsDrive?.[2]?.replaceAll("\\", "/")}`
+		: worktreeAlias;
+	if (process.platform === "win32") assert.ok(windowsDrive, "Windows worktree must have a drive-qualified path");
+	else symlinkSync(worktree, worktreeAlias, "dir");
+	t.after(() => {
+		try { git(sessionCwd, "worktree", "remove", "--force", worktree); } catch {}
+		rmSync(worktreeParent, { recursive: true, force: true });
+	});
+	const canonicalWorktree = realpathSync(worktree);
+	const commonDirectory = (cwd: string): string => realpathSync(resolve(cwd, git(cwd, "rev-parse", "--git-common-dir")));
+	assert.equal(commonDirectory(sessionCwd), commonDirectory(canonicalWorktree));
+	const parsed = __testing.resolveReviewLifecycleCommand(`git -C "${worktreeSpelling}" commit -m "issue 246"`, sessionCwd);
+	assert.deepEqual(parsed?.gitGlobalArgs, ["-C", worktreeSpelling], "cwd canonicalization must preserve the exact typed Git selector");
+
+	const nativeCalls: Array<{ arguments: readonly string[]; cwd: string }> = [];
+	const native = new NativeReviewCliV214(async (request) => {
+		nativeCalls.push({ arguments: request.arguments, cwd: request.cwd });
+		if (request.cwd !== canonicalWorktree) throw new Error(`native process cwd was not canonical: ${request.cwd}`);
+		if (request.arguments[0] === "version") {
+			return { stdout: "gentle-ai 2.2.2\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+		}
+		if (request.arguments[0] === "review" && request.arguments[1] === "mode") {
+			return {
+				stdout: JSON.stringify({
+					schema: "gentle-ai.review-mode/v1",
+					operation: "status",
+					scope: "both",
+					status: { schema: "gentle-ai.rdd-mode-status/v1", global: "off", clone_local: "off", effective: "off", source: "clone_local" },
+				}),
+				stderr: "",
+				exitCode: 0,
+				signal: null,
+				timedOut: false,
+				outputLimitExceeded: false,
+			};
+		}
+		throw new Error(`unexpected native review operation: ${request.arguments.join(" ")}`);
+	});
+	const { toolCall } = runtime(native);
+	for (const command of [
+		`git -C "${worktreeSpelling}" commit -m "issue 246"`,
+		`git -C "${worktreeSpelling}" push origin issue-246-worktree`,
+	]) {
+		assert.equal(await toolCall({ toolName: "bash", input: { command } }, interactiveContext(sessionCwd)), undefined);
+	}
+	assert.equal(nativeCalls.length, 4);
+	assert.equal(nativeCalls.every((call) => call.cwd === canonicalWorktree), true);
+	assert.deepEqual(nativeCalls.filter((call) => call.arguments[0] === "review").map((call) => call.arguments), [
+		["review", "mode", "status", "--cwd", canonicalWorktree, "--json"],
+		["review", "mode", "status", "--cwd", canonicalWorktree, "--json"],
+	]);
+	assert.equal(nativeCalls.some((call) => call.arguments.includes("validate")), false);
+});
+
+test("git -C linked-worktree lifecycle commands remain fail-closed when mode reconsult genuinely fails", async (t) => {
+	const sessionCwd = repository(t);
+	const { toolCall } = runtime(fakeNative({ reviewMode: async () => { throw new Error("mode unavailable"); } }));
+	for (const command of ["git -C . commit -m failure", "git -C . push origin main"]) {
+		const result = await toolCall({ toolName: "bash", input: { command } }, interactiveContext(sessionCwd)) as { block: boolean; reason: string };
+		assert.equal(result.block, true);
+		assert.match(result.reason, /could not reconsult review mode and failed closed/);
+	}
 });
 
 test("successful /gentle:review-mode disable clears pending authorizations even after mode is re-enabled", async (t) => {

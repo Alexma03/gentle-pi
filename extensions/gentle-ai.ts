@@ -104,6 +104,7 @@ import {
 	nativeReviewLegacyAliasRepairAuthorization,
 	nativeReviewLegacyQuarantineAuthorization,
 	nativeReviewReconcileAuthorization,
+	normalizeNativeReviewCwd,
 	NativeReviewCliError,
 	NativeReviewConsentBindingError,
 	NativeReviewConsentRequiredError,
@@ -2873,7 +2874,7 @@ export function resolveReviewLifecycleCommand(
 	}
 	if (words[0] !== "git") return null;
 	const gitGlobalArgs: string[] = [];
-	let resolvedCwd = resolve(defaultCwd);
+	let resolvedCwd = resolve(normalizeNativeReviewCwd(defaultCwd));
 	let index = 1;
 	while (index < words.length) {
 		const option = words[index];
@@ -2881,7 +2882,7 @@ export function resolveReviewLifecycleCommand(
 			const value = words[index + 1];
 			if (value === undefined) return null;
 			gitGlobalArgs.push(option, value);
-			if (option === "-C") resolvedCwd = resolve(resolvedCwd, value);
+			if (option === "-C") resolvedCwd = resolve(resolvedCwd, normalizeNativeReviewCwd(value));
 			else return null;
 			index += 2;
 			continue;

@@ -1037,6 +1037,21 @@ function decodeNativeReviewStatus(value: unknown): NativeReviewStatusResult {
 	};
 }
 function isWindowsRepositoryPath(value: string): boolean { return /^[A-Za-z]:[\\/]/.test(value) || /^\\\\/.test(value); }
+export function normalizeNativeReviewCwd(value: string, platform: NodeJS.Platform = process.platform): string {
+	if (platform !== "win32") return value;
+	const gitBashDrive = /^\/([A-Za-z])(?:\/(.*))?$/.exec(value);
+	const windowsPath = gitBashDrive === null
+		? value
+		: `${gitBashDrive[1]!.toUpperCase()}:/${gitBashDrive[2] ?? ""}`;
+	if (!isWindowsRepositoryPath(windowsPath)) return windowsPath;
+	const normalized = win32.normalize(windowsPath);
+	return normalized.replace(/^([a-z]):/, (_match, drive: string) => `${drive.toUpperCase()}:`);
+}
+async function canonicalNativeReviewCwd(value: string): Promise<string> {
+	const normalized = normalizeNativeReviewCwd(value);
+	try { return await realpath(normalized); }
+	catch { return normalized; }
+}
 async function repositoryPathIdentity(value: string): Promise<string> {
 	const windowsPath = isWindowsRepositoryPath(value);
 	try { return `filesystem:${windowsPath ? (await realpath(value)).toLowerCase() : await realpath(value)}`; }
@@ -1360,12 +1375,13 @@ export class NativeReviewCliV214 {
 	// and always pass `--scope clone` so Pi's own kill-switch command surface
 	// never mutates the operator's global gentle-ai state across other clones.
 	async reviewMode(request: NativeReviewModeRequest): Promise<NativeReviewModeResult> {
-		await this.verifyVersion(request.cwd, request.signal, ["mode"]);
+		const cwd = await canonicalNativeReviewCwd(request.cwd);
+		await this.verifyVersion(cwd, request.signal, ["mode"]);
 		const mutating = request.operation !== NATIVE_REVIEW_MODE_OPERATION.STATUS;
 		const { body } = await this.execute(
 			NATIVE_REVIEW_OPERATION.MODE,
-			request.cwd,
-			["review", "mode", request.operation, "--cwd", request.cwd, ...(mutating ? ["--scope", "clone"] : []), "--json"],
+			cwd,
+			["review", "mode", request.operation, "--cwd", cwd, ...(mutating ? ["--scope", "clone"] : []), "--json"],
 			mutating,
 			request.signal,
 		);
