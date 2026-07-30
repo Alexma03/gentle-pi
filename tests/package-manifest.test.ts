@@ -1137,9 +1137,9 @@ test("pi-pretty wrapper uses real package path resolution for pnpm symlink insta
 	assert.match(wrapper, /quietToolsEnabled/);
 });
 
-test("v2.0.0 release package and runtime stop before publication", () => {
+test("v2.1.0 release package and runtime stop before publication", () => {
 	const packageJson = readPackageJson();
-	assert.equal(packageJson.version, "2.0.0", "the release manifest must remain explicitly pinned to v2.0.0");
+	assert.equal(packageJson.version, "2.1.0", "the release manifest must remain explicitly pinned to v2.1.0");
 	assert.equal(
 		packageJson.scripts?.test,
 		"node --experimental-strip-types --test tests/*.test.ts && pnpm run test:harness",
