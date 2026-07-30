@@ -84,7 +84,7 @@ function fakeNative(overrides: Partial<NativeReviewCli> = {}): NativeReviewCli {
 		sddStatus: async () => ({ ready: false }),
 		reviewStatus: async () => ({ schema: "gentle-ai.review-authority-status/v1", repository: "/repo", complete: true, authoritative: true, status: "clean", entries: [], locks: [], diagnostics: [], raw: { schema: "gentle-ai.review-authority-status/v1", operation: "review/status", repository: "/repo", complete: true, authoritative: true, status: "clean", entries: [], locks: [], diagnostics: [] } }),
 		targetStatus: async (request) => request.lineageId === undefined
-			? targetStatusFixture({ applicability: "unrelated", action: "start" })
+			? candidateStartTargetStatus(request)
 			: targetStatusFixture({ lineageId: request.lineageId }),
 		...overrides,
 	};
@@ -102,21 +102,26 @@ function targetStatusFixture(options: {
 	applicability?: "current_target" | "unrelated";
 	action?: ReviewStatusV3["action"];
 	lineageId?: string;
+	baseTree?: string;
+	currentCandidateTree?: string;
+	paths?: readonly string[];
 } = {}): ReviewStatusV3 {
 	const applicability = options.applicability ?? "current_target";
 	const action = options.action ?? (applicability === "current_target" ? "finalize" : "start");
 	const lineageId = options.lineageId ?? "native-lineage";
 	const sha = `sha256:${"a".repeat(64)}`;
-	const tree = "b".repeat(40);
+	const tree = options.currentCandidateTree ?? "b".repeat(40);
+	const baseTree = options.baseTree ?? tree;
+	const paths = options.paths ?? ["app.ts"];
 	const projection = {
 		schema: "gentle-ai.review-integration.projection/v1" as const,
 		kind: "current-changes" as const,
 		projection: "workspace" as const,
-		baseTree: tree,
+		baseTree,
 		initialReviewTree: tree,
 		currentCandidateTree: tree,
 		pathsDigest: sha,
-		paths: ["app.ts"],
+		paths,
 		intendedUntracked: [],
 		intendedUntrackedProof: sha,
 		initialSnapshotIdentity: sha,
@@ -146,11 +151,11 @@ function targetStatusFixture(options: {
 			schema: projection.schema,
 			kind: projection.kind,
 			projection: projection.projection,
-			base_tree: tree,
+			base_tree: baseTree,
 			initial_review_tree: tree,
 			current_candidate_tree: tree,
 			paths_digest: sha,
-			paths: projection.paths,
+			paths,
 			intended_untracked: [],
 			intended_untracked_proof: sha,
 			initial_snapshot_identity: sha,
@@ -178,6 +183,25 @@ function targetStatusFixture(options: {
 	};
 }
 
+function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0]): ReviewStatusV3 {
+	let candidate: ReturnType<CandidateViewRegistry["create"]> | undefined;
+	try {
+		candidate = new CandidateViewRegistry().create({
+			contributorRoot: request.cwd,
+			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef, committedOnly: true }),
+		});
+		return targetStatusFixture({
+			applicability: "unrelated",
+			action: "start",
+			baseTree: candidate.baseTree,
+			currentCandidateTree: candidate.candidateTree,
+			paths: candidate.paths,
+		});
+	} finally {
+		candidate?.cleanup();
+	}
+}
+
 test("INSPECT and STATUS operate on the explicit workspace root while the session cwd stays elsewhere", async (t) => {
 	const sessionCwd = repository(t);
 	const worktree = addWorktree(t, sessionCwd, "feat-binding");
@@ -200,10 +224,10 @@ test("START freezes the candidate from the explicit workspace root and returns t
 	const worktree = addWorktree(t, sessionCwd, "feat-candidate");
 	writeFileSync(join(worktree, "app.ts"), "export const value = 2; // worktree candidate\n");
 	const candidateViews = new CandidateViewRegistry();
-	const startCwds: string[] = [];
+	const startRequests: Parameters<NativeReviewCli["start"]>[0][] = [];
 	const { controller, toolCall } = runtime(fakeNative({
 		start: async (request) => {
-			startCwds.push(request.cwd);
+			startRequests.push(request);
 			return { lineageId: "worktree-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
 	}), candidateViews);
@@ -219,7 +243,8 @@ test("START freezes the candidate from the explicit workspace root and returns t
 	const view = candidateViews.resolveForLens("worktree-lineage", "review-reliability");
 	assert.equal(details.actor_binding.candidate_root, view.root);
 	assert.equal(details.actor_binding.candidate_tree, view.candidateTree);
-	assert.deepEqual(startCwds, [view.root]);
+	assert.deepEqual(startRequests, [{ cwd: root, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" }]);
+	assert.notEqual(startRequests[0]?.cwd, view.root);
 	assert.equal(readFileSync(join(view.root, "app.ts"), "utf8"), "export const value = 2; // worktree candidate\n");
 	assert.equal(view.paths.includes("unrelated.ts"), false);
 	const dispatch = { agent: "review-reliability", task: "review the change", mode: "task" };
@@ -234,8 +259,12 @@ test("absent workspaceRoot keeps the session-cwd flow and still reports the acto
 	const sessionCwd = repository(t);
 	writeFileSync(join(sessionCwd, "app.ts"), "export const value = 3;\n");
 	const candidateViews = new CandidateViewRegistry();
+	const startRequests: Parameters<NativeReviewCli["start"]>[0][] = [];
 	const { controller } = runtime(fakeNative({
-		start: async () => ({ lineageId: "session-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true }),
+		start: async (request) => {
+			startRequests.push(request);
+			return { lineageId: "session-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
 	}), candidateViews);
 	const started = await controller.execute("start-session", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(sessionCwd));
 	const details = started.details as {
@@ -245,6 +274,7 @@ test("absent workspaceRoot keeps the session-cwd flow and still reports the acto
 	assert.equal(details.workspace_root, sessionCwd);
 	assert.equal(details.actor_binding.workspace_root, sessionCwd);
 	assert.deepEqual(details.actor_binding.candidate_paths, ["app.ts"]);
+	assert.deepEqual(startRequests, [{ cwd: sessionCwd, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" }]);
 	const view = candidateViews.resolveForLens("session-lineage", "review-reliability");
 	assert.equal(details.actor_binding.candidate_root, view.root);
 	candidateViews.cleanup(view.token);

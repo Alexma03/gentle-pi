@@ -75,11 +75,27 @@ function nativeStatus(cwd: string, status: string, locks: readonly unknown[]): N
 	} as NativeReviewStatusResult;
 }
 
-function fakeNative(status: NativeReviewStatusResult, onStart?: () => void): NativeReviewCli {
+function fakeNative(status: NativeReviewStatusResult, onStart?: (request: Parameters<NativeReviewCli["start"]>[0]) => void): NativeReviewCli {
 	const blocking = status.locks.some((lock) => (lock as { status?: string }).status !== "released");
+	const tree = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: status.repository, encoding: "utf8" }).trim();
+	const targetIdentity = `sha256:${"a".repeat(64)}`;
+	const projection = {
+		schema: "gentle-ai.review-integration.projection/v1",
+		kind: "current-changes",
+		projection: "workspace",
+		baseTree: tree,
+		initialReviewTree: tree,
+		currentCandidateTree: tree,
+		pathsDigest: targetIdentity,
+		paths: [],
+		intendedUntracked: [],
+		intendedUntrackedProof: targetIdentity,
+		initialSnapshotIdentity: targetIdentity,
+		currentSnapshotIdentity: targetIdentity,
+	};
 	return {
-		start: async () => {
-			onStart?.();
+		start: async (request) => {
+			onStart?.(request);
 			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
 		finalize: async () => { throw new Error("finalize must not run"); },
@@ -90,7 +106,9 @@ function fakeNative(status: NativeReviewStatusResult, onStart?: () => void): Nat
 		targetStatus: async () => ({
 			applicability: blocking ? "corrupted" : "unrelated",
 			action: blocking ? "repair_authority" : "start",
-			raw: { action: blocking ? "repair_authority" : "start", locks: status.locks },
+			targetIdentity,
+			projection,
+			raw: { action: blocking ? "repair_authority" : "start", locks: status.locks, target_identity: targetIdentity, projection: { projection: "workspace" } },
 		}),
 	} as unknown as NativeReviewCli;
 }
@@ -121,11 +139,11 @@ test("INSPECT treats released lock residue as non-blocking and still blocks on l
 test("START precondition ignores released lock residue and still blocks on live lock claims", async (t) => {
 	const cwd = repository(t);
 
-	let started = 0;
-	const proceeded = await runtime(fakeNative(nativeStatus(cwd, "clean", [RELEASED_LOCK]), () => { started += 1; }))
+	const startRequests: Parameters<NativeReviewCli["start"]>[0][] = [];
+	const proceeded = await runtime(fakeNative(nativeStatus(cwd, "clean", [RELEASED_LOCK]), (request) => { startRequests.push(request); }))
 		.execute("start-released", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const proceededDetails = proceeded.details as Record<string, unknown>;
-	assert.equal(started, 1);
+	assert.deepEqual(startRequests, [{ cwd, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" }]);
 	assert.equal((proceededDetails.result as Record<string, unknown>).lineage_id, "native-lineage");
 	assert.notEqual(proceededDetails.outcome, "native-authority-lock-present");
 
