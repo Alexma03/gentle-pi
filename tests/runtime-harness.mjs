@@ -537,7 +537,7 @@ async function run() {
 		const executableDigest = "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705";
 		const capabilitiesBody = {
 			...capabilitiesFixture,
-			package: { ...capabilitiesFixture.package, version: "2.2.2" },
+			package: { ...capabilitiesFixture.package, version: "2.2.3" },
 		};
 		const statusBody = {
 			schema: "gentle-ai.review-integration.status/v3",
