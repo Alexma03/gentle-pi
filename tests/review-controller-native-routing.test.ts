@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
@@ -1510,6 +1510,35 @@ test("native START preserves a candidate-view diagnostic before native invocatio
 	assert.equal(starts, 0);
 });
 
+test("native START returns a structured pre-native candidate-view output-limit diagnostic without calling native START", async (t) => {
+	const cwd = repository(t);
+	let starts = 0;
+	const candidateViews = new CandidateViewRegistry(() => {
+		throw Object.assign(new Error("sensitive stderr and candidate bytes"), { code: "ENOBUFS", stderr: Buffer.from("sensitive stderr and candidate bytes") });
+	});
+	const { controller } = runtime(fakeNative({
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}), undefined, undefined, undefined, candidateViews);
+	const result = await controller.execute("candidate-view-output-limit", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const details = result.details as Record<string, unknown>;
+	assert.equal(details.outcome, "native-operation-failed");
+	assert.equal(details.lineage_created, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.deepEqual(details.diagnostics, {
+		phase: "candidate-view",
+		category: "output-limit",
+		git_subcommand: "rev-parse",
+		timeout_ms: 10_000,
+		max_buffer_bytes: 64 * 1024 * 1024,
+		message: "candidate-view Git command rev-parse exceeded the 67108864-byte output limit; inspect the candidate state before any new START",
+	});
+	assert.doesNotMatch(JSON.stringify(details), /sensitive stderr|candidate bytes/);
+	assert.equal(starts, 0);
+});
+
 test("ambiguous native START failure preserves rebuilt sanitized diagnostics across duplicated module instances", async (t) => {
 	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-native-controller-"));
 	t.after(() => rmSync(cwd, { recursive: true, force: true }));
@@ -1718,6 +1747,52 @@ test("native START re-verifies candidate-view integrity before granting workspac
 	assert.equal(starts, 0);
 });
 
+test("native START preserves an explicit base-resolution timeout diagnostic without native START", async (t) => {
+	const cwd = repository(t);
+	const bin = join(cwd, "test-bin");
+	mkdirSync(bin);
+	const fakeGit = join(bin, "git");
+	writeFileSync(fakeGit, "#!/bin/sh\nexec sleep 1\n");
+	chmodSync(fakeGit, 0o755);
+	const previousPath = process.env.PATH;
+	const previousTimeout = process.env.GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS;
+	t.after(() => {
+		if (previousPath === undefined) delete process.env.PATH;
+		else process.env.PATH = previousPath;
+		if (previousTimeout === undefined) delete process.env.GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS;
+		else process.env.GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS = previousTimeout;
+	});
+	process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+	process.env.GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS = "1";
+	let starts = 0;
+	let statuses = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statuses += 1;
+			throw new Error("target status must not run after base resolution fails");
+		},
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	const result = await controller.execute("base-resolution-timeout", { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef: "refs/heads/main", committedOnly: true }) }, undefined, undefined, context(cwd));
+	const details = result.details as Record<string, unknown>;
+	assert.equal(details.outcome, "native-operation-failed");
+	assert.equal(details.lineage_created, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.deepEqual(details.diagnostics, {
+		phase: "candidate-view",
+		category: "timeout",
+		git_subcommand: "for-each-ref",
+		timeout_ms: 1,
+		max_buffer_bytes: 64 * 1024 * 1024,
+		message: "candidate-view Git command for-each-ref timed out after 1ms; inspect the candidate state before any new START",
+	});
+	assert.equal(statuses, 0);
+	assert.equal(starts, 0);
+});
+
 test("native START rejects an unresolvable explicit base before native mutation", async (t) => {
 	const cwd = repository(t);
 	let starts = 0;
@@ -1877,6 +1952,267 @@ test("ordinary START fails closed before legacy policy handling when target stat
 	const { controller } = runtime(null);
 	const result = await controller.execute("legacy-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", policyHash: "a".repeat(64) }) }, undefined, undefined, context(cwd));
 	assert.equal((result.details as { outcome?: string }).outcome, "native-status-unsupported");
+});
+
+test("INSPECT reports a missing package-local native binary with fail-closed reinstall guidance", async (t) => {
+	const cwd = repository(t);
+	const rawPath = "/private/workspace/.gentle-ai/gentle-ai";
+	const rawSecret = "package-binary-secret";
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			throw new NativeReviewCliError(
+				NATIVE_REVIEW_ERROR_CODE.PACKAGE_BINARY_MISSING,
+				NATIVE_REVIEW_OPERATION.VERSION,
+				false,
+				false,
+				`missing ${rawPath} token=${rawSecret}`,
+			);
+		},
+	}));
+	const response = await controller.execute("inspect-package-binary-missing", { operation: "inspect" }, undefined, undefined, context(cwd));
+	const details = response.details as Record<string, unknown>;
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-status-package-binary-missing");
+	assert.deepEqual(details.diagnostics, {
+		operation: NATIVE_REVIEW_OPERATION.VERSION,
+		error_code: NATIVE_REVIEW_ERROR_CODE.PACKAGE_BINARY_MISSING,
+		timed_out: false,
+		output_limit_exceeded: false,
+	});
+	assert.equal(details.inventory_complete, false);
+	assert.equal(details.mutation_performed, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.equal(details.next_action, "reinstall-package-local-gentle-ai");
+	assert.doesNotMatch(JSON.stringify(details), new RegExp(`${rawPath}|${rawSecret}`));
+});
+
+test("START reports a missing package-local native binary before any native mutation", async (t) => {
+	const cwd = repository(t);
+	let starts = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			throw new NativeReviewCliError(
+				NATIVE_REVIEW_ERROR_CODE.PACKAGE_BINARY_MISSING,
+				NATIVE_REVIEW_OPERATION.VERSION,
+				false,
+				false,
+				"package-local binary missing",
+			);
+		},
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}));
+	const response = await controller.execute("start-package-binary-missing", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const details = response.details as Record<string, unknown>;
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-status-package-binary-missing");
+	assert.equal(details.inventory_complete, false);
+	assert.equal(details.lineage_created, false);
+	assert.equal(details.mutation_performed, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.equal(details.next_action, "reinstall-package-local-gentle-ai");
+	assert.equal(starts, 0);
+});
+
+test("REPAIR reports a missing package-local native binary without touching authority", async (t) => {
+	const cwd = repository(t);
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			throw new NativeReviewCliError(
+				NATIVE_REVIEW_ERROR_CODE.PACKAGE_BINARY_MISSING,
+				NATIVE_REVIEW_OPERATION.VERSION,
+				false,
+				false,
+				"package-local binary missing",
+			);
+		},
+	}));
+	const response = await controller.execute("repair-package-binary-missing", { operation: "repair" }, undefined, undefined, context(cwd));
+	const details = response.details as Record<string, unknown>;
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-status-package-binary-missing");
+	assert.equal(details.inventory_complete, false);
+	assert.equal(details.mutation_performed, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.equal(details.next_action, "reinstall-package-local-gentle-ai");
+});
+
+test("START preserves bounded sanitized version-process diagnostics before native mutation", async (t) => {
+	const cwd = repository(t);
+	const rawPath = "/private/workspace/gentle-ai";
+	const rawSecret = "version-process-secret";
+	const stderr = `version process failed token=${rawSecret}\n${"x".repeat(5_000)}`;
+	const foreignError = Object.assign(new Error(`version process failed at ${rawPath} token=${rawSecret}`), {
+		name: "NativeReviewCliError",
+		code: NATIVE_REVIEW_ERROR_CODE.NON_ZERO,
+		diagnostics: {
+			operation: NATIVE_REVIEW_OPERATION.VERSION,
+			error_code: NATIVE_REVIEW_ERROR_CODE.NON_ZERO,
+			exit_code: 17,
+			timed_out: false,
+			output_limit_exceeded: false,
+			stderr,
+		},
+	});
+	let starts = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => { throw foreignError; },
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}));
+	const response = await controller.execute("start-version-process-failure", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const details = response.details as Record<string, unknown>;
+	const diagnostics = details.diagnostics as { operation?: string; error_code?: string; stderr?: string };
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-operation-failed");
+	assert.equal(diagnostics.operation, NATIVE_REVIEW_OPERATION.VERSION);
+	assert.equal(diagnostics.error_code, NATIVE_REVIEW_ERROR_CODE.NON_ZERO);
+	assert.match(diagnostics.stderr ?? "", /token=\[REDACTED\]/);
+	assert.ok((diagnostics.stderr?.length ?? 0) <= 4_096);
+	assert.equal(details.lineage_created, false);
+	assert.equal(details.mutation_performed, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.equal(starts, 0);
+	assert.doesNotMatch(JSON.stringify(details), new RegExp(`${rawPath}|${rawSecret}`));
+
+	const inspect = await controller.execute("inspect-version-process-failure", { operation: "inspect" }, undefined, undefined, context(cwd));
+	const inspectDetails = inspect.details as Record<string, unknown>;
+	assert.equal(inspectDetails.status, "blocked");
+	assert.equal(inspectDetails.outcome, "native-status-unavailable");
+	assert.deepEqual(inspectDetails.diagnostics, details.diagnostics);
+	assert.equal(inspectDetails.inventory_complete, false);
+	assert.equal(inspectDetails.mutation_performed, false);
+	assert.equal(inspectDetails.mutation_outcome, "none");
+	assert.doesNotMatch(JSON.stringify(inspectDetails), new RegExp(`${rawPath}|${rawSecret}`));
+});
+
+test("INSPECT preserves bounded sanitized review/status process diagnostics and remains fail-closed", async (t) => {
+	const cwd = repository(t);
+	const rawPath = "/private/workspace/review-status";
+	const rawSecret = "review-status-secret";
+	const stderr = `review status failed token=${rawSecret}\n${"x".repeat(5_000)}`;
+	const foreignError = Object.assign(new Error(`review status failed at ${rawPath} token=${rawSecret}`), {
+		name: "NativeReviewCliError",
+		code: NATIVE_REVIEW_ERROR_CODE.NON_ZERO,
+		diagnostics: {
+			operation: NATIVE_REVIEW_OPERATION.STATUS,
+			error_code: NATIVE_REVIEW_ERROR_CODE.NON_ZERO,
+			exit_code: 18,
+			timed_out: false,
+			output_limit_exceeded: false,
+			stderr,
+		},
+	});
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => { throw foreignError; },
+	}));
+	const response = await controller.execute("inspect-review-status-process-failure", { operation: "inspect" }, undefined, undefined, context(cwd));
+	const details = response.details as Record<string, unknown>;
+	const diagnostics = details.diagnostics as { operation?: string; error_code?: string; stderr?: string };
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-status-unavailable");
+	assert.equal(diagnostics.operation, NATIVE_REVIEW_OPERATION.STATUS);
+	assert.equal(diagnostics.error_code, NATIVE_REVIEW_ERROR_CODE.NON_ZERO);
+	assert.match(diagnostics.stderr ?? "", /token=\[REDACTED\]/);
+	assert.ok((diagnostics.stderr?.length ?? 0) <= 4_096);
+	assert.equal(details.inventory_complete, false);
+	assert.equal(details.mutation_performed, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.doesNotMatch(JSON.stringify(details), new RegExp(`${rawPath}|${rawSecret}`));
+});
+
+test("INSPECT keeps version-incompatible target status failures mapped to native-status-unsupported", async (t) => {
+	const cwd = repository(t);
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			throw new NativeReviewCliError(
+				NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE,
+				NATIVE_REVIEW_OPERATION.VERSION,
+				true,
+				false,
+				"native version is incompatible",
+			);
+		},
+	}));
+	const response = await controller.execute("inspect-version-incompatible", { operation: "inspect" }, undefined, undefined, context(cwd));
+	const details = response.details as Record<string, unknown>;
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-status-unsupported");
+	assert.equal(details.inventory_complete, false);
+	assert.equal(details.mutation_performed, false);
+	assert.equal(details.mutation_outcome, undefined);
+});
+
+test("INSPECT preserves output-limit diagnostics from native review status and remains fail-closed", async (t) => {
+	const cwd = repository(t);
+	const diagnostics = {
+		operation: NATIVE_REVIEW_OPERATION.STATUS,
+		error_code: NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT,
+		output_limit_exceeded: true,
+		timed_out: false,
+	};
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			throw new NativeReviewCliError(
+				NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT,
+				NATIVE_REVIEW_OPERATION.STATUS,
+				true,
+				false,
+				"native process output exceeded limit",
+				diagnostics,
+			);
+		},
+	}));
+	const response = await controller.execute("inspect-output-limit", { operation: "inspect" }, undefined, undefined, context(cwd));
+	const details = response.details as Record<string, unknown>;
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-status-unavailable");
+	assert.deepEqual(details.diagnostics, diagnostics);
+	assert.equal(details.inventory_complete, false);
+	assert.equal(details.next_action, "require-complete-native-authority-inventory");
+	assert.equal(details.mutation_performed, false);
+	assert.equal(details.mutation_outcome, "none");
+});
+
+test("START preserves actionable review/status output-limit diagnostics before native mutation", async (t) => {
+	const cwd = repository(t);
+	const diagnostics = {
+		operation: NATIVE_REVIEW_OPERATION.STATUS,
+		error_code: NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT,
+		output_limit_exceeded: true,
+		timed_out: false,
+		max_buffer_bytes: 16 * 1024 * 1024,
+		configuration_hint: "Inspect native review state before any new START; GENTLE_PI_REVIEW_MAX_BUFFER_BYTES accepts a positive decimal up to 67108864.",
+	};
+	let starts = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			throw new NativeReviewCliError(
+				NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT,
+				NATIVE_REVIEW_OPERATION.STATUS,
+				true,
+				false,
+				"native process output exceeded limit",
+				diagnostics,
+			);
+		},
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}));
+	const response = await controller.execute("start-status-output-limit", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const details = response.details as Record<string, unknown>;
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-operation-failed");
+	assert.deepEqual(details.diagnostics, diagnostics);
+	assert.equal(details.lineage_created, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.equal(starts, 0);
 });
 
 test("general STATUS and INSPECT use negotiated target status without mutation or inventory reads", async (t) => {

@@ -26,6 +26,23 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+// Negotiated review/status responses can carry a complete authority inventory.
+// Keep the production default large enough for that payload while retaining a
+// hard 64 MiB ceiling even when GENTLE_PI_REVIEW_MAX_BUFFER_BYTES is set.
+export const NATIVE_REVIEW_DEFAULT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+const NATIVE_REVIEW_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+const NATIVE_REVIEW_MAX_BUFFER_BYTES_ENV = "GENTLE_PI_REVIEW_MAX_BUFFER_BYTES";
+const NATIVE_REVIEW_MAX_BUFFER_CONFIGURATION_HINT = "Inspect native review state before any new START; GENTLE_PI_REVIEW_MAX_BUFFER_BYTES accepts a positive decimal up to 67108864.";
+
+function resolveNativeReviewMaxBufferBytes(environment = process.env) {
+	const value = environment[NATIVE_REVIEW_MAX_BUFFER_BYTES_ENV];
+	if (value === undefined || !/^[1-9]\d*$/.test(value)) return NATIVE_REVIEW_DEFAULT_MAX_BUFFER_BYTES;
+	const parsed = Number(value);
+	return Number.isSafeInteger(parsed) && parsed <= NATIVE_REVIEW_MAX_BUFFER_BYTES
+		? parsed
+		: NATIVE_REVIEW_DEFAULT_MAX_BUFFER_BYTES;
+}
+
 export const NATIVE_REVIEW_OPERATION = {
 	VERSION: "version",
 	START: "review/start",
@@ -733,7 +750,8 @@ export function createNodeExecFileAdapter()                  {
 		} catch (error) {
 			const detail = error                                                                                                                                   ;
 			if (detail.code === "ENOENT" || detail.code === "EACCES" || detail.name === "AbortError") throw error;
-			return { stdout: detail.stdout ?? "", stderr: detail.stderr ?? "", exitCode: typeof detail.code === "number" ? detail.code : 1, signal: detail.signal ?? null, timedOut: detail.killed === true, outputLimitExceeded: detail.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" };
+			const outputLimitExceeded = detail.code === "ENOBUFS" || detail.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+			return { stdout: detail.stdout ?? "", stderr: detail.stderr ?? "", exitCode: typeof detail.code === "number" ? detail.code : 1, signal: detail.signal ?? null, timedOut: !outputLimitExceeded && detail.killed === true, outputLimitExceeded };
 		}
 	};
 }
@@ -809,12 +827,28 @@ function parseStructuredNativeDenial(stdout        )                            
 // Rebuild diagnostics from a duplicated module instance before facade output.
 export function sanitizeForeignNativeReviewDiagnostics(value         )                                             {
 	try {
-		const raw = exactObject(value, ["operation", "error_code", "timed_out", "output_limit_exceeded"], ["exit_code", "signal", "stderr", "denial"]);
+		const raw = exactObject(value, ["operation", "error_code", "timed_out", "output_limit_exceeded"], ["exit_code", "signal", "max_buffer_bytes", "configuration_hint", "stderr", "denial"]);
 		const operation = enumString(raw.operation, Object.values(NATIVE_REVIEW_OPERATION))                         ;
 		const errorCode = enumString(raw.error_code, Object.values(NATIVE_REVIEW_ERROR_CODE))                         ;
 		const signal = raw.signal === undefined ? undefined : requiredString(raw.signal);
-		if (signal !== undefined && !/^SIG[A-Z0-9]{1,12}$/.test(signal)) return undefined;
-		return { operation, error_code: errorCode, ...(raw.exit_code === undefined ? {} : { exit_code: nonNegativeInteger(raw.exit_code) }), ...(signal === undefined ? {} : { signal: signal                   }), timed_out: booleanValue(raw.timed_out), output_limit_exceeded: booleanValue(raw.output_limit_exceeded), ...(raw.stderr === undefined ? {} : { stderr: sanitizeNativeDiagnosticText(stringValue(raw.stderr)) }), ...(raw.denial === undefined ? {} : { denial: sanitizeForeignStructuredDenial(raw.denial) }) };
+		const maxBufferBytes = raw.max_buffer_bytes === undefined ? undefined : positiveInteger(raw.max_buffer_bytes);
+		const configurationHint = raw.configuration_hint === undefined ? undefined : stringValue(raw.configuration_hint);
+		if (
+			(signal !== undefined && !/^SIG[A-Z0-9]{1,12}$/.test(signal)) ||
+			(maxBufferBytes === undefined) !== (configurationHint === undefined) ||
+			(configurationHint !== undefined && (errorCode !== NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT || configurationHint !== NATIVE_REVIEW_MAX_BUFFER_CONFIGURATION_HINT))
+		) return undefined;
+		return {
+			operation,
+			error_code: errorCode,
+			...(raw.exit_code === undefined ? {} : { exit_code: nonNegativeInteger(raw.exit_code) }),
+			...(signal === undefined ? {} : { signal: signal                   }),
+			timed_out: booleanValue(raw.timed_out),
+			output_limit_exceeded: booleanValue(raw.output_limit_exceeded),
+			...(maxBufferBytes === undefined ? {} : { max_buffer_bytes: maxBufferBytes, configuration_hint: configurationHint }),
+			...(raw.stderr === undefined ? {} : { stderr: sanitizeNativeDiagnosticText(stringValue(raw.stderr)) }),
+			...(raw.denial === undefined ? {} : { denial: sanitizeForeignStructuredDenial(raw.denial) }),
+		};
 	} catch { return undefined; }
 }
 
@@ -830,14 +864,18 @@ function sanitizeForeignStructuredDenial(value         )                        
 	return { schema: "gentle-ai.review-gate-result/v1", result, action, reason, ...(denial === undefined ? {} : { denial }) };
 }
 
-function nativeProcessDiagnostics(operation                       , code                       , result                 )                                 {
+function nativeProcessDiagnostics(operation                       , code                       , result                 , maxBufferBytes          )                                 {
+	const outputLimitExceeded = result?.outputLimitExceeded === true;
 	return {
 		operation,
 		error_code: code,
 		...(result === undefined ? {} : { exit_code: result.exitCode }),
 		...(result?.signal === null || result?.signal === undefined ? {} : { signal: result.signal }),
-		timed_out: result?.timedOut === true,
-		output_limit_exceeded: result?.outputLimitExceeded === true,
+		timed_out: !outputLimitExceeded && result?.timedOut === true,
+		output_limit_exceeded: outputLimitExceeded,
+		...(code === NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT && maxBufferBytes !== undefined
+			? { max_buffer_bytes: maxBufferBytes, configuration_hint: NATIVE_REVIEW_MAX_BUFFER_CONFIGURATION_HINT }
+			: {}),
 		...(result?.stderr.trim() ? { stderr: sanitizeNativeDiagnosticText(result.stderr) } : {}),
 		...(result === undefined ? {} : { denial: parseStructuredNativeDenial(result.stdout) }),
 	};
@@ -1155,8 +1193,8 @@ function hasValidLensesRequired(action                   , state        , riskLe
 	return !lensesRequired;
 }
 
-function nativeError(code                       , operation                       , mutating         , message        , result                 , launchAttempted = true, auditRecord                          )                       {
-	return new NativeReviewCliError(code, operation, launchAttempted, mutating, message, nativeProcessDiagnostics(operation, code, result), auditRecord);
+function nativeError(code                       , operation                       , mutating         , message        , result                 , launchAttempted = true, auditRecord                          , maxBufferBytes          )                       {
+	return new NativeReviewCliError(code, operation, launchAttempted, mutating, message, nativeProcessDiagnostics(operation, code, result, maxBufferBytes), auditRecord);
 }
 
 
@@ -1171,7 +1209,7 @@ export class NativeReviewCliV214 {
 	                 timeoutMs        ;
 	                 maxBufferBytes        ;
 	                 cleanupDirectory                                      ;
-	constructor(adapter                 , executable                          = resolveGentleAiBinary, timeoutMs = 30_000, maxBufferBytes = 1024 * 1024, cleanupDirectory = (directory        ) => rm(directory, { recursive: true, force: true })) {
+	constructor(adapter                 , executable                          = resolveGentleAiBinary, timeoutMs = 30_000, maxBufferBytes = resolveNativeReviewMaxBufferBytes(), cleanupDirectory = (directory        ) => rm(directory, { recursive: true, force: true })) {
 		if (typeof executable === "string" && (!isAbsolute(executable) || executable === "gentle-ai")) throw new TypeError("Native review requires an absolute package-local executable");
 		this.adapter = adapter;
 		this.executable = executable;
@@ -1208,8 +1246,8 @@ export class NativeReviewCliV214 {
 			throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNAVAILABLE, operation, mutating, "native process could not start");
 		}
 		const diagnostics = nativeProcessDiagnostics(operation, NATIVE_REVIEW_ERROR_CODE.NON_ZERO, result);
+		if (result.outputLimitExceeded) throw nativeError(NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT, operation, mutating, "native process output exceeded limit", result, true, undefined, this.maxBufferBytes);
 		if (result.timedOut) throw nativeError(NATIVE_REVIEW_ERROR_CODE.TIMEOUT, operation, mutating, "native process timed out", result);
-		if (result.outputLimitExceeded) throw nativeError(NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT, operation, mutating, "native process output exceeded limit", result);
 		if (result.signal) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SIGNAL, operation, mutating, "native process was signalled", result);
 		const structuredValidateDenial = operation === NATIVE_REVIEW_OPERATION.VALIDATE && result.exitCode === 1;
 		const maintenancePartialFailure = [NATIVE_REVIEW_OPERATION.ABANDON, NATIVE_REVIEW_OPERATION.QUARANTINE_LEGACY, NATIVE_REVIEW_OPERATION.RECONCILE_AUTHORITY, NATIVE_REVIEW_OPERATION.REPAIR_LEGACY_ALIAS].includes(operation) && result.exitCode !== 0;
@@ -1227,8 +1265,8 @@ export class NativeReviewCliV214 {
 			if (error instanceof Error && error.name === "AbortError") throw nativeError(NATIVE_REVIEW_ERROR_CODE.CANCELLED, NATIVE_REVIEW_OPERATION.VERSION, false, "version process was cancelled");
 			throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNAVAILABLE, NATIVE_REVIEW_OPERATION.VERSION, false, "gentle-ai is unavailable");
 		}
+		if (result.outputLimitExceeded) throw nativeError(NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT, NATIVE_REVIEW_OPERATION.VERSION, false, "version process output exceeded limit", result, true, undefined, this.maxBufferBytes);
 		if (result.timedOut) throw nativeError(NATIVE_REVIEW_ERROR_CODE.TIMEOUT, NATIVE_REVIEW_OPERATION.VERSION, false, "version process timed out", result);
-		if (result.outputLimitExceeded) throw nativeError(NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT, NATIVE_REVIEW_OPERATION.VERSION, false, "version process output exceeded limit", result);
 		if (result.signal) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SIGNAL, NATIVE_REVIEW_OPERATION.VERSION, false, "version process was signalled", result);
 		if (result.exitCode !== 0) throw nativeError(NATIVE_REVIEW_ERROR_CODE.NON_ZERO, NATIVE_REVIEW_OPERATION.VERSION, false, "version process failed", result);
 		const version = /^gentle-ai ([0-9]+\.[0-9]+\.[0-9]+)\n$/.exec(result.stdout.replace(/\r\n$/, "\n"))?.[1];
@@ -1751,6 +1789,24 @@ function exactConsentOption(arguments_                   , name        )        
 	return values[0] ;
 }
 
+function optionalConsentLineageOption(arguments_) {
+	const values = [];
+	for (let index = 0; index < arguments_.length; index += 1) {
+		const token = arguments_[index];
+		if (token === "--lineage") {
+			const value = arguments_[index + 1];
+			if (value === undefined || value.startsWith("--")) throw new NativeReviewConsentBindingError("consent-invocation-option-invalid", "Native consent invocation --lineage is missing its value");
+			values.push(value);
+			index += 1;
+		} else if (token.startsWith("--lineage=")) values.push(token.slice("--lineage=".length));
+	}
+	if (values.length > 1) throw new NativeReviewConsentBindingError("consent-invocation-option-invalid", "Native consent invocation permits at most one --lineage");
+	if (values.length === 0) return undefined;
+	const lineageId = values[0];
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(lineageId)) throw new NativeReviewConsentBindingError("consent-invocation-option-invalid", "Native consent invocation --lineage is malformed");
+	return lineageId;
+}
+
 function consentInvocationArguments(request                                  )                    {
 	const choice = request.consent.choices.find((candidate) => candidate.answer === request.answer);
 	if (choice === undefined) throw new NativeReviewConsentBindingError("consent-answer-unknown", "Native consent answer must be granted or declined");
@@ -1761,8 +1817,9 @@ function consentInvocationArguments(request                                  )  
 	if (exactConsentOption(arguments_, "--cwd") !== request.cwd) throw new NativeReviewConsentBindingError("consent-invocation-cwd-changed", "Native consent invocation repository binding changed");
 	if (exactConsentOption(arguments_, "--target") !== request.consent.targetIdentity) throw new NativeReviewConsentBindingError("consent-invocation-target-changed", "Native consent invocation target binding changed");
 	if (exactConsentOption(arguments_, "--projection") !== request.consent.projection) throw new NativeReviewConsentBindingError("consent-invocation-projection-changed", "Native consent invocation projection binding changed");
+	const lineageId = optionalConsentLineageOption(arguments_);
 	if (exactConsentOption(arguments_, "--consent") !== request.answer || arguments_.at(-1) !== request.answer) throw new NativeReviewConsentBindingError("consent-invocation-answer-changed", "Native consent invocation answer binding changed");
-	return arguments_;
+	return { arguments_, ...(lineageId === undefined ? {} : { lineageId }) };
 }
 
 function decodeDeclinedConsentStart(value         , expected                                  )                                    {
@@ -1847,7 +1904,7 @@ export class NativeReviewCliV216                            {
 		adapter                 ,
 		executable                          = resolveGentleAiBinary,
 		timeoutMs = 30_000,
-		maxBufferBytes = 1024 * 1024,
+		maxBufferBytes = resolveNativeReviewMaxBufferBytes(),
 		cleanupDirectory                                       = (directory) => rm(directory, { recursive: true, force: true }),
 		executableDigest                                 = defaultExecutableDigest,
 	) {
@@ -1897,8 +1954,8 @@ export class NativeReviewCliV216                            {
 			if (error instanceof Error && error.name === "AbortError") throw nativeError(NATIVE_REVIEW_ERROR_CODE.CANCELLED, operation, mutating, "native process was cancelled");
 			throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNAVAILABLE, operation, mutating, "native process could not start");
 		}
+		if (result.outputLimitExceeded) throw nativeError(NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT, operation, mutating, "native process output exceeded limit", result, true, undefined, this.maxBufferBytes);
 		if (result.timedOut) throw nativeError(NATIVE_REVIEW_ERROR_CODE.TIMEOUT, operation, mutating, "native process timed out", result);
-		if (result.outputLimitExceeded) throw nativeError(NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT, operation, mutating, "native process output exceeded limit", result);
 		if (result.signal) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SIGNAL, operation, mutating, "native process was signalled", result);
 		const diagnostics = nativeProcessDiagnostics(operation, NATIVE_REVIEW_ERROR_CODE.NON_ZERO, result);
 		const body = parseJson(result.stdout, operation, mutating, diagnostics);
@@ -2037,16 +2094,15 @@ export class NativeReviewCliV216                            {
 	}
 
 	async answerConsent(request                                  )                                           {
-		const arguments_ = consentInvocationArguments(request);
-		const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.START, request.cwd, arguments_, true, request.signal);
+		const invocation = consentInvocationArguments(request);
+		const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.START, request.cwd, invocation.arguments_, true, request.signal);
 		if (request.answer === NATIVE_REVIEW_CONSENT_ANSWER.DECLINED) {
 			return decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeDeclinedConsentStart(execution.body, request));
 		}
 		const result = decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeReviewStartV3(execution.body));
 		const answeredTarget = result.targetIdentity ?? result.repositoryContext?.targetIdentity;
 		if (answeredTarget !== request.consent.targetIdentity) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native consent answer target mismatch");
-		const lineageId = exactConsentOption(arguments_, "--lineage");
-		if (result.lineageId !== lineageId) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native consent answer lineage mismatch");
+		if (invocation.lineageId !== undefined && result.lineageId !== invocation.lineageId) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native consent answer lineage mismatch");
 		return { kind: "started", start: {
 			lineageId: result.lineageId,
 			state: result.state                              ,

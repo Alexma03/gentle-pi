@@ -10,6 +10,10 @@ import {
 	clearNativeReviewCapabilitiesCacheForTesting,
 	type ExecFileAdapter,
 } from "../lib/native-review-cli.ts";
+import {
+	NativeReviewCliV216 as RuntimeNativeReviewCliV216,
+	clearNativeReviewCapabilitiesCacheForTesting as clearRuntimeNativeReviewCapabilitiesCacheForTesting,
+} from "../runtime/native-review-cli.mjs";
 import type { ReviewConsentV2 } from "../lib/review-integration-v2.ts";
 
 const fixtureRoot = join(process.cwd(), "contracts", "review-integration", "v2", "fixtures");
@@ -58,6 +62,11 @@ function client(adapter: ExecFileAdapter): NativeReviewCliV216 {
 	return new NativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => executableDigest);
 }
 
+function runtimeClient(adapter: ExecFileAdapter): RuntimeNativeReviewCliV216 {
+	clearRuntimeNativeReviewCapabilitiesCacheForTesting();
+	return new RuntimeNativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => executableDigest);
+}
+
 test("negotiated ordinary START declares relay and preserves the complete target-bound consent envelope", async () => {
 	const consent = fixture<Record<string, unknown>>("consent.fixture.json");
 	const target = String(consent.target_identity);
@@ -97,17 +106,39 @@ test("controller-prebound START target is used without projecting a second works
 	assert.equal(queue.calls.some((arguments_) => arguments_[1] === "status"), false, "a prebound START target must not be projected again");
 });
 
-test("consent follow-up executes the provider-named invocation exactly once and refuses a changed target binding", async () => {
+test("consent follow-up executes the provider-named invocation exactly once and refuses changed lineage or target bindings", async () => {
 	const consent = fixture<ReviewConsentV2 extends never ? never : Record<string, unknown>>("consent.fixture.json");
 	const decodedConsent = (await import("../lib/review-integration-v2.ts")).decodeReviewConsentV2(consent);
-	const started = JSON.parse(JSON.stringify(fixture<Record<string, unknown>>("start.fixture.json"))
-		.replaceAll("review-start-fixture", "review-consent-fixture")) as Record<string, unknown>;
+	const preboundLineage = "Review.Lineage_42";
+	for (const choice of decodedConsent.choices) {
+		choice.invocation = choice.invocation.replace("review-consent-fixture", preboundLineage);
+	}
+	const started = fixture<Record<string, unknown>>("start.fixture.json");
+	started.lineage_id = preboundLineage;
+	started.artifact_subjects = [];
 	const queue = queuedAdapter([capabilities(), started]);
 	const native = client(queue.adapter);
 	const result = await native.answerConsent!({ cwd: "/repo", consent: decodedConsent, answer: "granted" });
 	assert.equal(result.kind, "started");
+	assert.ok(result.kind === "started");
+	assert.equal(result.start.lineageId, preboundLineage);
 	assert.deepEqual(queue.calls.at(-1), decodedConsent.choices[0].invocation.split(" ").slice(1));
 	assert.equal(queue.calls.filter((arguments_) => arguments_.includes("granted")).length, 1);
+
+	const runtimeQueue = queuedAdapter([capabilities(), structuredClone(started)]);
+	const runtimeResult = await runtimeClient(runtimeQueue.adapter).answerConsent({ cwd: "/repo", consent: decodedConsent, answer: "granted" });
+	assert.equal(runtimeResult.kind, "started");
+	assert.ok(runtimeResult.kind === "started");
+	assert.equal(runtimeResult.start.lineageId, preboundLineage);
+	assert.equal(runtimeQueue.calls.filter((arguments_) => arguments_.includes("granted")).length, 1);
+
+	const changedLineage = JSON.parse(JSON.stringify(started).replaceAll(preboundLineage, "different-lineage")) as Record<string, unknown>;
+	const lineageQueue = queuedAdapter([capabilities(), changedLineage]);
+	await assert.rejects(
+		() => client(lineageQueue.adapter).answerConsent!({ cwd: "/repo", consent: decodedConsent, answer: "granted" }),
+		/lineage mismatch/,
+	);
+	assert.equal(lineageQueue.calls.filter((arguments_) => arguments_[0] === "review" && arguments_[1] === "start").length, 1);
 
 	const changed = structuredClone(decodedConsent);
 	changed.targetIdentity = `sha256:${"b".repeat(64)}`;
@@ -174,6 +205,68 @@ test("every consent invocation binding guard reports its own reason without laun
 			},
 		);
 		assert.deepEqual(queue.calls, [], `${scenario.reason} must not launch the provider`);
+	}
+});
+
+test("fresh consent START accepts the strictly decoded provider-created lineage and rejects a mismatched target", async () => {
+	const decoded = (await import("../lib/review-integration-v2.ts")).decodeReviewConsentV2(fixture<Record<string, unknown>>("consent.fixture.json"));
+	const freshConsent = structuredClone(decoded);
+	for (const choice of freshConsent.choices) {
+		choice.invocation = choice.invocation.replace(" --lineage review-consent-fixture", "");
+	}
+	const freshStart = JSON.parse(JSON.stringify(fixture<Record<string, unknown>>("start.fixture.json"))
+		.replaceAll("review-start-fixture", "provider-created-lineage")) as Record<string, unknown>;
+	const queue = queuedAdapter([capabilities(), freshStart]);
+	const result = await client(queue.adapter).answerConsent!({ cwd: "/repo", consent: freshConsent, answer: "granted" });
+	assert.equal(result.kind, "started");
+	assert.ok(result.kind === "started");
+	assert.equal(result.start.lineageId, "provider-created-lineage");
+	assert.equal(queue.calls.filter((arguments_) => arguments_[0] === "review" && arguments_[1] === "start").length, 1);
+	assert.equal(queue.calls.at(-1)?.includes("--lineage"), false);
+
+	const runtimeQueue = queuedAdapter([capabilities(), structuredClone(freshStart)]);
+	const runtimeResult = await runtimeClient(runtimeQueue.adapter).answerConsent({ cwd: "/repo", consent: freshConsent, answer: "granted" });
+	assert.equal(runtimeResult.kind, "started");
+	assert.ok(runtimeResult.kind === "started");
+	assert.equal(runtimeResult.start.lineageId, "provider-created-lineage");
+	assert.equal(runtimeQueue.calls.filter((arguments_) => arguments_[0] === "review" && arguments_[1] === "start").length, 1);
+	assert.equal(runtimeQueue.calls.at(-1)?.includes("--lineage"), false);
+
+	const mismatchedTarget = structuredClone(freshStart);
+	((mismatchedTarget.repository_context as Record<string, unknown>).target_identity as string) = `sha256:${"b".repeat(64)}`;
+	const mismatchQueue = queuedAdapter([capabilities(), mismatchedTarget]);
+	await assert.rejects(
+		() => client(mismatchQueue.adapter).answerConsent!({ cwd: "/repo", consent: freshConsent, answer: "granted" }),
+		/target mismatch/,
+	);
+	assert.equal(mismatchQueue.calls.filter((arguments_) => arguments_[0] === "review" && arguments_[1] === "start").length, 1);
+});
+
+test("duplicate, empty, missing, and malformed consent lineages fail before provider launch", async () => {
+	const decoded = (await import("../lib/review-integration-v2.ts")).decodeReviewConsentV2(fixture<Record<string, unknown>>("consent.fixture.json"));
+	const drifted = (replace: (invocation: string) => string): ReviewConsentV2 => {
+		const consent = structuredClone(decoded);
+		const choice = consent.choices.find((candidate) => candidate.answer === "granted") as { invocation: string };
+		choice.invocation = replace(choice.invocation);
+		return consent;
+	};
+	const cases = [
+		{ label: "duplicate", consent: drifted((value) => `${value} --lineage duplicate-lineage`) },
+		{ label: "empty", consent: drifted((value) => value.replace("--lineage review-consent-fixture", "--lineage=")) },
+		{ label: "missing", consent: drifted((value) => value.replace("--lineage review-consent-fixture", "--lineage")) },
+		{ label: "malformed", consent: drifted((value) => value.replace("--lineage review-consent-fixture", "--lineage invalid/lineage")) },
+	] as const;
+	for (const scenario of cases) {
+		const queue = queuedAdapter([]);
+		await assert.rejects(
+			() => client(queue.adapter).answerConsent!({ cwd: "/repo", consent: scenario.consent, answer: "granted" }),
+			(error: unknown) => {
+				assert.ok(error instanceof NativeReviewConsentBindingError, `${scenario.label} lineage must be a typed binding error`);
+				assert.equal(error.reason, "consent-invocation-option-invalid");
+				return true;
+			},
+		);
+		assert.deepEqual(queue.calls, [], `${scenario.label} lineage must not launch the provider`);
 	}
 });
 

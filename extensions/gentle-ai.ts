@@ -109,6 +109,7 @@ import {
 	NativeReviewConsentBindingError,
 	NativeReviewConsentRequiredError,
 	NATIVE_REVIEW_ERROR_CODE,
+	NATIVE_REVIEW_OPERATION,
 	NATIVE_REVIEW_LEGACY_QUARANTINE,
 	NATIVE_REVIEW_LEGACY_ALIAS_REPAIR,
 	NATIVE_REVIEW_MODE_OPERATION,
@@ -3927,9 +3928,22 @@ function asNativeReviewConsentBindingError(error: unknown): { reason: string; me
 	return typeof reason !== "string" || reason.length === 0 ? undefined : { reason, message: error.message };
 }
 
+function nativeStatusPackageBinaryMissing(operation: ReviewControllerOperation, diagnostics: NativeReviewProcessDiagnostics): Record<string, unknown> {
+	return {
+		operation,
+		status: "blocked",
+		outcome: "native-status-package-binary-missing",
+		...(operation === REVIEW_CONTROLLER_OPERATION.START ? nativeStartPreAuthorityRejection() : { lineage_created: false, mutation_performed: false, mutation_outcome: "none" }),
+		inventory_complete: false,
+		diagnostics,
+		next_action: "reinstall-package-local-gentle-ai",
+	};
+}
+
 function nativeStatusFailed(operation: ReviewControllerOperation, error: unknown): Record<string, unknown> {
 	const cliError = asNativeReviewCliError(error);
 	if (cliError?.code === NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE) return nativeStatusUnsupported(operation);
+	if (cliError?.code === NATIVE_REVIEW_ERROR_CODE.PACKAGE_BINARY_MISSING) return nativeStatusPackageBinaryMissing(operation, cliError.diagnostics);
 	if (cliError !== undefined) {
 		return {
 			...nativeOperationFailure(operation, error),
@@ -4665,12 +4679,18 @@ function nativeOperationFailure(operation: ReviewControllerOperation, error: unk
 		};
 	}
 	const mutationOutcome = value.mutationOutcome === "unknown" ? "unknown" : "none";
-	const nativeDiagnostics = asNativeReviewCliError(error)?.diagnostics;
+	const nativeCliError = asNativeReviewCliError(error);
+	if (nativeCliError?.code === NATIVE_REVIEW_ERROR_CODE.PACKAGE_BINARY_MISSING) return nativeStatusPackageBinaryMissing(operation, nativeCliError.diagnostics);
+	const nativeDiagnostics = nativeCliError?.diagnostics;
+	// A target-status probe verifies `version` before it invokes `review/status`.
+	// Preserve either already-sanitized diagnostic on every controller route rather
+	// than relabeling an actionable failure as an opaque controller failure.
+	const preservesNativeTargetStatusDiagnostic = nativeDiagnostics?.operation === NATIVE_REVIEW_OPERATION.VERSION || nativeDiagnostics?.operation === NATIVE_REVIEW_OPERATION.STATUS;
 	const diagnostics = operation === REVIEW_CONTROLLER_OPERATION.START && error instanceof CandidateViewError && value.candidateViewPreNative === true
-		? { code: error.reason, message: "candidate view rejected before native START" }
+		? error.diagnostics ?? { code: error.reason, message: "candidate view rejected before native START" }
 		: error instanceof CandidateViewError
 			? { code: error.reason, message: error.message }
-			: nativeDiagnostics?.operation === `review/${operation}`
+			: nativeDiagnostics?.operation === `review/${operation}` || preservesNativeTargetStatusDiagnostic
 		? nativeDiagnostics
 		: undefined;
 	return {
@@ -5030,7 +5050,12 @@ async function executeReviewControllerOperation(
 	}
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.REPAIR) {
 		if (nativeReviewCli?.targetStatus === undefined) return nativeStatusUnsupported(parameters.operation);
-		const status = await nativeReviewCli.targetStatus({ cwd: defaultCwd, ...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }), ...(signal === undefined ? {} : { signal }) });
+		let status: ReviewStatusV3;
+		try {
+			status = await nativeReviewCli.targetStatus({ cwd: defaultCwd, ...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }), ...(signal === undefined ? {} : { signal }) });
+		} catch (error) {
+			return nativeStatusFailed(parameters.operation, error);
+		}
 		if (status.authority?.version === "compact-v2") return { operation: parameters.operation, repaired: false, compact_authority: "immutable-untouched", status: mapNativeTargetStatus(parameters.operation, status, parameters.lineageId) };
 		if (status.authority?.version !== "legacy-v1") return mapNativeTargetStatus(parameters.operation, status, parameters.lineageId);
 		const store = ReviewTransactionStore.forRepository(defaultCwd);
@@ -5174,6 +5199,7 @@ async function executeReviewControllerOperation(
 				try {
 					canonicalBaseRef = resolveCanonicalCandidateBase(defaultCwd, baseRef).commit;
 				} catch (error) {
+					if (error instanceof CandidateViewError && error.diagnostics !== undefined) return nativeOperationFailure(parameters.operation, Object.assign(error, { candidateViewPreNative: true }));
 					if (error instanceof CandidateViewError && (error.reason === "base-ref-ambiguous" || error.reason === "base-ref-unresolvable" || error.reason === "base-ref-moved")) return nativeStartRejection(error.reason);
 					return nativeStartRejection("base-ref-unresolvable");
 				}
@@ -5236,6 +5262,7 @@ async function executeReviewControllerOperation(
 				}
 				return completeNativeStart(parameters.operation, result, defaultCwd, candidateView, candidateViews);
 			} catch (error) {
+				if (error instanceof CandidateViewError && error.diagnostics !== undefined) return nativeOperationFailure(parameters.operation, Object.assign(error, { candidateViewPreNative: true }));
 				if (error instanceof CandidateViewError && (error.reason === "base-ref-ambiguous" || error.reason === "base-ref-unresolvable" || error.reason === "base-ref-moved")) return nativeStartRejection(error.reason);
 				const value = error as { mutationOutcome?: unknown; nextAction?: unknown };
 				const provenNoMutation = value.mutationOutcome === "none";
