@@ -85,7 +85,7 @@ function fakeNative(overrides: Partial<NativeReviewCli> = {}): NativeReviewCli {
 		reviewStatus: async () => ({ schema: "gentle-ai.review-authority-status/v1", repository: "/repo", complete: true, authoritative: true, status: "clean", entries: [], locks: [], diagnostics: [], raw: { schema: "gentle-ai.review-authority-status/v1", operation: "review/status", repository: "/repo", complete: true, authoritative: true, status: "clean", entries: [], locks: [], diagnostics: [] } }),
 		targetStatus: async (request) => request.lineageId === undefined
 			? candidateStartTargetStatus(request)
-			: targetStatusFixture({ lineageId: request.lineageId }),
+			: candidateFinalizeTargetStatus(request, request.lineageId),
 		...overrides,
 	};
 }
@@ -193,6 +193,21 @@ function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReview
 		return targetStatusFixture({
 			applicability: "unrelated",
 			action: "start",
+			baseTree: candidate.baseTree,
+			currentCandidateTree: candidate.candidateTree,
+			paths: candidate.paths,
+		});
+	} finally {
+		candidate?.cleanup();
+	}
+}
+
+function candidateFinalizeTargetStatus(request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0], lineageId: string): ReviewStatusV3 {
+	let candidate: ReturnType<CandidateViewRegistry["create"]> | undefined;
+	try {
+		candidate = new CandidateViewRegistry().create({ contributorRoot: request.cwd });
+		return targetStatusFixture({
+			lineageId,
 			baseTree: candidate.baseTree,
 			currentCandidateTree: candidate.candidateTree,
 			paths: candidate.paths,
