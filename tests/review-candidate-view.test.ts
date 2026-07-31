@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 import {
 	CandidateViewRegistry,
 	CandidateViewError,
 	type CandidateGitExecutor,
 	createCandidateView,
+	decodeCandidateContextManifest,
 	deriveChangedPathManifest,
 	digestChangedPathManifest,
 	injectReviewCandidateView,
@@ -26,6 +29,12 @@ function repository(t: test.TestContext): string {
 	git(cwd, "add", "tracked.txt");
 	git(cwd, "-c", "user.name=Candidate Test", "-c", "user.email=candidate@example.invalid", "commit", "-m", "base");
 	return cwd;
+}
+
+function compactCandidateContextManifest(task: string): { encoded: string; sha256: string } {
+	const match = /Frozen changed scope manifest \(gzip\+base64url\): `([A-Za-z0-9_-]+)`\.\nFrozen changed scope manifest SHA-256: `([0-9a-f]{64})`\./.exec(task);
+	assert.ok(match, "expected a compact candidate context manifest");
+	return { encoded: match[1]!, sha256: match[2]! };
 }
 
 test("candidate view Git commands classify bounded timeouts and block materialization before worktree execution", (t) => {
@@ -521,15 +530,106 @@ test("candidate view verifies unchanged tree entries even when they are absent f
 	}
 });
 
-test("candidate view fails closed before dispatch when the changed scope itself exceeds 4096 bytes", (t) => {
+test("candidate view compacts an oversized non-ASCII scope losslessly and deterministically", (t) => {
+	const contributorRoot = repository(t);
+	writeFileSync(join(contributorRoot, "deleted.txt"), "delete me\n");
+	git(contributorRoot, "add", "deleted.txt");
+	git(contributorRoot, "-c", "user.name=Candidate Test", "-c", "user.email=candidate@example.invalid", "commit", "-m", "deletion base");
+	const baseCommit = git(contributorRoot, "rev-parse", "HEAD");
+	const unicodePaths = Array.from({ length: 18 }, (_, index) => `changed-${String(index).padStart(2, "0")}-${"界".repeat(70)}.txt`);
+	for (const path of unicodePaths) writeFileSync(join(contributorRoot, path), "candidate\n");
+	const gitlinkCommit = "0123456789abcdef0123456789abcdef01234567";
+	git(contributorRoot, "add", ...unicodePaths);
+	git(contributorRoot, "update-index", "--add", "--cacheinfo", `160000,${gitlinkCommit},vendor/dependency`);
+	git(contributorRoot, "-c", "user.name=Candidate Test", "-c", "user.email=candidate@example.invalid", "commit", "-m", "large scope");
+	rmSync(join(contributorRoot, "deleted.txt"));
+	git(contributorRoot, "add", "-u", "--", "deleted.txt");
+	git(contributorRoot, "-c", "user.name=Candidate Test", "-c", "user.email=candidate@example.invalid", "commit", "-m", "delete scope path");
+	const registry = new CandidateViewRegistry();
+	const view = registry.create({ contributorRoot, baseRef: baseCommit, committedOnly: true });
+	try {
+		registry.bind({ token: view.token, lineageId: "oversized-scope", selectedLenses: ["review-risk"] });
+		const first = { agent: "review-risk", task: "review", mode: "task" };
+		const second = { agent: "review-risk", task: "review", mode: "task" };
+		injectReviewCandidateView(first, registry);
+		injectReviewCandidateView(second, registry);
+		const compact = compactCandidateContextManifest(first.task);
+		assert.deepEqual(compact, compactCandidateContextManifest(second.task));
+		const decoded = decodeCandidateContextManifest(compact.encoded, compact.sha256);
+		assert.deepEqual(decoded.manifest, {
+			version: 1,
+			scopeByMode: { "100644": unicodePaths, "160000": ["vendor/dependency"], deleted: ["deleted.txt"] },
+			gitlinks: { "vendor/dependency": gitlinkCommit },
+		});
+		assert.equal(decoded.sha256, createHash("sha256").update(decoded.bytes).digest("hex"));
+		assert.ok(JSON.stringify(decoded.manifest).length < 4_096, "UTF-16 code units alone must not decide the dispatch bound");
+		assert.ok(decoded.bytes.length > 4_096, "the manifest must retain its full non-ASCII UTF-8 byte sequence");
+		assert.ok(Buffer.byteLength(first.task, "utf8") <= Buffer.byteLength("review", "utf8") + 4_096);
+		assert.doesNotMatch(first.task, /Frozen changed scope by mode:/);
+		assert.throws(() => decodeCandidateContextManifest(compact.encoded, `${compact.sha256.slice(0, -1)}0`), /integrity/);
+		const nonCanonicalBytes = Buffer.from(JSON.stringify({ gitlinks: decoded.manifest.gitlinks, scopeByMode: decoded.manifest.scopeByMode, version: 1 }), "utf8");
+		assert.throws(
+			() => decodeCandidateContextManifest(gzipSync(nonCanonicalBytes, { mtime: 0 }).toString("base64url"), createHash("sha256").update(nonCanonicalBytes).digest("hex")),
+			/canonical/,
+		);
+	} finally {
+		registry.cleanup(view.token);
+	}
+});
+
+test("candidate context manifest decoder accepts canonical numeric-looking gitlink paths", () => {
+	const gitlinks = {
+		"10": "0123456789abcdef0123456789abcdef01234567",
+		"2": "89abcdef0123456789abcdef0123456789abcdef",
+	};
+	const bytes = Buffer.from(JSON.stringify({
+		version: 1,
+		scopeByMode: { "160000": ["10", "2"] },
+		gitlinks,
+	}), "utf8");
+	const encoded = gzipSync(bytes, { mtime: 0 }).toString("base64url");
+	assert.deepEqual(decodeCandidateContextManifest(encoded, createHash("sha256").update(bytes).digest("hex")).manifest, {
+		version: 1,
+		scopeByMode: { "160000": ["10", "2"] },
+		gitlinks,
+	});
+});
+
+test("candidate context manifest decoder rejects noncanonical nonnumeric gitlink ordering", () => {
+	const gitlinks = {
+		zeta: "0123456789abcdef0123456789abcdef01234567",
+		alpha: "89abcdef0123456789abcdef0123456789abcdef",
+	};
+	const bytes = Buffer.from(JSON.stringify({
+		version: 1,
+		scopeByMode: { "160000": ["alpha", "zeta"] },
+		gitlinks,
+	}), "utf8");
+	assert.throws(
+		() => decodeCandidateContextManifest(gzipSync(bytes, { mtime: 0 }).toString("base64url"), createHash("sha256").update(bytes).digest("hex")),
+		/canonical/,
+	);
+});
+
+test("candidate context manifest decoder rejects noncanonical gzip transport for verified bytes", () => {
+	const bytes = Buffer.from(JSON.stringify({ version: 1, scopeByMode: { "100644": ["file.ts"] }, gitlinks: {} }), "utf8");
+	const sha256 = createHash("sha256").update(bytes).digest("hex");
+	const canonical = gzipSync(bytes, { mtime: 0 });
+	const noncanonical = Buffer.from(canonical);
+	noncanonical[4] = (noncanonical[4]! + 1) & 0xff;
+	assert.throws(() => decodeCandidateContextManifest(noncanonical.toString("base64url"), sha256), /canonical/);
+});
+
+test("candidate view fails closed when an incompressible compact scope exceeds 4096 UTF-8 bytes", (t) => {
 	const contributorRoot = repository(t);
 	for (let index = 0; index < 80; index += 1) {
-		writeFileSync(join(contributorRoot, `changed-${String(index).padStart(3, "0")}-${"x".repeat(80)}.txt`), "candidate\n");
+		const entropy = createHash("sha512").update(`candidate-scope-${index}`).digest("hex");
+		writeFileSync(join(contributorRoot, `changed-${String(index).padStart(3, "0")}-${entropy}.txt`), "candidate\n");
 	}
 	const registry = new CandidateViewRegistry();
 	const view = registry.create({ contributorRoot });
 	try {
-		registry.bind({ token: view.token, lineageId: "oversized-scope", selectedLenses: ["review-risk"] });
+		registry.bind({ token: view.token, lineageId: "incompressible-scope", selectedLenses: ["review-risk"] });
 		assert.throws(
 			() => injectReviewCandidateView({ agent: "review-risk", task: "review", mode: "task" }, registry),
 			/candidate view context exceeds the bounded dispatch contract/,
