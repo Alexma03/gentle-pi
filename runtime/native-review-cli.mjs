@@ -34,7 +34,7 @@ const NATIVE_REVIEW_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const NATIVE_REVIEW_MAX_BUFFER_BYTES_ENV = "GENTLE_PI_REVIEW_MAX_BUFFER_BYTES";
 const NATIVE_REVIEW_MAX_BUFFER_CONFIGURATION_HINT = "Inspect native review state before any new START; GENTLE_PI_REVIEW_MAX_BUFFER_BYTES accepts a positive decimal up to 67108864.";
 
-function resolveNativeReviewMaxBufferBytes(environment = process.env) {
+function resolveNativeReviewMaxBufferBytes(environment                    = process.env)         {
 	const value = environment[NATIVE_REVIEW_MAX_BUFFER_BYTES_ENV];
 	if (value === undefined || !/^[1-9]\d*$/.test(value)) return NATIVE_REVIEW_DEFAULT_MAX_BUFFER_BYTES;
 	const parsed = Number(value);
@@ -719,6 +719,8 @@ function resolvedNativeCliContract(version        )                             
 
 
 
+
+
 export class NativeReviewCliError extends Error {
 	         code                       ;
 	         operation                       ;
@@ -845,7 +847,7 @@ export function sanitizeForeignNativeReviewDiagnostics(value         )          
 			...(signal === undefined ? {} : { signal: signal                   }),
 			timed_out: booleanValue(raw.timed_out),
 			output_limit_exceeded: booleanValue(raw.output_limit_exceeded),
-			...(maxBufferBytes === undefined ? {} : { max_buffer_bytes: maxBufferBytes, configuration_hint: configurationHint }),
+			...(maxBufferBytes === undefined ? {} : { max_buffer_bytes: maxBufferBytes, configuration_hint: configurationHint  }),
 			...(raw.stderr === undefined ? {} : { stderr: sanitizeNativeDiagnosticText(stringValue(raw.stderr)) }),
 			...(raw.denial === undefined ? {} : { denial: sanitizeForeignStructuredDenial(raw.denial) }),
 		};
@@ -864,7 +866,7 @@ function sanitizeForeignStructuredDenial(value         )                        
 	return { schema: "gentle-ai.review-gate-result/v1", result, action, reason, ...(denial === undefined ? {} : { denial }) };
 }
 
-function nativeProcessDiagnostics(operation                       , code                       , result                 , maxBufferBytes          )                                 {
+function nativeProcessDiagnostics(operation                       , code                       , result                 , maxBufferBytes         )                                 {
 	const outputLimitExceeded = result?.outputLimitExceeded === true;
 	return {
 		operation,
@@ -1193,7 +1195,7 @@ function hasValidLensesRequired(action                   , state        , riskLe
 	return !lensesRequired;
 }
 
-function nativeError(code                       , operation                       , mutating         , message        , result                 , launchAttempted = true, auditRecord                          , maxBufferBytes          )                       {
+function nativeError(code                       , operation                       , mutating         , message        , result                 , launchAttempted = true, auditRecord                          , maxBufferBytes         )                       {
 	return new NativeReviewCliError(code, operation, launchAttempted, mutating, message, nativeProcessDiagnostics(operation, code, result, maxBufferBytes), auditRecord);
 }
 
@@ -1789,10 +1791,10 @@ function exactConsentOption(arguments_                   , name        )        
 	return values[0] ;
 }
 
-function optionalConsentLineageOption(arguments_) {
-	const values = [];
+function optionalConsentLineageOption(arguments_                   )                     {
+	const values           = [];
 	for (let index = 0; index < arguments_.length; index += 1) {
-		const token = arguments_[index];
+		const token = arguments_[index] ;
 		if (token === "--lineage") {
 			const value = arguments_[index + 1];
 			if (value === undefined || value.startsWith("--")) throw new NativeReviewConsentBindingError("consent-invocation-option-invalid", "Native consent invocation --lineage is missing its value");
@@ -1802,10 +1804,15 @@ function optionalConsentLineageOption(arguments_) {
 	}
 	if (values.length > 1) throw new NativeReviewConsentBindingError("consent-invocation-option-invalid", "Native consent invocation permits at most one --lineage");
 	if (values.length === 0) return undefined;
-	const lineageId = values[0];
+	const lineageId = values[0] ;
 	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(lineageId)) throw new NativeReviewConsentBindingError("consent-invocation-option-invalid", "Native consent invocation --lineage is malformed");
 	return lineageId;
 }
+
+
+
+
+
 
 function consentInvocationArguments(request                                  )                    {
 	const choice = request.consent.choices.find((candidate) => candidate.answer === request.answer);
