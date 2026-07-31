@@ -8,6 +8,46 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 const REVIEW_LENS = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
 export type ReviewLens = (typeof REVIEW_LENS)[number];
 const CANDIDATE_GIT_TIMEOUT_MS = 10_000;
+const CANDIDATE_GIT_TIMEOUT_MAX_MS = 120_000;
+const CANDIDATE_GIT_TIMEOUT_ENV = "GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS";
+const CANDIDATE_GIT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+
+// Candidate views may materialize full repository trees. Large repositories can
+// raise this bounded deadline without creating an unbounded child process.
+function resolveCandidateGitTimeoutMs(environment: NodeJS.ProcessEnv = process.env): number {
+	const value = environment[CANDIDATE_GIT_TIMEOUT_ENV];
+	if (value === undefined || !/^[1-9]\d*$/.test(value)) return CANDIDATE_GIT_TIMEOUT_MS;
+	const parsed = Number(value);
+	return Number.isSafeInteger(parsed) && parsed <= CANDIDATE_GIT_TIMEOUT_MAX_MS
+		? parsed
+		: CANDIDATE_GIT_TIMEOUT_MS;
+}
+
+function isCandidateGitTimeoutMs(value: number): boolean {
+	return Number.isSafeInteger(value) && value > 0 && value <= CANDIDATE_GIT_TIMEOUT_MAX_MS;
+}
+const CANDIDATE_VIEW_DIAGNOSTIC_PHASE = "candidate-view";
+const CANDIDATE_VIEW_GIT_FAILURE_CATEGORY = {
+	TIMEOUT: "timeout",
+	OUTPUT_LIMIT: "output-limit",
+	GIT_FAILURE: "git-failure",
+} as const;
+export type CandidateViewGitFailureCategory = (typeof CANDIDATE_VIEW_GIT_FAILURE_CATEGORY)[keyof typeof CANDIDATE_VIEW_GIT_FAILURE_CATEGORY];
+const CANDIDATE_GIT_SUBCOMMAND = {
+	ADD: "add",
+	CHECKOUT_INDEX: "checkout-index",
+	DIFF: "diff",
+	FOR_EACH_REF: "for-each-ref",
+	LOG: "log",
+	LS_FILES: "ls-files",
+	LS_TREE: "ls-tree",
+	READ_TREE: "read-tree",
+	REV_PARSE: "rev-parse",
+	WORKTREE: "worktree",
+	WRITE_TREE: "write-tree",
+	OTHER: "other",
+} as const;
+type CandidateGitSubcommand = (typeof CANDIDATE_GIT_SUBCOMMAND)[keyof typeof CANDIDATE_GIT_SUBCOMMAND];
 
 export type CandidateGitExecutor = (file: string, arguments_: readonly string[], options: ExecFileSyncOptions) => string | Buffer;
 const defaultCandidateGitExecutor: CandidateGitExecutor = (file, arguments_, options) => execFileSync(file, arguments_, options);
@@ -130,22 +170,96 @@ export interface NativeCandidateProjectionDescriptor {
 	providerManifestHashVerified?: true;
 }
 
+export interface CandidateViewDiagnostic {
+	phase: typeof CANDIDATE_VIEW_DIAGNOSTIC_PHASE;
+	category: CandidateViewGitFailureCategory;
+	git_subcommand: CandidateGitSubcommand;
+	timeout_ms: number;
+	max_buffer_bytes: number;
+	message: string;
+}
+
 export class CandidateViewError extends Error {
 	readonly reason: string;
-	constructor(message: string, reason = "candidate-view-invalid") {
+	readonly diagnostics?: CandidateViewDiagnostic;
+	constructor(message: string, reason = "candidate-view-invalid", diagnostics?: CandidateViewDiagnostic) {
 		super(message);
 		this.name = "CandidateViewError";
 		this.reason = reason;
+		this.diagnostics = diagnostics === undefined ? undefined : sanitizeCandidateViewDiagnostic(diagnostics);
 	}
 }
 
+function candidateGitSubcommand(arguments_: readonly string[]): CandidateGitSubcommand {
+	switch (arguments_[0]) {
+		case CANDIDATE_GIT_SUBCOMMAND.ADD: return CANDIDATE_GIT_SUBCOMMAND.ADD;
+		case CANDIDATE_GIT_SUBCOMMAND.CHECKOUT_INDEX: return CANDIDATE_GIT_SUBCOMMAND.CHECKOUT_INDEX;
+		case CANDIDATE_GIT_SUBCOMMAND.DIFF: return CANDIDATE_GIT_SUBCOMMAND.DIFF;
+		case CANDIDATE_GIT_SUBCOMMAND.FOR_EACH_REF: return CANDIDATE_GIT_SUBCOMMAND.FOR_EACH_REF;
+		case CANDIDATE_GIT_SUBCOMMAND.LOG: return CANDIDATE_GIT_SUBCOMMAND.LOG;
+		case CANDIDATE_GIT_SUBCOMMAND.LS_FILES: return CANDIDATE_GIT_SUBCOMMAND.LS_FILES;
+		case CANDIDATE_GIT_SUBCOMMAND.LS_TREE: return CANDIDATE_GIT_SUBCOMMAND.LS_TREE;
+		case CANDIDATE_GIT_SUBCOMMAND.READ_TREE: return CANDIDATE_GIT_SUBCOMMAND.READ_TREE;
+		case CANDIDATE_GIT_SUBCOMMAND.REV_PARSE: return CANDIDATE_GIT_SUBCOMMAND.REV_PARSE;
+		case CANDIDATE_GIT_SUBCOMMAND.WORKTREE: return CANDIDATE_GIT_SUBCOMMAND.WORKTREE;
+		case CANDIDATE_GIT_SUBCOMMAND.WRITE_TREE: return CANDIDATE_GIT_SUBCOMMAND.WRITE_TREE;
+		default: return CANDIDATE_GIT_SUBCOMMAND.OTHER;
+	}
+}
+
+function candidateGitDiagnosticMessage(category: CandidateViewGitFailureCategory, subcommand: CandidateGitSubcommand, timeoutMs: number): string {
+	if (category === CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.TIMEOUT) return `candidate-view Git command ${subcommand} timed out after ${timeoutMs}ms; inspect the candidate state before any new START`;
+	if (category === CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.OUTPUT_LIMIT) return `candidate-view Git command ${subcommand} exceeded the ${CANDIDATE_GIT_MAX_BUFFER_BYTES}-byte output limit; inspect the candidate state before any new START`;
+	return `candidate-view Git command ${subcommand} failed; inspect the candidate state before any new START`;
+}
+
+function candidateGitDiagnostic(category: CandidateViewGitFailureCategory, arguments_: readonly string[], timeoutMs: number): CandidateViewDiagnostic {
+	const git_subcommand = candidateGitSubcommand(arguments_);
+	return Object.freeze({
+		phase: CANDIDATE_VIEW_DIAGNOSTIC_PHASE,
+		category,
+		git_subcommand,
+		timeout_ms: timeoutMs,
+		max_buffer_bytes: CANDIDATE_GIT_MAX_BUFFER_BYTES,
+		message: candidateGitDiagnosticMessage(category, git_subcommand, timeoutMs),
+	});
+}
+
+function sanitizeCandidateViewDiagnostic(diagnostics: CandidateViewDiagnostic): CandidateViewDiagnostic | undefined {
+	const { phase, category, git_subcommand, timeout_ms, max_buffer_bytes, message } = diagnostics;
+	if (
+		phase !== CANDIDATE_VIEW_DIAGNOSTIC_PHASE ||
+		!Object.values(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY).includes(category) ||
+		!Object.values(CANDIDATE_GIT_SUBCOMMAND).includes(git_subcommand) ||
+		!isCandidateGitTimeoutMs(timeout_ms) ||
+		max_buffer_bytes !== CANDIDATE_GIT_MAX_BUFFER_BYTES ||
+		message !== candidateGitDiagnosticMessage(category, git_subcommand, timeout_ms)
+	) return undefined;
+	return Object.freeze({ phase, category, git_subcommand, timeout_ms, max_buffer_bytes, message });
+}
+
+function candidateGitFailure(category: CandidateViewGitFailureCategory, arguments_: readonly string[], timeoutMs: number): CandidateViewError {
+	const diagnostics = candidateGitDiagnostic(category, arguments_, timeoutMs);
+	return new CandidateViewError(diagnostics.message, `candidate-view-${category}`, diagnostics);
+}
+
 function candidateGit(cwd: string, arguments_: readonly string[], env: NodeJS.ProcessEnv, encoding: "utf8" | "buffer", executor: CandidateGitExecutor): string | Buffer {
+	const timeoutMs = resolveCandidateGitTimeoutMs(env);
 	try {
-		return executor("git", arguments_, { cwd, encoding, env, stdio: ["ignore", "pipe", "pipe"], timeout: CANDIDATE_GIT_TIMEOUT_MS, windowsHide: true });
+		return executor("git", arguments_, {
+			cwd,
+			encoding,
+			env,
+			stdio: ["ignore", "pipe", "pipe"],
+			timeout: timeoutMs,
+			maxBuffer: CANDIDATE_GIT_MAX_BUFFER_BYTES,
+			windowsHide: true,
+		});
 	} catch (error) {
-		const detail = error as NodeJS.ErrnoException & { stderr?: Buffer; killed?: boolean };
-		if (detail.code === "ETIMEDOUT" || detail.killed === true) throw new CandidateViewError(`candidate view Git operation timed out after ${CANDIDATE_GIT_TIMEOUT_MS}ms`);
-		throw new CandidateViewError(`candidate view Git operation failed: ${detail.stderr?.toString("utf8").trim() || detail.message || "unknown Git error"}`);
+		const detail = error as NodeJS.ErrnoException & { killed?: boolean };
+		if (detail.code === "ENOBUFS" || detail.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.OUTPUT_LIMIT, arguments_, timeoutMs);
+		if (detail.code === "ETIMEDOUT" || detail.killed === true) throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.TIMEOUT, arguments_, timeoutMs);
+		throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.GIT_FAILURE, arguments_, timeoutMs);
 	}
 }
 
@@ -484,7 +598,7 @@ function resolveCandidateBase(cwd: string, baseRef: string | undefined, env: Nod
 		if (tree !== confirmedTree) throw new CandidateViewError("candidate base tree changed during resolution", "base-ref-moved");
 		return { commit: confirmedCommit, tree: confirmedTree };
 	} catch (error) {
-		if (error instanceof CandidateViewError && (error.reason === "base-ref-ambiguous" || error.reason === "base-ref-moved" || error.reason === "base-ref-unresolvable")) throw error;
+		if (error instanceof CandidateViewError && (error.diagnostics !== undefined || error.reason === "base-ref-ambiguous" || error.reason === "base-ref-moved" || error.reason === "base-ref-unresolvable")) throw error;
 		throw new CandidateViewError("candidate base reference is unresolvable", "base-ref-unresolvable");
 	}
 }

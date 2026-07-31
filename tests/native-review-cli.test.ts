@@ -4,13 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	NATIVE_REVIEW_DEFAULT_MAX_BUFFER_BYTES,
 	NATIVE_REVIEW_ERROR_CODE,
 	NativeReviewCliError,
 	NativeReviewCliV213 as NativeReviewCliV213Production,
+	NativeReviewCliV216,
 	createNodeExecFileAdapter,
 	type ExecFileAdapter,
 	type NativeStartRequest,
 } from "../lib/native-review-cli.ts";
+import {
+	NativeReviewCliV214 as RuntimeNativeReviewCliV214,
+	NativeReviewCliV216 as RuntimeNativeReviewCliV216,
+} from "../runtime/native-review-cli.mjs";
 
 // The queued-adapter unit tests never execute a real process; default to a fixed
 // absolute package-local path so they do not depend on an installed binary
@@ -260,6 +266,23 @@ test("version process failures retain their typed failure code", async () => {
 	}
 });
 
+test("native output limits dominate killed timeout signals and expose the bounded configuration guidance", async () => {
+	const assertOutputLimit = (error: unknown): boolean => {
+		const value = error as { name?: unknown; code?: unknown; diagnostics?: { timed_out?: unknown; output_limit_exceeded?: unknown; max_buffer_bytes?: unknown; configuration_hint?: unknown } };
+		const diagnostics = value.diagnostics;
+		return value.name === "NativeReviewCliError"
+			&& value.code === NATIVE_REVIEW_ERROR_CODE.OUTPUT_LIMIT
+			&& diagnostics?.timed_out === false
+			&& diagnostics?.output_limit_exceeded === true
+			&& diagnostics?.max_buffer_bytes === NATIVE_REVIEW_DEFAULT_MAX_BUFFER_BYTES
+			&& diagnostics?.configuration_hint === "Inspect native review state before any new START; GENTLE_PI_REVIEW_MAX_BUFFER_BYTES accepts a positive decimal up to 67108864.";
+	};
+	const queue = queuedAdapter([VERSION, { stdout: "", timedOut: true, outputLimitExceeded: true }]);
+	await assert.rejects(() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }), assertOutputLimit);
+	const runtimeQueue = queuedAdapter([VERSION, { stdout: "", timedOut: true, outputLimitExceeded: true }]);
+	await assert.rejects(() => new RuntimeNativeReviewCliV214(runtimeQueue.adapter).start({ cwd: "/repo" }), assertOutputLimit);
+});
+
 test("native mutation uncertainty requires target status before any replay decision", async () => {
 	const queue = queuedAdapter([VERSION, { stdout: "", timedOut: true }]);
 	await assert.rejects(
@@ -269,6 +292,39 @@ test("native mutation uncertainty requires target status before any replay decis
 			&& error.mutationOutcome === "unknown"
 			&& error.nextAction === "review.status",
 	);
+});
+
+test("native clients resolve a bounded review output buffer override at construction and propagate it to child processes", async () => {
+	const expectedDefault = 16 * 1024 * 1024;
+	const override = "2097152";
+	const invalidOverrides = ["", "0", "-1", "1.5", "not-a-number", "67108865"];
+	const withOverride = <T>(value: string | undefined, callback: () => T): T => {
+		const previous = process.env.GENTLE_PI_REVIEW_MAX_BUFFER_BYTES;
+		try {
+			if (value === undefined) delete process.env.GENTLE_PI_REVIEW_MAX_BUFFER_BYTES;
+			else process.env.GENTLE_PI_REVIEW_MAX_BUFFER_BYTES = value;
+			return callback();
+		} finally {
+			if (previous === undefined) delete process.env.GENTLE_PI_REVIEW_MAX_BUFFER_BYTES;
+			else process.env.GENTLE_PI_REVIEW_MAX_BUFFER_BYTES = previous;
+		}
+	};
+	for (const [name, overrideValue, expected] of [
+		["default", undefined, expectedDefault],
+		["valid override", override, Number(override)],
+		...invalidOverrides.map((value) => [`invalid override ${JSON.stringify(value)}`, value, expectedDefault] as const),
+	] as const) {
+		const queue = queuedAdapter([VERSION, START]);
+		const client = withOverride(overrideValue, () => new NativeReviewCliV213(queue.adapter));
+		const v216 = withOverride(overrideValue, () => new NativeReviewCliV216(queue.adapter, "/package/.gentle-ai/gentle-ai"));
+		const runtimeV214 = withOverride(overrideValue, () => new RuntimeNativeReviewCliV214(queue.adapter, "/package/.gentle-ai/gentle-ai"));
+		const runtimeV216 = withOverride(overrideValue, () => new RuntimeNativeReviewCliV216(queue.adapter, "/package/.gentle-ai/gentle-ai"));
+		assert.equal(Reflect.get(v216, "maxBufferBytes"), expected, name);
+		assert.equal(Reflect.get(runtimeV214, "maxBufferBytes"), expected, `${name} runtime v214`);
+		assert.equal(Reflect.get(runtimeV216, "maxBufferBytes"), expected, `${name} runtime v216`);
+		await client.start({ cwd: "/repo" });
+		assert.deepEqual(queue.calls.map((call) => call.maxBufferBytes), [expected, expected], name);
+	}
 });
 
 test("native mutating commands omit the automatic timeout while preserving output caps", async () => {

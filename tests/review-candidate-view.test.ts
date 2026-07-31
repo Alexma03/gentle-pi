@@ -28,12 +28,145 @@ function repository(t: test.TestContext): string {
 	return cwd;
 }
 
-test("candidate view Git commands have a finite timeout and block materialization before worktree execution", (t) => {
-	const calls: Array<{ arguments: readonly string[]; timeout: number | undefined }> = [];
-	const executor: CandidateGitExecutor = (_file, arguments_, options) => { calls.push({ arguments: arguments_, timeout: options.timeout }); throw Object.assign(new Error("timed out"), { code: "ETIMEDOUT", killed: true }); };
-	assert.throws(() => new CandidateViewRegistry(executor).create({ contributorRoot: repository(t) }), (error: unknown) => error instanceof CandidateViewError && /timed out/.test(error.message));
-	assert.deepEqual(calls, [{ arguments: ["rev-parse", "--git-common-dir"], timeout: 10_000 }]);
+test("candidate view Git commands classify bounded timeouts and block materialization before worktree execution", (t) => {
+	const calls: Array<{ arguments: readonly string[]; timeout: number | undefined; maxBuffer: number | undefined }> = [];
+	const executor: CandidateGitExecutor = (_file, arguments_, options) => { calls.push({ arguments: arguments_, timeout: options.timeout, maxBuffer: options.maxBuffer }); throw Object.assign(new Error("timed out"), { code: "ETIMEDOUT", killed: true }); };
+	let failure: unknown;
+	try {
+		new CandidateViewRegistry(executor).create({ contributorRoot: repository(t) });
+	} catch (error) {
+		failure = error;
+	}
+	assert.ok(failure instanceof CandidateViewError);
+	assert.equal(failure.reason, "candidate-view-timeout");
+	assert.deepEqual((failure as CandidateViewError & { diagnostics?: unknown }).diagnostics, {
+		phase: "candidate-view",
+		category: "timeout",
+		git_subcommand: "rev-parse",
+		timeout_ms: 10_000,
+		max_buffer_bytes: 64 * 1024 * 1024,
+		message: "candidate-view Git command rev-parse timed out after 10000ms; inspect the candidate state before any new START",
+	});
+	assert.deepEqual(calls, [{ arguments: ["rev-parse", "--git-common-dir"], timeout: 10_000, maxBuffer: 64 * 1024 * 1024 }]);
 	assert.equal(calls.some((call) => call.arguments[0] === "worktree"), false);
+});
+
+test("candidate-view Git timeouts use a bounded strict-decimal override with safe fallback", (t) => {
+	const withTimeout = <T>(value: string | undefined, callback: () => T): T => {
+		const previous = process.env.GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS;
+		try {
+			if (value === undefined) delete process.env.GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS;
+			else process.env.GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS = value;
+			return callback();
+		} finally {
+			if (previous === undefined) delete process.env.GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS;
+			else process.env.GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS = previous;
+		}
+	};
+	for (const [name, value, expected] of [
+		["default", undefined, 10_000],
+		["valid override", "45000", 45_000],
+		...(["", "0", "0010", "-1", "1.5", "not-a-number", "120001", "Infinity"] as const).map((value) => [`invalid override ${JSON.stringify(value)}`, value, 10_000] as const),
+	] as const) {
+		const timeouts: Array<number | undefined> = [];
+		let failure: unknown;
+		withTimeout(value, () => {
+			try {
+				new CandidateViewRegistry((_file, _arguments, options) => {
+					timeouts.push(options.timeout);
+					throw Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
+				}).create({ contributorRoot: repository(t) });
+			} catch (error) {
+				failure = error;
+			}
+		});
+		assert.ok(failure instanceof CandidateViewError, name);
+		assert.equal(timeouts[0], expected, name);
+		assert.equal((failure as CandidateViewError & { diagnostics?: { timeout_ms?: unknown } }).diagnostics?.timeout_ms, expected, name);
+	}
+});
+
+test("explicit base resolution preserves structured for-each-ref output-limit diagnostics", (t) => {
+	const contributorRoot = repository(t);
+	const executor: CandidateGitExecutor = (file, arguments_, options) => {
+		if (arguments_[0] === "for-each-ref") throw Object.assign(new Error("sensitive base-reference output"), { code: "ENOBUFS", killed: true, stderr: Buffer.from("sensitive base-reference output") });
+		return execFileSync(file, arguments_, options);
+	};
+	let failure: unknown;
+	try {
+		new CandidateViewRegistry(executor).create({ contributorRoot, baseRef: "refs/heads/main", committedOnly: true });
+	} catch (error) {
+		failure = error;
+	}
+	assert.ok(failure instanceof CandidateViewError);
+	assert.equal(failure.reason, "candidate-view-output-limit");
+	assert.deepEqual(failure.diagnostics, {
+		phase: "candidate-view",
+		category: "output-limit",
+		git_subcommand: "for-each-ref",
+		timeout_ms: 10_000,
+		max_buffer_bytes: 64 * 1024 * 1024,
+		message: "candidate-view Git command for-each-ref exceeded the 67108864-byte output limit; inspect the candidate state before any new START",
+	});
+	assert.doesNotMatch(failure.message, /sensitive base-reference output/);
+});
+
+test("every synchronous candidate-view Git command receives the explicit 64 MiB output limit", (t) => {
+	const calls: Array<{ arguments: readonly string[]; maxBuffer: number | undefined }> = [];
+	const executor: CandidateGitExecutor = (file, arguments_, options) => {
+		calls.push({ arguments: arguments_, maxBuffer: options.maxBuffer });
+		return execFileSync(file, arguments_, options);
+	};
+	const view = new CandidateViewRegistry(executor).create({ contributorRoot: repository(t) });
+	try {
+		assert.ok(calls.length > 1);
+		assert.ok(calls.every((call) => call.maxBuffer === 64 * 1024 * 1024), JSON.stringify(calls));
+	} finally {
+		view.cleanup();
+	}
+});
+
+test("candidate view classifies both Node synchronous-process output-limit errors ahead of killed state without exposing process output", (t) => {
+	const attemptedOutputBytes = 64 * 1024 * 1024 + 1;
+	for (const code of ["ENOBUFS", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"]) {
+		let failure: unknown;
+		try {
+			new CandidateViewRegistry((_file, _arguments, options) => {
+				assert.ok((options.maxBuffer ?? 0) < attemptedOutputBytes, code);
+				throw Object.assign(new Error("sensitive stderr and candidate bytes"), { code, killed: true, stderr: Buffer.from("sensitive stderr and candidate bytes") });
+			}).create({ contributorRoot: repository(t) });
+		} catch (error) {
+			failure = error;
+		}
+		assert.ok(failure instanceof CandidateViewError, code);
+		assert.equal(failure.reason, "candidate-view-output-limit", code);
+		assert.deepEqual((failure as CandidateViewError & { diagnostics?: unknown }).diagnostics, {
+			phase: "candidate-view",
+			category: "output-limit",
+			git_subcommand: "rev-parse",
+			timeout_ms: 10_000,
+			max_buffer_bytes: 64 * 1024 * 1024,
+			message: "candidate-view Git command rev-parse exceeded the 67108864-byte output limit; inspect the candidate state before any new START",
+		}, code);
+		assert.doesNotMatch(failure.message, /sensitive stderr|candidate bytes/, code);
+	}
+});
+
+test("candidate Git accepts deterministic output above 1 MiB up to its explicit bound", () => {
+	const row = `:100644 100644 ${"a".repeat(40)} ${"b".repeat(40)} M\0tracked.txt\0`;
+	const copies = Math.ceil((1024 * 1024 + 1) / Buffer.byteLength(row));
+	const output = Buffer.from(row.repeat(copies));
+	assert.ok(output.length > 1024 * 1024);
+	assert.ok(output.length < 64 * 1024 * 1024);
+	const calls: Array<{ maxBuffer: number | undefined }> = [];
+	const manifest = deriveChangedPathManifest("/candidate", "a".repeat(40), "b".repeat(40), (_file, arguments_, options) => {
+		assert.deepEqual(arguments_.slice(0, 2), ["diff", "--raw"]);
+		calls.push({ maxBuffer: options.maxBuffer });
+		return output;
+	});
+	assert.equal(manifest.length, copies);
+	assert.ok(manifest.every((entry) => entry.path === "tracked.txt" && entry.status === "M"));
+	assert.deepEqual(calls, [{ maxBuffer: 64 * 1024 * 1024 }]);
 });
 
 test("committed-only candidate views scope an explicit base to committed changes and exclude dirty worktree files", (t) => {
