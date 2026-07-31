@@ -127,7 +127,7 @@ const contractHashes = {
   "contracts/review-integration/v1/schemas/targeted-validation-request.schema.json": "52b91154693b4dd66983fc91ecf7197503555f2c9e85cac626cffd3035c53d65",
   "contracts/review-integration/v1/schemas/verification-evidence.schema.json": "fd15890bf2ef1db95d771ee7f468e9e64014351d7940f65604eb24f41e68a22f",
   "contracts/review-integration/v2/fixtures/capabilities.fixture.json": "17c150d851c15b3f0c20d18c2e2741eb2232ffa24f35aa71d6d30e90a85e42b7",
-  "contracts/review-integration/v2/fixtures/consent.fixture.json": "a6d3ddc979d3dba202e4bf4ea5ca468ade1284f564f9325c313f4f9a9796f0ad",
+  "contracts/review-integration/v2/fixtures/consent.fixture.json": "203cc96d5c29ba0f27b5c4db04c2e88566e0a923d3a0cdb317f78d9065349075",
   "contracts/review-integration/v2/fixtures/start.fixture.json": "34b21328fa910e03af2fac8e816c5b510ba146201da0cd4ef1693d39a6344ba0",
   "contracts/review-integration/v2/fixtures/status.fixture.json": "d5438578f2969f17635fecea94c7ef46d14c78fa668e50df48c4254254d5e935",
   "contracts/review-integration/v2/schemas/admitted-result.schema.json": "c6a9c880191d65c46d9cfc8a0812af16b636573a8f6e57ea34aa16d6f6bb9735",
@@ -139,7 +139,7 @@ const contractHashes = {
   "contracts/review-integration/v2/schemas/repair.schema.json": "9e842d1ded797a91ede16b2054a38708b2d1fc7a0d6217541f84c0f2f5a2e73e",
   "contracts/review-integration/v2/schemas/start.schema.json": "86ddfcfe1912489abef7461613d692ea53a4d7d73d444d5f6dbbd7f9866a2c37",
   "contracts/review-integration/v2/schemas/status.schema.json": "132b15dd7a0514aa451373bd4b3c02a1491b7b11cf5b9ce43bc300b549397ac9",
-  "docs/review-integration.md": "4ee3493303b03c7cb761f35865722b1691f164f72e6f94574512c42832ff04f2",
+  "docs/review-integration.md": "189f9b128cafaf225d2b6be53111f893ca46eb687fb9e5e051a84727b6a34bbc",
 };
 
 requiredPaths.push(...Object.keys(contractHashes));
@@ -265,7 +265,7 @@ async function main() {
   });
 
   if (driftedContracts.length > 0) {
-    console.error("gentle-pi packaged review-integration/v1 and review-integration/v2 contract bytes drifted from the byte-identical Gentle AI v2.2.2 contract:");
+    console.error("gentle-pi packaged review-integration/v1 and review-integration/v2 contract bytes drifted from the byte-identical Gentle AI v2.2.3 contract:");
     for (const drift of driftedContracts) console.error(`- ${drift.relativePath}: expected ${drift.expected}, got ${drift.actual}`);
     process.exit(1);
   }
@@ -297,12 +297,12 @@ async function main() {
 
   const installer = readFileSync(join(root, "scripts/gentle-ai-installer.mjs"), "utf8");
   const binaryResolver = readFileSync(join(root, "lib/gentle-ai-binary.ts"), "utf8");
-  if (!installer.includes('INSTALLER_VERSION = "2.2.2"') || !binaryResolver.includes('GENTLE_AI_VERSION = "2.2.2"')) {
-    console.error("gentle-pi package-local Gentle AI version pins are not both v2.2.2.");
+  if (!installer.includes('INSTALLER_VERSION = "2.2.3"') || !binaryResolver.includes('GENTLE_AI_VERSION = "2.2.3"')) {
+    console.error("gentle-pi package-local Gentle AI version pins are not both v2.2.3.");
     process.exit(1);
   }
 
-  console.log(`gentle-pi package resource check passed (${requiredPaths.length} files; ${Object.keys(contractHashes).length} exact byte-identical v2.2.2 contract artifacts).`);
+  console.log(`gentle-pi package resource check passed (${requiredPaths.length} files; ${Object.keys(contractHashes).length} exact byte-identical v2.2.3 contract artifacts).`);
 }
 
 const isMainModule = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
