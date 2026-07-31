@@ -1147,6 +1147,7 @@ function compareCanonicalStrings(left: string, right: string): number {
 }
 
 function canonicalStringMap(value: Readonly<Record<string, string>>): Record<string, string> {
+	// Plain objects enumerate integer-like keys numerically; canonical round trips intentionally preserve that ordering.
 	return Object.fromEntries(Object.entries(value).sort(([left], [right]) => compareCanonicalStrings(left, right)));
 }
 
