@@ -4530,6 +4530,18 @@ function validateNativeStartPolicyPath(cwd: string, value: unknown): NativeStart
 	}
 }
 
+const NATIVE_START_FOCUS = {
+	RISK: "risk",
+	RESILIENCE: "resilience",
+	READABILITY: "readability",
+	RELIABILITY: "reliability",
+} as const;
+type NativeStartFocus = (typeof NATIVE_START_FOCUS)[keyof typeof NATIVE_START_FOCUS];
+
+function isNativeStartFocus(value: unknown): value is NativeStartFocus {
+	return typeof value === "string" && (Object.values(NATIVE_START_FOCUS) as readonly string[]).includes(value);
+}
+
 function nativeStartRejection(reason: string, field?: string): Record<string, unknown> {
 	return {
 		operation: REVIEW_CONTROLLER_OPERATION.START,
@@ -4546,7 +4558,7 @@ function nativeStartRejection(reason: string, field?: string): Record<string, un
 							? "native-start-committed-only-required"
 							: reason === "committed-only-invalid"
 								? "native-start-committed-only-invalid"
-								: reason === "unknown-field"
+								: reason === "unknown-field" || reason === "focus-invalid"
 									? "native-start-input-invalid"
 									: "native-start-policy-path-invalid",
 		reason,
@@ -5151,16 +5163,11 @@ async function executeReviewControllerOperation(
 			REVIEW_CONTROLLER_OPERATION.START,
 		);
 		if (rawStart.mode === REVIEW_MODE.ORDINARY) {
-			try {
-				const gated = await resolveReviewModeGate(nativeReviewCli, parameters.operation, defaultCwd, signal);
-				if (gated !== undefined) return gated;
-			} catch (error) {
-				return nativeOperationFailure(parameters.operation, error);
-			}
-			if (nativeReviewCli?.targetStatus === undefined) return nativeStatusUnsupported(parameters.operation);
 			if ("policyHash" in rawStart) return nativeStartRejection("legacy-policy-hash-unsupported");
-			const unknownField = Object.keys(rawStart).find((field) => !["mode", "baseRef", "committedOnly", "policyPath"].includes(field));
+			const unknownField = Object.keys(rawStart).find((field) => !["mode", "baseRef", "committedOnly", "policyPath", "focus"].includes(field));
 			if (unknownField !== undefined) return nativeStartRejection("unknown-field", unknownField);
+			const focus = rawStart.focus;
+			if (focus !== undefined && !isNativeStartFocus(focus)) return nativeStartRejection("focus-invalid");
 			const policy: NativeStartPolicyValidation = rawStart.policyPath === undefined
 				? {}
 				: validateNativeStartPolicyPath(defaultCwd, rawStart.policyPath);
@@ -5178,6 +5185,13 @@ async function executeReviewControllerOperation(
 					return nativeStartRejection("base-ref-unresolvable");
 				}
 			}
+			try {
+				const gated = await resolveReviewModeGate(nativeReviewCli, parameters.operation, defaultCwd, signal);
+				if (gated !== undefined) return gated;
+			} catch (error) {
+				return nativeOperationFailure(parameters.operation, error);
+			}
+			if (nativeReviewCli?.targetStatus === undefined) return nativeStatusUnsupported(parameters.operation);
 			let target: ReviewStatusV3;
 			try {
 				target = await nativeReviewCli.targetStatus({
@@ -5208,6 +5222,7 @@ async function executeReviewControllerOperation(
 						projection: target.projection.projection,
 						...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 						...(policy.policyPath === undefined ? {} : { policyPath: policy.policyPath }),
+						...(focus === undefined ? {} : { focus }),
 						...(signal === undefined ? {} : { signal }),
 					});
 				} catch (error) {

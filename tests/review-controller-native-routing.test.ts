@@ -1607,6 +1607,83 @@ test("native START uses the default policy or a canonical safe policy path, and 
 	assert.equal(requests.length, 2);
 });
 
+test("native ordinary START forwards every allowed focus and leaves the native default omitted", async (t) => {
+	const cwd = repository(t);
+	const requests: Parameters<NativeReviewCli["start"]>[0][] = [];
+	const { controller } = runtime(fakeNative({
+		start: async (request) => {
+			requests.push(request);
+			return { lineageId: `native-${request.focus ?? "default"}`, state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4, action: "created", lensesRequired: true };
+		},
+		targetStatus: async () => targetStatusFixture({ applicability: "unrelated", action: "start" }),
+	}));
+	for (const focus of ["risk", "resilience", "readability", "reliability"] as const) {
+		await controller.execute(`focused-${focus}`, { operation: "start", input: JSON.stringify({ mode: "ordinary", focus }) }, undefined, undefined, context(cwd));
+	}
+	await controller.execute("default-focus", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	assert.deepEqual(requests, [
+		...(["risk", "resilience", "readability", "reliability"] as const).map((focus) => ({ cwd, focus, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" as const })),
+		{ cwd, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" },
+	]);
+});
+
+test("native ordinary START rejects invalid focus before native calls", async (t) => {
+	const cwd = repository(t);
+	let starts = 0;
+	const { controller } = runtime(fakeNative({
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+		targetStatus: async () => targetStatusFixture({ applicability: "unrelated", action: "start" }),
+	}));
+	for (const focus of ["", "risk ", "RISK", "all", 42, null, [], {}]) {
+		const rejected = await controller.execute("invalid-focus", { operation: "start", input: JSON.stringify({ mode: "ordinary", focus }) }, undefined, undefined, context(cwd));
+		assert.deepEqual(rejected.details, {
+			operation: "start",
+			status: "blocked",
+			outcome: "native-start-input-invalid",
+			reason: "focus-invalid",
+			lineage_created: false,
+			mutation_performed: false,
+			mutation_outcome: "none",
+			reset_eligible: false,
+		});
+	}
+	assert.equal(starts, 0);
+});
+
+test("native ordinary START rejects malformed input before resolving the review-mode gate", async (t) => {
+	const cwd = repository(t);
+	let reviewModeCalls = 0;
+	let starts = 0;
+	const { controller } = runtime(fakeNative({
+		reviewMode: async () => {
+			reviewModeCalls += 1;
+			throw new Error("review mode must not be resolved for malformed ordinary START input");
+		},
+		start: async () => {
+			starts += 1;
+			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}));
+	for (const [input, reason] of [
+		[{ mode: "ordinary", policyHash: "legacy" }, "legacy-policy-hash-unsupported"],
+		[{ mode: "ordinary", focus: "all" }, "focus-invalid"],
+		[{ mode: "ordinary", unexpected: true }, "unknown-field"],
+		[{ mode: "ordinary", policyPath: "outside.json" }, "policy-path-outside-scope"],
+		[{ mode: "ordinary", baseRef: " " }, "base-ref-invalid"],
+		[{ mode: "ordinary", baseRef: "origin/main" }, "committed-only-required"],
+		[{ mode: "ordinary", committedOnly: true }, "committed-only-invalid"],
+		[{ mode: "ordinary", baseRef: "refs/heads/missing", committedOnly: true }, "base-ref-unresolvable"],
+	] as const) {
+		const rejected = await controller.execute("malformed-start", { operation: "start", input: JSON.stringify(input) }, undefined, undefined, context(cwd));
+		assert.equal((rejected.details as { reason?: unknown }).reason, reason);
+	}
+	assert.equal(reviewModeCalls, 0);
+	assert.equal(starts, 0);
+});
+
 test("native START preserves the default dirty-inclusive candidate without base flags", async (t) => {
 	const cwd = repository(t);
 	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
@@ -1855,7 +1932,7 @@ test("native ordinary START blocks unknown input fields before native calls", as
 			return { lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4, action: "created", lensesRequired: true };
 		},
 	}));
-	for (const field of ["base_ref", "unexpected"]) {
+	for (const field of ["base_ref", "focus_mode", "unexpected"]) {
 		const rejected = await controller.execute("unknown-start-field", { operation: "start", input: JSON.stringify({ mode: "ordinary", [field]: "origin/main" }) }, undefined, undefined, context(cwd));
 		assert.deepEqual(rejected.details, {
 			operation: "start",
@@ -1872,11 +1949,11 @@ test("native ordinary START blocks unknown input fields before native calls", as
 	assert.equal(starts, 0);
 });
 
-test("ordinary START fails closed before legacy policy handling when target status is unavailable", async (t) => {
+test("ordinary START rejects a legacy policy hash before native availability", async (t) => {
 	const cwd = repository(t);
 	const { controller } = runtime(null);
 	const result = await controller.execute("legacy-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", policyHash: "a".repeat(64) }) }, undefined, undefined, context(cwd));
-	assert.equal((result.details as { outcome?: string }).outcome, "native-status-unsupported");
+	assert.equal((result.details as { outcome?: string }).outcome, "native-start-legacy-policy-hash-unsupported");
 });
 
 test("general STATUS and INSPECT use negotiated target status without mutation or inventory reads", async (t) => {
@@ -3687,7 +3764,7 @@ test("controller preserves every historical response-schema empty-context pre-PR
 	}
 });
 
-test("parallel 4R dispatch receives one compact changed scope and blocks oversized scope before any actor", async (t) => {
+test("parallel 4R dispatch receives readable and compact changed scopes before any actor", async (t) => {
 	const cwd = repository(t);
 	for (let index = 0; index < 248; index += 1) {
 		writeFileSync(join(cwd, `unchanged-${String(index).padStart(3, "0")}.txt`), "base\n");
@@ -3724,8 +3801,10 @@ test("parallel 4R dispatch receives one compact changed scope and blocks oversiz
 		start: async () => ({ lineageId: "c4-oversized", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 80, changedLines: 80, correctionBudget: 40, action: "created", lensesRequired: true }),
 	}), undefined, undefined, undefined, oversizedViews);
 	await oversized.controller.execute("c4-oversized-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
-	const rejected = await oversized.toolCall({ toolName: "subagent_run", input: { agent: "review-reliability", task: "Review oversized scope", mode: "task" } }, context(cwd)) as { block?: boolean };
-	assert.equal(rejected.block, true, "oversized scope blocks before an actor can launch");
+	const oversizedDispatch = { agent: "review-reliability", task: "Review oversized scope", mode: "task" };
+	assert.equal(await oversized.toolCall({ toolName: "subagent_run", input: oversizedDispatch }, context(cwd)), undefined, "a compressible oversized scope reaches the actor through its compact manifest");
+	assert.match(oversizedDispatch.task, /Frozen changed scope manifest \(gzip\+base64url\):/);
+	assert.ok(Buffer.byteLength(oversizedDispatch.task, "utf8") <= 4_096 + "Review oversized scope".length);
 	oversizedViews.resolveForLens("c4-oversized", "review-reliability").cleanup();
 });
 

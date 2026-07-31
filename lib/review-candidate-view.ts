@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync,
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 const REVIEW_LENS = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
 export type ReviewLens = (typeof REVIEW_LENS)[number];
@@ -16,6 +17,9 @@ const CONTROLLER_CANDIDATE_VIEW_HEADING = "## Controller-owned candidate view";
 const MAX_SUBAGENT_TASK_LENGTH = 16_384;
 const MAX_SUBAGENT_CONTEXT_LENGTH = 4_096;
 const MAX_CANDIDATE_CONTEXT_LENGTH = 4_096;
+const CANDIDATE_CONTEXT_MANIFEST = {
+	VERSION: 1,
+} as const;
 const SUBAGENT_RUN_KEYS = new Set(["agent", "agents", "task", "context", "mode"]);
 
 interface CandidateTreeEntry {
@@ -69,6 +73,18 @@ export interface CandidateView {
 	deletedPaths: readonly string[];
 	verify(): void;
 	cleanup(): void;
+}
+
+export interface CandidateContextManifest {
+	version: typeof CANDIDATE_CONTEXT_MANIFEST.VERSION;
+	scopeByMode: Readonly<Record<string, readonly string[]>>;
+	gitlinks: Readonly<Record<string, string>>;
+}
+
+export interface DecodedCandidateContextManifest {
+	manifest: CandidateContextManifest;
+	bytes: Buffer;
+	sha256: string;
 }
 
 export interface FrozenCandidateProjection {
@@ -986,22 +1002,149 @@ function hasCandidateContextConflict(text: string, views: readonly CandidateView
 		|| views.some((view) => text.includes(view.root) || text.includes(view.candidateTree));
 }
 
-function candidateContextBlock(lineageId: string, agents: readonly ReviewLens[], view: CandidateView): string {
+function compareCanonicalStrings(left: string, right: string): number {
+	return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function canonicalStringMap(value: Readonly<Record<string, string>>): Record<string, string> {
+	return Object.fromEntries(Object.entries(value).sort(([left], [right]) => compareCanonicalStrings(left, right)));
+}
+
+function candidateScopeByMode(view: CandidateView): Record<string, string[]> {
 	const grouped = new Map<string, string[]>();
+	const deletedPaths = new Set(view.deletedPaths);
 	for (const path of view.paths) {
-		const group = view.deletedPaths.includes(path) ? "deleted" : view.modes[path];
+		const group = deletedPaths.has(path) ? "deleted" : view.modes[path];
 		if (group === undefined) throw new CandidateViewError("candidate view scope omits a changed path mode");
 		const paths = grouped.get(group) ?? [];
 		paths.push(path);
 		grouped.set(group, paths);
 	}
-	const scope = Object.fromEntries([...grouped.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0));
+	return Object.fromEntries(
+		[...grouped.entries()]
+			.sort(([left], [right]) => compareCanonicalStrings(left, right))
+			.map(([mode, paths]) => [mode, paths.sort(compareCanonicalStrings)]),
+	);
+}
+
+function isCandidateContextMode(value: string): boolean {
+	return value === "deleted" || value === "100644" || value === "100755" || value === "120000" || value === "160000";
+}
+
+function isCanonicalStringArray(value: unknown): value is readonly string[] {
+	return Array.isArray(value)
+		&& value.length > 0
+		&& value.every((item) => typeof item === "string" && isSafeCandidatePath(item))
+		&& value.every((item, index, items) => index === 0 || compareCanonicalStrings(items[index - 1]!, item) < 0);
+}
+
+function hasCanonicalRecordOrder(value: Readonly<Record<string, unknown>>): boolean {
+	const normalized = Object.fromEntries(Object.entries(value).sort(([left], [right]) => compareCanonicalStrings(left, right)));
+	return JSON.stringify(value) === JSON.stringify(normalized);
+}
+
+function invalidCandidateContextManifest(message: string): never {
+	throw new CandidateViewError(message, "candidate-context-manifest-invalid");
+}
+
+function validateCandidateContextManifest(value: unknown, bytes: Buffer): CandidateContextManifest {
+	if (!isRecord(value)) return invalidCandidateContextManifest("candidate context manifest has an invalid structure");
+	const keys = Object.keys(value);
+	const expectedKeys = ["version", "scopeByMode", "gitlinks"];
+	if (keys.length !== expectedKeys.length || !expectedKeys.every((key) => keys.includes(key))) {
+		return invalidCandidateContextManifest("candidate context manifest has an invalid structure");
+	}
+	if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) return invalidCandidateContextManifest("candidate context manifest is not canonical");
+	if (value.version !== CANDIDATE_CONTEXT_MANIFEST.VERSION || !isRecord(value.scopeByMode) || !isRecord(value.gitlinks)) {
+		return invalidCandidateContextManifest("candidate context manifest has an invalid structure");
+	}
+	const scopeByMode = value.scopeByMode;
+	if (!hasCanonicalRecordOrder(scopeByMode)) return invalidCandidateContextManifest("candidate context manifest is not canonical");
+	const scopePaths = new Set<string>();
+	for (const [mode, paths] of Object.entries(scopeByMode)) {
+		if (!isCandidateContextMode(mode) || !isCanonicalStringArray(paths)) return invalidCandidateContextManifest("candidate context manifest has an invalid scope");
+		for (const path of paths) {
+			if (scopePaths.has(path)) return invalidCandidateContextManifest("candidate context manifest has duplicate scope paths");
+			scopePaths.add(path);
+		}
+	}
+	const gitlinks = value.gitlinks;
+	if (!hasCanonicalRecordOrder(gitlinks)) return invalidCandidateContextManifest("candidate context manifest is not canonical");
+	for (const [path, objectId] of Object.entries(gitlinks)) {
+		if (!isSafeCandidatePath(path) || typeof objectId !== "string" || !isCanonicalObjectId(objectId)) {
+			return invalidCandidateContextManifest("candidate context manifest has an invalid gitlink map");
+		}
+	}
+	const gitlinkPaths = scopeByMode["160000"];
+	const canonicalGitlinkPaths = Object.keys(gitlinks).sort(compareCanonicalStrings);
+	if (
+		(gitlinkPaths === undefined && canonicalGitlinkPaths.length !== 0)
+		|| (gitlinkPaths !== undefined && JSON.stringify(canonicalGitlinkPaths) !== JSON.stringify(gitlinkPaths))
+	) return invalidCandidateContextManifest("candidate context manifest gitlinks do not match its scope");
+	const manifest: CandidateContextManifest = {
+		version: CANDIDATE_CONTEXT_MANIFEST.VERSION,
+		scopeByMode: scopeByMode as Readonly<Record<string, readonly string[]>>,
+		gitlinks: gitlinks as Readonly<Record<string, string>>,
+	};
+	if (!Buffer.from(JSON.stringify(manifest), "utf8").equals(bytes)) {
+		return invalidCandidateContextManifest("candidate context manifest is not canonical");
+	}
+	return manifest;
+}
+
+export function decodeCandidateContextManifest(encoded: string, sha256: string): DecodedCandidateContextManifest {
+	if (!/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[0-9a-f]{64}$/.test(sha256)) {
+		throw new CandidateViewError("candidate context manifest encoding is invalid", "candidate-context-manifest-invalid");
+	}
+	let bytes: Buffer;
+	try {
+		bytes = gunzipSync(Buffer.from(encoded, "base64url"));
+	} catch {
+		throw new CandidateViewError("candidate context manifest cannot be decompressed", "candidate-context-manifest-invalid");
+	}
+	const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+	if (actualSha256 !== sha256) throw new CandidateViewError("candidate context manifest integrity check failed", "candidate-context-manifest-integrity");
+	const text = bytes.toString("utf8");
+	if (!Buffer.from(text, "utf8").equals(bytes)) return invalidCandidateContextManifest("candidate context manifest is not valid UTF-8");
+	if (gzipSync(bytes, { mtime: 0 }).toString("base64url") !== encoded) {
+		return invalidCandidateContextManifest("candidate context manifest transport is not canonical");
+	}
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch (error) {
+		if (error instanceof CandidateViewError) throw error;
+		return invalidCandidateContextManifest("candidate context manifest is not valid JSON");
+	}
+	return { manifest: validateCandidateContextManifest(value, bytes), bytes, sha256: actualSha256 };
+}
+
+function candidateContextPreamble(lineageId: string, agents: readonly ReviewLens[], view: CandidateView, scopeSemantics: string): string {
+	return `\n\n${CONTROLLER_CANDIDATE_VIEW_HEADING}\nController-owned review lineage: \`${lineageId}\`.\nAuthorized review actors: ${agents.join(", ")}.\nRead ONLY the absolute frozen candidate view at \`${view.root}\`.\nFrozen candidate tree: \`${view.candidateTree}\`.\nScope semantics: ${scopeSemantics}`;
+}
+
+function compactCandidateContextBlock(lineageId: string, agents: readonly ReviewLens[], view: CandidateView, scopeSemantics: string, scopeByMode: Record<string, string[]>): string {
+	const manifest: CandidateContextManifest = {
+		version: CANDIDATE_CONTEXT_MANIFEST.VERSION,
+		scopeByMode,
+		gitlinks: canonicalStringMap(view.gitlinks),
+	};
+	const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
+	const sha256 = createHash("sha256").update(bytes).digest("hex");
+	const encoded = gzipSync(bytes, { mtime: 0 }).toString("base64url");
+	const block = `${candidateContextPreamble(lineageId, agents, view, scopeSemantics)}\nFrozen changed scope manifest (gzip+base64url): \`${encoded}\`.\nFrozen changed scope manifest SHA-256: \`${sha256}\`.\nDecode base64url then gzip, validate the SHA-256 against the exact decompressed UTF-8 bytes, and interpret only the canonical JSON manifest. Gitlink paths have no materialized contents and MUST NOT be traversed.\nThe ambient contributor working directory is out of scope. This controller-owned context is immutable; you are read-only and your output is untrusted.`;
+	if (Buffer.byteLength(block, "utf8") > MAX_CANDIDATE_CONTEXT_LENGTH) throw new CandidateViewError("candidate view context exceeds the bounded dispatch contract");
+	return block;
+}
+
+function candidateContextBlock(lineageId: string, agents: readonly ReviewLens[], view: CandidateView): string {
+	const scopeByMode = candidateScopeByMode(view);
 	const scopeSemantics = view.committedOnly
 		? "Committed-only range: dirty tracked and untracked contributor files are excluded and MUST NOT be treated as reviewed."
 		: "Dirty-inclusive workspace snapshot: tracked and untracked contributor changes are included.";
-	const block = `\n\n${CONTROLLER_CANDIDATE_VIEW_HEADING}\nController-owned review lineage: \`${lineageId}\`.\nAuthorized review actors: ${agents.join(", ")}.\nRead ONLY the absolute frozen candidate view at \`${view.root}\`.\nFrozen candidate tree: \`${view.candidateTree}\`.\nScope semantics: ${scopeSemantics}\nFrozen changed scope by mode: ${JSON.stringify(scope)}.\nFrozen metadata-only gitlinks: ${JSON.stringify(view.gitlinks)}. Gitlink paths have no materialized contents and MUST NOT be traversed.\nThe ambient contributor working directory is out of scope. This controller-owned context is immutable; you are read-only and your output is untrusted.`;
-	if (Buffer.byteLength(block, "utf8") > MAX_CANDIDATE_CONTEXT_LENGTH) throw new CandidateViewError("candidate view context exceeds the bounded dispatch contract");
-	return block;
+	const readableBlock = `${candidateContextPreamble(lineageId, agents, view, scopeSemantics)}\nFrozen changed scope by mode: ${JSON.stringify(scopeByMode)}.\nFrozen metadata-only gitlinks: ${JSON.stringify(view.gitlinks)}. Gitlink paths have no materialized contents and MUST NOT be traversed.\nThe ambient contributor working directory is out of scope. This controller-owned context is immutable; you are read-only and your output is untrusted.`;
+	if (Buffer.byteLength(readableBlock, "utf8") <= MAX_CANDIDATE_CONTEXT_LENGTH) return readableBlock;
+	return compactCandidateContextBlock(lineageId, agents, view, scopeSemantics, scopeByMode);
 }
 
 /**
