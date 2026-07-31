@@ -92,6 +92,7 @@ test("a tool absent from the allowlist resolves to denied under the deny-all rul
 		"read",
 		"grep",
 		"glob",
+		"gentle_review_scope",
 		"find",
 		"edit",
 		"write",
@@ -109,8 +110,8 @@ test("a tool absent from the allowlist resolves to denied under the deny-all rul
 		assert.ok(!refuterActive.includes(omitted), `review-refuter must deny omitted tool ${omitted}`);
 	}
 
-	// The four lenses deny bash, matching gentle-ai's own Claude-runtime lens
-	// agents (`tools: Read, Grep, Glob`) exactly. Contract v2 is explicit: a
+	// The four lenses deny bash and add only the bounded scope reader required
+	// to consume controller-owned compact manifests. Contract v2 is explicit: a
 	// runtime that cannot enforce a per-command Git shell boundary exposes no
 	// shell and reports incomplete inspection rather than claiming backend
 	// enforcement. Pi has no per-command scoping layer, so unrestricted bash
@@ -124,7 +125,7 @@ test("a tool absent from the allowlist resolves to denied under the deny-all rul
 	// the other half of the same rule, not an exception to it.
 	for (const lens of ["review-risk", "review-resilience", "review-readability", "review-reliability"]) {
 		const lensActive = resolveActiveTools(readToolEntries(join(ASSETS_AGENTS_DIR, `${lens}.md`)), registry);
-		assert.deepEqual(lensActive, ["read", "grep", "glob"], `${lens} must expose exactly read, grep, and glob`);
+		assert.deepEqual(lensActive, ["read", "grep", "glob", "gentle_review_scope"], `${lens} must expose only candidate readers and the bounded scope reader`);
 		for (const omitted of ["bash", "edit", "write", "mem_save", "codegraph_explore", "mcp__slack__slack_send_message", "subagent_run"]) {
 			assert.ok(!lensActive.includes(omitted), `${lens} must deny ${omitted}`);
 		}

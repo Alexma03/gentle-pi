@@ -46,6 +46,7 @@ interface RegisteredCommandFixture {
 
 interface Runtime {
 	controller: RegisteredTool;
+	scopeReader: RegisteredTool;
 	toolCall: ToolCallHandler;
 	commands: Map<string, RegisteredCommandFixture>;
 }
@@ -90,13 +91,21 @@ function runtime(
 		registerCommand(name: string, definition: RegisteredCommandFixture) { commands.set(name, definition); },
 	} as unknown as ExtensionAPI);
 	const controller = tools.get("gentle_review");
+	const scopeReader = tools.get("gentle_review_scope");
 	assert.ok(controller);
+	assert.ok(scopeReader);
 	assert.ok(toolCall);
-	return { controller, toolCall, commands };
+	return { controller, scopeReader, toolCall, commands };
 }
 
 function context(cwd: string, signal?: AbortSignal): ExtensionContext {
 	return { cwd, hasUI: false, signal, ui: { confirm: async () => true } } as unknown as ExtensionContext;
+}
+
+function compactCandidateContextManifest(task: string): { encoded: string; sha256: string } {
+	const match = /Frozen changed scope manifest \(gzip\+base64url\): `([A-Za-z0-9_-]+)`\.\nFrozen changed scope manifest SHA-256: `([0-9a-f]{64})`\./.exec(task);
+	assert.ok(match, "expected a compact candidate context manifest");
+	return { encoded: match[1]!, sha256: match[2]! };
 }
 
 function interactiveContext(cwd: string, signal?: AbortSignal): ExtensionContext {
@@ -268,7 +277,7 @@ function fakeNative(overrides: Partial<NativeReviewCli> = {}): NativeReviewCli {
 			const lineageId = request.lineageId ?? "";
 			return lineageId === ""
 				? candidateStartTargetStatus(request)
-				: targetStatusFixture({ lineageId });
+				: candidateFinalizeTargetStatus(request, lineageId);
 		},
 		...overrides,
 	};
@@ -395,6 +404,24 @@ function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReview
 		});
 	} catch {
 		return targetStatusFixture({ applicability: "unrelated", action: "start" });
+	} finally {
+		candidate?.cleanup();
+	}
+}
+
+function candidateFinalizeTargetStatus(request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0], lineageId: string): ReviewStatusV3 {
+	let candidate: ReturnType<CandidateViewRegistry["create"]> | undefined;
+	try {
+		candidate = new CandidateViewRegistry().create({ contributorRoot: request.cwd });
+		return targetStatusFixture({
+			lineageId,
+			baseTree: candidate.baseTree,
+			currentCandidateTree: candidate.candidateTree,
+			paths: candidate.paths,
+			projection: request.projection ?? "workspace",
+		});
+	} catch {
+		return targetStatusFixture({ lineageId });
 	} finally {
 		candidate?.cleanup();
 	}
@@ -559,6 +586,54 @@ test("new ordinary START and native-lineage FINALIZE use exactly one native call
 	assert.deepEqual(finalize.details, { operation: "finalize", result: { lineage_id: "native-lineage", state: "approved", action: "approved", store_revision: "r1", receipt_path: "/opaque/receipt" } });
 	assert.equal(starts, 1);
 	assert.equal(finalizes, 1);
+});
+
+test("native FINALIZE resolves STATUS and mutation against the verified frozen candidate root", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	const candidateViews = new CandidateViewRegistry();
+	const statusRoots: string[] = [];
+	let finalizeRoot: string | undefined;
+	const native = fakeNative({
+		targetStatus: async (request) => {
+			if (request.lineageId === undefined) return candidateStartTargetStatus(request);
+			statusRoots.push(request.cwd);
+			if (request.cwd === cwd) return targetStatusFixture({ applicability: "unrelated", action: "start" });
+			const candidate = candidateViews.resolveForFinalize(request.lineageId);
+			return targetStatusFixture({
+				lineageId: request.lineageId,
+				baseTree: candidate.baseTree,
+				currentCandidateTree: candidate.candidateTree,
+				paths: candidate.paths,
+			});
+		},
+		start: async () => ({
+			lineageId: "candidate-root-finalize",
+			state: "reviewing",
+			riskLevel: "medium",
+			selectedLenses: ["review-reliability"],
+			changedFiles: 1,
+			changedLines: 1,
+			correctionBudget: 1,
+			action: "created",
+			lensesRequired: true,
+		}),
+		finalize: async (request) => {
+			finalizeRoot = request.cwd;
+			return { lineageId: "candidate-root-finalize", state: "approved", action: "approved", storeRevision: "r1" };
+		},
+	});
+	const { controller } = runtime(native, undefined, undefined, undefined, candidateViews);
+	await controller.execute("candidate-root-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const candidateRoot = candidateViews.resolveForFinalize("candidate-root-finalize").root;
+	const result = await controller.execute("candidate-root-finalize", {
+		operation: "finalize",
+		lineageId: "candidate-root-finalize",
+		input: JSON.stringify({ review_result: { lens_results: [{ findings: [], evidence: ["candidate reviewed"] }] } }),
+	}, undefined, undefined, context(cwd));
+	assert.deepEqual(statusRoots, [candidateRoot]);
+	assert.equal(finalizeRoot, candidateRoot);
+	assert.equal((result.details as { result: { state: string } }).result.state, "approved");
 });
 
 test("parent subagent_run mutates single and parallel review actors with one verified controller-owned candidate view", async (t) => {
@@ -4140,8 +4215,21 @@ test("parallel 4R dispatch receives readable and compact changed scopes before a
 	const oversizedDispatch = { agent: "review-reliability", task: "Review oversized scope", mode: "task" };
 	assert.equal(await oversized.toolCall({ toolName: "subagent_run", input: oversizedDispatch }, context(cwd)), undefined, "a compressible oversized scope reaches the actor through its compact manifest");
 	assert.match(oversizedDispatch.task, /Frozen changed scope manifest \(gzip\+base64url\):/);
+	assert.match(oversizedDispatch.task, /Call `gentle_review_scope`/);
 	assert.ok(Buffer.byteLength(oversizedDispatch.task, "utf8") <= 4_096 + "Review oversized scope".length);
-	oversizedViews.resolveForLens("c4-oversized", "review-reliability").cleanup();
+	const compact = compactCandidateContextManifest(oversizedDispatch.task);
+	const actorEntries: Array<{ path: string; mode: string; gitlinkObjectId?: string }> = [];
+	let cursor: number | undefined = 0;
+	while (cursor !== undefined) {
+		const result = await oversized.scopeReader.execute("actor-scope", { manifest: compact.encoded, sha256: compact.sha256, cursor }, undefined, undefined, context(cwd));
+		const page = result.details as { entries: typeof actorEntries; nextCursor?: number; totalPaths: number };
+		actorEntries.push(...page.entries);
+		cursor = page.nextCursor;
+	}
+	const actorCandidate = oversizedViews.resolveForLens("c4-oversized", "review-reliability");
+	assert.deepEqual(actorEntries.map((entry) => entry.path).sort(), [...actorCandidate.paths].sort(), "the actual actor tool recovers every compressed changed path");
+	assert.equal(actorEntries.some((entry) => entry.path.startsWith("unchanged-")), false, "the actor tool never falls back to the ambient or full candidate tree");
+	actorCandidate.cleanup();
 });
 
 test("INSPECT relays negotiated target status without inventory reconstruction or mutation", async (t) => {

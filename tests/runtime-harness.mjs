@@ -217,6 +217,7 @@ async function run() {
 		assert.ok(tools.has(toolName), `missing quiet built-in tool renderer ${toolName}`);
 	}
 	assert.ok(tools.has("gentle_review"), "missing registered bounded review controller tool");
+	assert.ok(tools.has("gentle_review_scope"), "missing registered bounded review scope tool");
 	assert.deepEqual(
 		tools.get("gentle_review").parameters.properties.operation.enum.filter((operation) => operation.includes("supersession") || operation === "supersede" || operation === "reconcile-authority"),
 		["reconcile-authority"],

@@ -15,6 +15,7 @@ import {
 	deriveChangedPathManifest,
 	digestChangedPathManifest,
 	injectReviewCandidateView,
+	readCandidateContextManifestPage,
 } from "../lib/review-candidate-view.ts";
 
 function git(cwd: string, ...arguments_: string[]): string {
@@ -564,9 +565,24 @@ test("candidate view compacts an oversized non-ASCII scope losslessly and determ
 		assert.equal(decoded.sha256, createHash("sha256").update(decoded.bytes).digest("hex"));
 		assert.ok(JSON.stringify(decoded.manifest).length < 4_096, "UTF-16 code units alone must not decide the dispatch bound");
 		assert.ok(decoded.bytes.length > 4_096, "the manifest must retain its full non-ASCII UTF-8 byte sequence");
+		const actorEntries: Array<{ path: string; mode: string; gitlinkObjectId?: string }> = [];
+		let cursor: number | undefined = 0;
+		while (cursor !== undefined) {
+			const page = readCandidateContextManifestPage(compact.encoded, compact.sha256, cursor);
+			actorEntries.push(...page.entries);
+			assert.ok(Buffer.byteLength(JSON.stringify(page), "utf8") <= 16 * 1024);
+			cursor = page.nextCursor;
+		}
+		assert.deepEqual(actorEntries, [
+			...unicodePaths.map((path) => ({ path, mode: "100644" })),
+			{ path: "vendor/dependency", mode: "160000", gitlinkObjectId: gitlinkCommit },
+			{ path: "deleted.txt", mode: "deleted" },
+		]);
 		assert.ok(Buffer.byteLength(first.task, "utf8") <= Buffer.byteLength("review", "utf8") + 4_096);
 		assert.doesNotMatch(first.task, /Frozen changed scope by mode:/);
+		assert.match(first.task, /Call `gentle_review_scope`/);
 		assert.throws(() => decodeCandidateContextManifest(compact.encoded, `${compact.sha256.slice(0, -1)}0`), /integrity/);
+		assert.throws(() => readCandidateContextManifestPage(compact.encoded, compact.sha256, actorEntries.length + 1), /cursor/);
 		const nonCanonicalBytes = Buffer.from(JSON.stringify({ gitlinks: decoded.manifest.gitlinks, scopeByMode: decoded.manifest.scopeByMode, version: 1 }), "utf8");
 		assert.throws(
 			() => decodeCandidateContextManifest(gzipSync(nonCanonicalBytes, { mtime: 0 }).toString("base64url"), createHash("sha256").update(nonCanonicalBytes).digest("hex")),

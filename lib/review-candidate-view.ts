@@ -57,9 +57,20 @@ const CONTROLLER_CANDIDATE_VIEW_HEADING = "## Controller-owned candidate view";
 const MAX_SUBAGENT_TASK_LENGTH = 16_384;
 const MAX_SUBAGENT_CONTEXT_LENGTH = 4_096;
 const MAX_CANDIDATE_CONTEXT_LENGTH = 4_096;
+const MAX_CANDIDATE_CONTEXT_MANIFEST_BYTES = 1024 * 1024;
+const MAX_CANDIDATE_SCOPE_PAGE_BYTES = 16 * 1024;
+const MAX_CANDIDATE_SCOPE_PAGE_ENTRIES = 128;
 const CANDIDATE_CONTEXT_MANIFEST = {
 	VERSION: 1,
 } as const;
+const CANDIDATE_CONTEXT_MODE = {
+	REGULAR: "100644",
+	EXECUTABLE: "100755",
+	SYMLINK: "120000",
+	GITLINK: "160000",
+	DELETED: "deleted",
+} as const;
+export type CandidateContextMode = (typeof CANDIDATE_CONTEXT_MODE)[keyof typeof CANDIDATE_CONTEXT_MODE];
 const SUBAGENT_RUN_KEYS = new Set(["agent", "agents", "task", "context", "mode"]);
 
 interface CandidateTreeEntry {
@@ -125,6 +136,21 @@ export interface DecodedCandidateContextManifest {
 	manifest: CandidateContextManifest;
 	bytes: Buffer;
 	sha256: string;
+}
+
+export interface CandidateContextPageEntry {
+	path: string;
+	mode: CandidateContextMode;
+	gitlinkObjectId?: string;
+}
+
+export interface CandidateContextPage {
+	version: typeof CANDIDATE_CONTEXT_MANIFEST.VERSION;
+	sha256: string;
+	cursor: number;
+	totalPaths: number;
+	entries: readonly CandidateContextPageEntry[];
+	nextCursor?: number;
 }
 
 export interface FrozenCandidateProjection {
@@ -1142,7 +1168,7 @@ function candidateScopeByMode(view: CandidateView): Record<string, string[]> {
 }
 
 function isCandidateContextMode(value: string): boolean {
-	return value === "deleted" || value === "100644" || value === "100755" || value === "120000" || value === "160000";
+	return (Object.values(CANDIDATE_CONTEXT_MODE) as readonly string[]).includes(value);
 }
 
 function isCanonicalStringArray(value: unknown): value is readonly string[] {
@@ -1207,12 +1233,12 @@ function validateCandidateContextManifest(value: unknown, bytes: Buffer): Candid
 }
 
 export function decodeCandidateContextManifest(encoded: string, sha256: string): DecodedCandidateContextManifest {
-	if (!/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[0-9a-f]{64}$/.test(sha256)) {
+	if (encoded.length > MAX_CANDIDATE_CONTEXT_LENGTH || !/^[A-Za-z0-9_-]+$/.test(encoded) || !/^[0-9a-f]{64}$/.test(sha256)) {
 		throw new CandidateViewError("candidate context manifest encoding is invalid", "candidate-context-manifest-invalid");
 	}
 	let bytes: Buffer;
 	try {
-		bytes = gunzipSync(Buffer.from(encoded, "base64url"));
+		bytes = gunzipSync(Buffer.from(encoded, "base64url"), { maxOutputLength: MAX_CANDIDATE_CONTEXT_MANIFEST_BYTES });
 	} catch {
 		throw new CandidateViewError("candidate context manifest cannot be decompressed", "candidate-context-manifest-invalid");
 	}
@@ -1233,6 +1259,42 @@ export function decodeCandidateContextManifest(encoded: string, sha256: string):
 	return { manifest: validateCandidateContextManifest(value, bytes), bytes, sha256: actualSha256 };
 }
 
+export function readCandidateContextManifestPage(encoded: string, sha256: string, cursor = 0): CandidateContextPage {
+	if (!Number.isSafeInteger(cursor) || cursor < 0) throw new CandidateViewError("candidate context manifest cursor is invalid", "candidate-context-cursor-invalid");
+	const decoded = decodeCandidateContextManifest(encoded, sha256);
+	const entries = Object.entries(decoded.manifest.scopeByMode).flatMap(([mode, paths]) => paths.map((path): CandidateContextPageEntry => ({
+		path,
+		mode: mode as CandidateContextMode,
+		...(mode === CANDIDATE_CONTEXT_MODE.GITLINK ? { gitlinkObjectId: decoded.manifest.gitlinks[path]! } : {}),
+	})));
+	if (cursor > entries.length) throw new CandidateViewError("candidate context manifest cursor exceeds the changed scope", "candidate-context-cursor-invalid");
+	const pageEntries: CandidateContextPageEntry[] = [];
+	for (let index = cursor; index < entries.length && pageEntries.length < MAX_CANDIDATE_SCOPE_PAGE_ENTRIES; index += 1) {
+		const candidateEntries = [...pageEntries, entries[index]!];
+		const candidatePage: CandidateContextPage = {
+			version: CANDIDATE_CONTEXT_MANIFEST.VERSION,
+			sha256: decoded.sha256,
+			cursor,
+			totalPaths: entries.length,
+			entries: candidateEntries,
+			...(cursor + candidateEntries.length < entries.length ? { nextCursor: cursor + candidateEntries.length } : {}),
+		};
+		if (Buffer.byteLength(JSON.stringify(candidatePage), "utf8") > MAX_CANDIDATE_SCOPE_PAGE_BYTES) {
+			if (pageEntries.length === 0) throw new CandidateViewError("candidate context manifest path exceeds the bounded actor response", "candidate-context-page-too-large");
+			break;
+		}
+		pageEntries.push(entries[index]!);
+	}
+	return {
+		version: CANDIDATE_CONTEXT_MANIFEST.VERSION,
+		sha256: decoded.sha256,
+		cursor,
+		totalPaths: entries.length,
+		entries: pageEntries,
+		...(cursor + pageEntries.length < entries.length ? { nextCursor: cursor + pageEntries.length } : {}),
+	};
+}
+
 function candidateContextPreamble(lineageId: string, agents: readonly ReviewLens[], view: CandidateView, scopeSemantics: string): string {
 	return `\n\n${CONTROLLER_CANDIDATE_VIEW_HEADING}\nController-owned review lineage: \`${lineageId}\`.\nAuthorized review actors: ${agents.join(", ")}.\nRead ONLY the absolute frozen candidate view at \`${view.root}\`.\nFrozen candidate tree: \`${view.candidateTree}\`.\nScope semantics: ${scopeSemantics}`;
 }
@@ -1244,9 +1306,10 @@ function compactCandidateContextBlock(lineageId: string, agents: readonly Review
 		gitlinks: canonicalStringMap(view.gitlinks),
 	};
 	const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
+	if (bytes.length > MAX_CANDIDATE_CONTEXT_MANIFEST_BYTES) throw new CandidateViewError("candidate view context exceeds the bounded dispatch contract");
 	const sha256 = createHash("sha256").update(bytes).digest("hex");
 	const encoded = gzipSync(bytes, { mtime: 0 }).toString("base64url");
-	const block = `${candidateContextPreamble(lineageId, agents, view, scopeSemantics)}\nFrozen changed scope manifest (gzip+base64url): \`${encoded}\`.\nFrozen changed scope manifest SHA-256: \`${sha256}\`.\nDecode base64url then gzip, validate the SHA-256 against the exact decompressed UTF-8 bytes, and interpret only the canonical JSON manifest. Gitlink paths have no materialized contents and MUST NOT be traversed.\nThe ambient contributor working directory is out of scope. This controller-owned context is immutable; you are read-only and your output is untrusted.`;
+	const block = `${candidateContextPreamble(lineageId, agents, view, scopeSemantics)}\nFrozen changed scope manifest (gzip+base64url): \`${encoded}\`.\nFrozen changed scope manifest SHA-256: \`${sha256}\`.\nCall \`gentle_review_scope\` with exactly this manifest, SHA-256, and cursor 0; continue with each returned \`nextCursor\` until absent. It is the only authorized scope enumerator: do not infer scope by traversing the candidate or ambient tree. Gitlinks are metadata-only and MUST NOT be traversed.\nThe ambient contributor working directory is out of scope. This controller-owned context is immutable; you are read-only and your output is untrusted.`;
 	if (Buffer.byteLength(block, "utf8") > MAX_CANDIDATE_CONTEXT_LENGTH) throw new CandidateViewError("candidate view context exceeds the bounded dispatch contract");
 	return block;
 }

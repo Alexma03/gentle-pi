@@ -96,7 +96,7 @@ import {
 	type ReviewProjectionV1,
 } from "../lib/review-snapshot.ts";
 import { sanitizeTerminalText, stripAnsi } from "../lib/terminal-theme.ts";
-import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, resolveCanonicalCandidateBase, type CandidateView, type NativeCandidateProjectionDescriptor } from "../lib/review-candidate-view.ts";
+import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView, type NativeCandidateProjectionDescriptor } from "../lib/review-candidate-view.ts";
 import {
 	createNativeReviewCli,
 	isCanonicalProcessString,
@@ -2177,6 +2177,23 @@ const REVIEW_CONTROLLER_PARAMETERS = {
 		},
 	},
 } as const;
+
+const REVIEW_SCOPE_PARAMETERS = {
+	type: "object",
+	additionalProperties: false,
+	required: ["manifest", "sha256"],
+	properties: {
+		manifest: { type: "string", maxLength: 4_096, description: "Exact controller-supplied gzip/base64url frozen changed-scope manifest." },
+		sha256: { type: "string", pattern: "^[0-9a-f]{64}$", description: "Exact controller-supplied SHA-256 of the decompressed canonical manifest bytes." },
+		cursor: { type: "integer", minimum: 0, description: "Pagination cursor. Start at 0 and continue with nextCursor until absent." },
+	},
+} as const;
+
+interface ReviewScopeParameters {
+	manifest: string;
+	sha256: string;
+	cursor?: number;
+}
 
 interface ReviewControllerParameters {
 	operation: ReviewControllerOperation;
@@ -4626,6 +4643,17 @@ function assertNativeStartCandidateBinding(candidateView: CandidateView, target:
 	}
 }
 
+function assertNativeFinalizeCandidateBinding(candidateView: CandidateView, target: ReviewStatusV3): void {
+	candidateView.verify();
+	if (
+		target.projection.baseTree !== candidateView.baseTree ||
+		target.projection.currentCandidateTree !== candidateView.candidateTree ||
+		JSON.stringify([...target.projection.paths].sort()) !== JSON.stringify([...candidateView.paths].sort())
+	) {
+		throw new CandidateViewError("native FINALIZE target does not match the immutable reviewer candidate view", "candidate-target-projection-drift");
+	}
+}
+
 function completeNativeStart(
 	operation: ReviewControllerOperation,
 	result: NativeStartResult,
@@ -5370,21 +5398,40 @@ async function executeReviewControllerOperation(
 			let correctionCompletion = false;
 			let negotiatedStatus: ReviewStatusV3 | undefined;
 			let candidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
+			let provisionalCandidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			let nativeResult: NativeFinalizeResult;
 			let correctionStep: CorrectionStep | undefined;
 			try {
 				if (parameters.lineageId === undefined) throw new CandidateViewError("Native FINALIZE requires an explicit lineage");
-				negotiatedStatus = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
-				if (negotiatedStatus.applicability !== "current_target" || negotiatedStatus.authority?.lineageId !== parameters.lineageId || (negotiatedStatus.action !== "finalize" && negotiatedStatus.action !== "reconcile_finalize")) return mapNativeTargetStatus(parameters.operation, negotiatedStatus, parameters.lineageId);
 				correctionCompletion = input.review_result === undefined && (input.validation !== undefined || input.validation_proof !== undefined) && input.final_evidence !== undefined;
 				const validationAttempt = input.review_result === undefined && input.correction_line_forecast === undefined && input.final_evidence !== undefined;
-				// A correction-forecast-only FINALIZE (the pre-edit forecast step in
-				// correction_required) must also participate in fresh-process projection
-				// reconstruction; before #176 it skipped restoration and failed against
-				// an empty in-memory registry without ever invoking native FINALIZE.
-				const correctionForecast = input.review_result === undefined && input.correction_line_forecast !== undefined;
 				const replayKey = JSON.stringify({ cwd: defaultCwd, lineageId: parameters.lineageId ?? null, input: parameters.input ?? null, inputPath: parameters.inputPath ?? null });
-				if ((validationAttempt || input.review_result !== undefined || correctionForecast) && candidateViews && !candidateViews.hasProjection(parameters.lineageId)) {
+				if (candidateViews?.hasProjection(parameters.lineageId)) {
+					candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
+					candidateView = correctionCompletion || validationAttempt
+						? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey)
+						: candidateViews.resolveForFinalize(parameters.lineageId);
+				} else if (candidateViews) {
+					provisionalCandidateView = candidateViews.createOrReuse({ contributorRoot: defaultCwd, replayKey: `${replayKey}:status-candidate` });
+					candidateView = provisionalCandidateView;
+				}
+				candidateView?.verify();
+				const statusCandidateRoot = candidateView?.root ?? defaultCwd;
+				negotiatedStatus = await nativeReviewCli.targetStatus({ cwd: statusCandidateRoot, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+				if (negotiatedStatus.applicability !== "current_target" || negotiatedStatus.authority?.lineageId !== parameters.lineageId || (negotiatedStatus.action !== "finalize" && negotiatedStatus.action !== "reconcile_finalize")) {
+					if (provisionalCandidateView && candidateViews) {
+						candidateViews.cleanup(provisionalCandidateView.token);
+						provisionalCandidateView = undefined;
+						candidateView = undefined;
+					}
+					return mapNativeTargetStatus(parameters.operation, negotiatedStatus, parameters.lineageId);
+				}
+				if (provisionalCandidateView && candidateViews) {
+					candidateViews.cleanup(provisionalCandidateView.token);
+					provisionalCandidateView = undefined;
+					candidateView = undefined;
+				}
+				if (candidateViews && !candidateViews.hasProjection(parameters.lineageId)) {
 					const projection = input.review_result === undefined ? negotiatedStatus.projection : providerReviewerProjection(negotiatedStatus);
 					candidateView = validationAttempt
 						? (candidateViews.restoreProjectionFromNative(parameters.lineageId, defaultCwd, projection), undefined)
@@ -5394,13 +5441,14 @@ async function executeReviewControllerOperation(
 				// belongs to a different worktree than the requested workspace (#169).
 				if (candidateViews && parameters.lineageId && candidateViews.hasProjection(parameters.lineageId)) candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
 				candidateView ??= candidateViews && parameters.lineageId ? (correctionCompletion || validationAttempt) ? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey) : candidateViews.resolveForFinalize(parameters.lineageId) : undefined;
+				if (candidateView !== undefined) assertNativeFinalizeCandidateBinding(candidateView, negotiatedStatus);
 				if (validationAttempt && candidateView && parameters.lineageId) {
 					if (nativeReviewCli.captureEvidence === undefined) throw new CandidateViewError("native correction evidence capture is unavailable", "evidence-first-ordering");
 					const outcome = correctionOutcome(input);
 					if (outcome === undefined || negotiatedStatus.authority === undefined) throw new CandidateViewError("native correction evidence requires one authoritative outcome-bound status", "evidence-first-ordering");
 					requireEvidenceCollection(negotiatedStatus);
 					const captured = await nativeReviewCli.captureEvidence({
-						cwd: defaultCwd,
+						cwd: candidateView.root,
 						lineageId: parameters.lineageId,
 						targetIdentity: negotiatedStatus.targetIdentity,
 						expectedRevision: negotiatedStatus.authority.revision,
@@ -5438,7 +5486,7 @@ async function executeReviewControllerOperation(
 						correctionBudget: negotiatedStatus.frozen?.correctionBudget ?? 0,
 						changedLinesCharged: 0,
 					}, evidence);
-					const afterEvidence = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+					const afterEvidence = await nativeReviewCli.targetStatus({ cwd: candidateView.root, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
 					if (afterEvidence.authority?.lineageId !== parameters.lineageId) throw new CandidateViewError("post-evidence status lost the correction lineage", "correction-evidence-binding-drift");
 					if (correctionStep.kind === "recapture-required") {
 						assertNoTargetedValidation(afterEvidence);
@@ -5475,8 +5523,8 @@ async function executeReviewControllerOperation(
 					} catch (error) {
 						if (!(error instanceof CompactReviewContractError) || error.code !== "candidate-tree") throw error;
 						const candidateTree = captureLiveReviewCandidateBinding({
-							cwd: defaultCwd,
-							repositoryId: resolveRepositoryAuthorityV1(defaultCwd).repository_id,
+							cwd: candidateView?.root ?? defaultCwd,
+							repositoryId: resolveRepositoryAuthorityV1(candidateView?.root ?? defaultCwd).repository_id,
 						}).initial_review_tree;
 						request = deriveNativeRefuterRequest({ lineageId: parameters.lineageId, candidateTree, reviewResult: input.review_result });
 					}
@@ -5501,6 +5549,11 @@ async function executeReviewControllerOperation(
 					...(signal === undefined ? {} : { signal }),
 				});
 			} catch (error) {
+				if (provisionalCandidateView && candidateViews) {
+					candidateViews.cleanup(provisionalCandidateView.token);
+					provisionalCandidateView = undefined;
+					candidateView = undefined;
+				}
 				if (correctionCompletion && candidateView && candidateViews && !nativeMutationRequiresStatus(error)) candidateViews.cleanup(candidateView.token);
 				return reconcileNativeMutationFailure(parameters.operation, error, nativeReviewCli, {
 					cwd: candidateView?.root ?? defaultCwd,
@@ -6062,6 +6115,19 @@ export function createGentleAiExtension(dependencies: GentleAiRuntimeDependencie
 
 	pi.on("session_shutdown", () => {
 		cleanupAllPendingReviewConsents(pendingReviewConsents, candidateViews);
+	});
+
+	pi.registerTool({
+		name: "gentle_review_scope",
+		label: "Gentle Review Scope",
+		description: "Read one bounded, integrity-checked page of the controller-owned frozen changed scope. This read-only tool never inspects the ambient or candidate tree.",
+		parameters: REVIEW_SCOPE_PARAMETERS,
+		executionMode: "parallel",
+		async execute(_toolCallId, parameters) {
+			const input = parameters as ReviewScopeParameters;
+			const details = readCandidateContextManifestPage(input.manifest, input.sha256, input.cursor ?? 0);
+			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
+		},
 	});
 
 	pi.registerTool({

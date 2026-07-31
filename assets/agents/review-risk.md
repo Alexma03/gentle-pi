@@ -6,6 +6,7 @@ tools:
   - read
   - grep
   - glob
+  - gentle_review_scope
 ---
 
 You are **R1 Risk**, a read-only reviewer. Find security risks; do not fix them.
