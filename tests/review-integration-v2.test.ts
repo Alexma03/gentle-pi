@@ -245,6 +245,50 @@ test("capabilities enforce the exact mandatory feature set while accepting a sup
 	const extraOperation = clone(source);
 	(extraOperation.operations as string[]).push("review.future_operation");
 	assert.doesNotThrow(() => decode(extraOperation));
+
+	// mandatory features must stay an exact match: a known-but-optional feature
+	// name added to the mandatory list must still be rejected. This is the
+	// contract boundary (unknown_mandatory: "reject") and must not regress when
+	// gates/projections become additive-tolerant below.
+	const extraMandatoryUnknownAddition = clone(source);
+	((extraMandatoryUnknownAddition.features as JsonObject).mandatory as JsonObject[]).push({ name: "bounded_process_waits", supported: true, requires: [] });
+	assert.throws(() => decode(extraMandatoryUnknownAddition), /mandatory/);
+});
+
+test("capabilities gates and projections accept an additive superset beyond the required floor", () => {
+	const source = fixture<JsonObject>("capabilities.fixture.json");
+	const decode = (value: unknown) => decodeReviewCapabilitiesV2(value, executableDigest);
+
+	const extraGate = clone(source);
+	(extraGate.gates as string[]).push("future-gate");
+	const decodedExtraGate = decode(extraGate) as { gates: ReadonlySet<string> };
+	assert.equal(decodedExtraGate.gates.has("future-gate"), false, "an unknown advertised gate must not leak into internal use");
+	for (const gate of ["post-apply", "pre-commit", "pre-push", "pre-pr", "release"]) {
+		assert.equal(decodedExtraGate.gates.has(gate), true, gate);
+	}
+	assert.equal(decodedExtraGate.gates.size, 5);
+
+	const extraProjection = clone(source);
+	(extraProjection.projections as string[]).push("future-projection");
+	const decodedExtraProjection = decode(extraProjection) as { projections: ReadonlySet<string> };
+	assert.equal(decodedExtraProjection.projections.has("future-projection"), false, "an unknown advertised projection must not leak into internal use");
+	for (const projection of ["staged", "workspace"]) {
+		assert.equal(decodedExtraProjection.projections.has(projection), true, projection);
+	}
+	assert.equal(decodedExtraProjection.projections.size, 2);
+});
+
+test("capabilities gates and projections still enforce the required floor", () => {
+	const source = fixture<JsonObject>("capabilities.fixture.json");
+	const decode = (value: unknown) => decodeReviewCapabilitiesV2(value, executableDigest);
+
+	const missingGate = clone(source);
+	missingGate.gates = (missingGate.gates as string[]).filter((gate) => gate !== "release");
+	assert.throws(() => decode(missingGate), /gates/);
+
+	const missingProjection = clone(source);
+	missingProjection.projections = (missingProjection.projections as string[]).filter((projection) => projection !== "workspace");
+	assert.throws(() => decode(missingProjection), /projections/);
 });
 
 test("START independently binds base/candidate tree and the target-mode overlay pair", () => {
