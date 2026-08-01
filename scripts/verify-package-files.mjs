@@ -174,6 +174,31 @@ export function reconcileContractsOnDisk(packageRoot, hashes) {
   };
 }
 
+// Compares every location that pins the Gentle AI version against the one
+// authoritative constant (scripts/gentle-ai-installer.mjs INSTALLER_VERSION),
+// returning a mismatch message per drifted location instead of a boolean.
+// This replaces a textual `.includes(...)` grep that could not have caught
+// the documented incident (scripts/install-gentle-ai.mjs header comment):
+// two hardcoded version copies drifted apart, and the installer reported
+// installing one version while writing another to disk. A textual grep only
+// verifies a string appears in a file; it cannot verify that two values
+// agree, which is exactly what this function checks instead.
+export function gentleAiVersionPinMismatches({ installerVersion, releaseBaseUrl, windowsSourceTag, libGentleAiVersion }) {
+  const mismatches = [];
+  if (libGentleAiVersion !== installerVersion) {
+    mismatches.push(
+      `lib/gentle-ai-binary.ts GENTLE_AI_VERSION ("${libGentleAiVersion}") does not match the authoritative scripts/gentle-ai-installer.mjs INSTALLER_VERSION ("${installerVersion}")`,
+    );
+  }
+  if (!releaseBaseUrl.includes(`/v${installerVersion}/`)) {
+    mismatches.push(`RELEASE_BASE_URL ("${releaseBaseUrl}") does not pin the authoritative v${installerVersion}`);
+  }
+  if (windowsSourceTag !== `v${installerVersion}`) {
+    mismatches.push(`GENTLE_AI_WINDOWS_SOURCE_TAG ("${windowsSourceTag}") does not match the authoritative v${installerVersion}`);
+  }
+  return mismatches;
+}
+
 // Reads the generator's `sources` array by regex rather than importing it,
 // so this script never needs the generator to export anything it doesn't
 // already export for its own `--write`/`--check` CLI use.
@@ -272,7 +297,9 @@ async function main() {
 
   // Release guard: refuse to pack/publish while any installer digest is not a real
   // pinned SHA-256 (for example the pre-release pending sentinel).
-  const { GENTLE_AI_RELEASE_ASSETS } = await import(new URL("./gentle-ai-installer.mjs", import.meta.url));
+  const { GENTLE_AI_RELEASE_ASSETS, INSTALLER_VERSION, RELEASE_BASE_URL, GENTLE_AI_WINDOWS_SOURCE_TAG } = await import(
+    new URL("./gentle-ai-installer.mjs", import.meta.url)
+  );
   const unpinnedDigests = Object.entries(GENTLE_AI_RELEASE_ASSETS).flatMap(([target, asset]) =>
     [["sha256", asset.sha256], ["binarySha256", asset.binarySha256]]
       .filter(([, digest]) => !/^[0-9a-f]{64}$/.test(digest))
@@ -295,10 +322,16 @@ async function main() {
     process.exit(1);
   }
 
-  const installer = readFileSync(join(root, "scripts/gentle-ai-installer.mjs"), "utf8");
-  const binaryResolver = readFileSync(join(root, "lib/gentle-ai-binary.ts"), "utf8");
-  if (!installer.includes('INSTALLER_VERSION = "2.2.3"') || !binaryResolver.includes('GENTLE_AI_VERSION = "2.2.3"')) {
-    console.error("gentle-pi package-local Gentle AI version pins are not both v2.2.3.");
+  const { GENTLE_AI_VERSION } = await import(new URL("../lib/gentle-ai-binary.ts", import.meta.url));
+  const versionMismatches = gentleAiVersionPinMismatches({
+    installerVersion: INSTALLER_VERSION,
+    releaseBaseUrl: RELEASE_BASE_URL,
+    windowsSourceTag: GENTLE_AI_WINDOWS_SOURCE_TAG,
+    libGentleAiVersion: GENTLE_AI_VERSION,
+  });
+  if (versionMismatches.length > 0) {
+    console.error("gentle-pi Gentle AI version pins have drifted from the authoritative INSTALLER_VERSION:");
+    for (const mismatch of versionMismatches) console.error(`- ${mismatch}`);
     process.exit(1);
   }
 

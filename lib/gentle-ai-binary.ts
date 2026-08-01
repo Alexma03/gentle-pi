@@ -7,6 +7,7 @@ import {
 	GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM,
 	GENTLE_AI_WINDOWS_SOURCE_PACKAGE_PATH,
 	GENTLE_AI_WINDOWS_SOURCE_TAG,
+	INSTALLER_VERSION,
 	isGentleAiWindowsGoVersionSupported,
 	isWindowsGoSumdbSourceTarget,
 	resolveGentleAiReleaseAsset,
@@ -14,7 +15,10 @@ import {
 import { fileURLToPath } from "node:url";
 
 export const GENTLE_AI_BINARY_MISSING_CODE = "package-local-binary-missing";
-export const GENTLE_AI_VERSION = "2.2.3";
+// Derived from the one authoritative pinned version in
+// scripts/gentle-ai-installer.mjs rather than repeating the literal here, so
+// the two can never independently drift apart the way they once did.
+export const GENTLE_AI_VERSION = INSTALLER_VERSION;
 
 export class PackageLocalGentleAiBinaryMissingError extends Error {
 	readonly code = GENTLE_AI_BINARY_MISSING_CODE;

@@ -280,7 +280,7 @@ test("package verification binds the published Gentle AI v2.2.3 runtime pin", ()
 	assert.match(installer, /GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM = "h1:GWFPqNIgPDv82BiCceWQBV6p9VKbFm51W\/\/sKTKNn5c="/);
 	assert.match(installer, /GOTOOLCHAIN: "local"/);
 	assert.match(installer, /GOSUMDB: "sum\.golang\.org"/);
-	assert.match(binary, /GENTLE_AI_VERSION = "2\.2\.3"/);
+	assert.match(binary, /GENTLE_AI_VERSION = INSTALLER_VERSION/);
 	assert.match(binary, /GO_SUMDB_SOURCE_BUILD/);
 	assert.match(binary, /GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM/);
 	assert.match(verifier, /v2\.2\.3/);
