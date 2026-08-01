@@ -237,3 +237,5 @@ Rename the historical `NativeReviewCliV213` compatibility alias in a later bound
 ## Next action
 
 Parent-owned content-bound lifecycle reconciliation, then archive only if authoritative native status allows it. Verification itself is complete and passing.
+
+> **Archive-time disposition note (2026-08-01, added by `sdd-archive`).** The parent-owned lifecycle reconciliation referenced above could not complete through the native archive gate: it is blocked by a confirmed provider defect, reported as `Gentleman-Programming/gentle-ai#2128`. Receipt-driven development remains disabled by the maintainer's standing global decision (`gentle-ai review mode status` → `off (decided by global)`), which this change did not alter and did not need to alter, since policy permits archiving when the kill switch is off and delivery reports `disabled/unmanaged`. WARNING findings 1 and 2 above were resolved as archive-time provenance work in `design.md` and `state.yaml`; see `ARCHIVE-REPORT.md` for the full account. No CRITICAL finding existed at any point, and this verification's PASS verdict is unchanged by the manual archive path.

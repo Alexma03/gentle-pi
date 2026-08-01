@@ -77,3 +77,5 @@ Chain strategy: size-exception
 ## C4 completion boundary
 
 Apply is ready for the bounded C4 changed-scope work only. Final review, SDD verification, lifecycle validation, and delivery remain blocked until C4 verification, reload, blocked-lineage abandonment, fresh lineage creation, and the new high-risk 4R gate pass. No product code is edited by this task revision.
+
+> **Archive-time closure note (2026-08-01, added by `sdd-archive`).** All 17 implementation tasks recorded above are checked `[x]`; zero unchecked implementation tasks remain, per `verify-report.md` ("Unchecked implementation task lines: none"; 17 checked, 0 unchecked). The remaining post-implementation boundary (final review, independent SDD verification, and lifecycle validation) was completed after this task revision: the mandatory high-risk 4R review ran on fresh lineage `review-fc8372e5c81b2074` (approved, one bounded 137/200-line correction), and independent SDD verification passed 12/12 requirements and 27/27 scenarios with zero CRITICAL findings. See `verify-report.md` and `state.yaml` for the authoritative final binding.
