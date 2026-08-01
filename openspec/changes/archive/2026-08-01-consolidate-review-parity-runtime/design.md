@@ -1,5 +1,7 @@
 # Technical Design: Consolidate Review Parity Runtime
 
+> **Archive-time provenance note (2026-08-01, added by `sdd-archive`).** This document narrates the Gentle AI **v2.1.3** revision decision made mid-cycle. Implementation subsequently migrated the release runtime a second time, to the released **v2.1.4** (see `apply-progress.md`, section "Final v2.1.4 bounded migration synchronization", and the approved `verify-report.md` binding). The v2.1.3 narrative in this file is retained verbatim as design history and is **SUPERSEDED** by the v2.1.4 migration; it does not describe the final shipped runtime version. Nothing below this note was edited to reflect v2.1.4 — it is preserved for audit continuity, matching how `apply-progress.md` marks earlier superseded conclusions in this same change.
+
 ## 1. Revision decision
 
 Gentle Pi will migrate its package-local review runtime from Gentle AI v2.1.2 to the released Gentle AI v2.1.3 before final review.

@@ -499,3 +499,12 @@ No review, reset, recover, supersede, commit, push, PR, or delivery action was r
 ### Remaining task boundary
 
 - Independent SDD verification is the next phase. Lifecycle/delivery validation remains unperformed and is not completed by this synchronization.
+
+## Final review correction and independent SDD verification (2026-07-14, added by `sdd-archive`)
+
+> This entry is added at archive time (2026-08-01) to close the provenance gap between the last apply-progress entry above (ending at `next_recommended: verify-after-content-bound-review`, lineage `review-ca0c5ee1e22c737c`) and the approved post-correction binding independently confirmed in `verify-report.md`. No implementation, test, or authority mutation is performed by this note; it records already-completed work for traceability.
+
+- The mandatory high-risk 4R final review ran on fresh lineage `review-fc8372e5c81b2074` after the v2.1.4 pin migration above. Initial lenses raised findings later resolved as `RELIABILITY-001`, `RESILIENCE-001`, and `RESILIENCE-002`; one bounded correction of 137/200 lines across six files (`lib/native-review-cli.ts`, `lib/review-candidate-view.ts`, `scripts/gentle-ai-installer.mjs`, `tests/gentle-ai-installer.test.ts`, `tests/native-review-cli.test.ts`, `tests/review-candidate-view.test.ts`) closed them.
+- The lineage reached `approved`. Authority revision `sha256:6689109d1a1092ae079eba2c48616c0b9074d005e81ce1240da6bdd0229d5274`; receipt hash `sha256:039f2029cf408e4b93d0c952475b7e6ababbb2d2b7279287122346c1604e5a15`; SDD binding revision `sha256:13abb2a1b7524b54ed116de9bdf2c47c47254d02cd7ab85f68ddf1ac5f995057`; final candidate/index tree `1ea94a5b512a447871769e265924fbfd8f1e789c`.
+- Independent SDD verification then ran and passed: 12/12 requirements, 27/27 scenarios, 17/17 tasks complete, zero CRITICAL findings, zero blockers. Full `pnpm test` reported 729/729 passing, followed by the runtime harness. See `verify-report.md` for the complete record.
+- This is the authoritative post-correction binding. `state.yaml`'s `synchronization.final_bounded_migration` (lineage `review-ca0c5ee1e22c737c`) predates this correction and is marked `superseded` in `state.yaml`; the authoritative binding is recorded under `synchronization.authoritative_post_correction_binding` (lineage `review-fc8372e5c81b2074`).
