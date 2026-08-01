@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	gentleAiVersionPinMismatches,
 	reconcileContractsOnDisk,
 	reconcileGeneratedRuntimeSources,
 } from "../scripts/verify-package-files.mjs";
+import { INSTALLER_VERSION, RELEASE_BASE_URL, GENTLE_AI_WINDOWS_SOURCE_TAG } from "../scripts/gentle-ai-installer.mjs";
+import { GENTLE_AI_VERSION } from "../lib/gentle-ai-binary.ts";
 
 function makeFixtureRoot(): string {
 	return mkdtempSync(join(tmpdir(), "gentle-pi-verify-package-files-"));
@@ -89,6 +92,49 @@ test("sources <-> runtime/*.mjs walk fails when a sources entry is absent from r
 	} finally {
 		rmSync(fixtureRoot, { recursive: true, force: true });
 	}
+});
+
+// Regression test for the documented incident in scripts/install-gentle-ai.mjs:
+// the installer once reported installing v2.1.11 while writing v2.2.0 to disk
+// because two hardcoded version copies had drifted apart. The textual
+// `.includes(...)` grep this replaces could not have caught this, because it
+// only verifies a string appears in a file, not that two values agree.
+test("Gentle AI version pin mismatch is reported with a specific message when a derived location disagrees with the authoritative constant", () => {
+	const mismatches = gentleAiVersionPinMismatches({
+		installerVersion: "2.2.3",
+		releaseBaseUrl: "https://github.com/Gentleman-Programming/gentle-ai/releases/download/v2.2.3/",
+		windowsSourceTag: "v2.2.3",
+		libGentleAiVersion: "2.2.0",
+	});
+
+	assert.deepEqual(mismatches, [
+		'lib/gentle-ai-binary.ts GENTLE_AI_VERSION ("2.2.0") does not match the authoritative scripts/gentle-ai-installer.mjs INSTALLER_VERSION ("2.2.3")',
+	]);
+});
+
+test("Gentle AI version pin mismatch also flags a drifted release URL and a drifted Windows source tag", () => {
+	const mismatches = gentleAiVersionPinMismatches({
+		installerVersion: "2.2.3",
+		releaseBaseUrl: "https://github.com/Gentleman-Programming/gentle-ai/releases/download/v2.2.0/",
+		windowsSourceTag: "v2.1.11",
+		libGentleAiVersion: "2.2.3",
+	});
+
+	assert.deepEqual(mismatches, [
+		'RELEASE_BASE_URL ("https://github.com/Gentleman-Programming/gentle-ai/releases/download/v2.2.0/") does not pin the authoritative v2.2.3',
+		'GENTLE_AI_WINDOWS_SOURCE_TAG ("v2.1.11") does not match the authoritative v2.2.3',
+	]);
+});
+
+test("Gentle AI version pin agrees across the installer version, the release URL, the Windows source tag, and lib/gentle-ai-binary.ts", () => {
+	const mismatches = gentleAiVersionPinMismatches({
+		installerVersion: INSTALLER_VERSION,
+		releaseBaseUrl: RELEASE_BASE_URL,
+		windowsSourceTag: GENTLE_AI_WINDOWS_SOURCE_TAG,
+		libGentleAiVersion: GENTLE_AI_VERSION,
+	});
+
+	assert.deepEqual(mismatches, []);
 });
 
 test("both walks report no drift when sources, runtime/*.mjs, requiredPaths, and contractHashes fully agree", () => {

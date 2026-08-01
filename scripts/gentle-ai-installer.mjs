@@ -19,21 +19,26 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const RELEASE_BASE_URL = "https://github.com/Gentleman-Programming/gentle-ai/releases/download/v2.2.3/";
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
 const DOWNLOAD_TIMEOUTS = { headers: 10_000, body: 30_000, attempts: 2, retryDelay: 100 };
 const GO_COMMAND_TIMEOUT_MS = 120_000;
 const GO_COMMAND_MAX_BUFFER = 1024 * 1024;
 const WINDOWS_SYSTEM_ROOT = "C:\\Windows";
+// The one authoritative pinned Gentle AI version. Every other location in this
+// module (the release download URL, the Windows source tag, and the reported
+// version check below) derives from this constant instead of repeating the
+// literal, so a pin bump cannot leave a stale copy behind. See
+// scripts/install-gentle-ai.mjs for the incident that motivated this.
 export const INSTALLER_VERSION = "2.2.3";
+export const RELEASE_BASE_URL = `https://github.com/Gentleman-Programming/gentle-ai/releases/download/v${INSTALLER_VERSION}/`;
 export const GENTLE_AI_INSTALL_METHOD = Object.freeze({
 	SIGNED_RELEASE_ASSET: "signed-release-asset",
 	GO_SUMDB_SOURCE_BUILD: "go-sumdb-source-build",
 });
 export const GENTLE_AI_WINDOWS_SOURCE_PACKAGE_PATH = "github.com/gentleman-programming/gentle-ai/v2/cmd/gentle-ai";
 export const GENTLE_AI_WINDOWS_SOURCE_MODULE = "github.com/gentleman-programming/gentle-ai/v2";
-export const GENTLE_AI_WINDOWS_SOURCE_TAG = "v2.2.3";
+export const GENTLE_AI_WINDOWS_SOURCE_TAG = `v${INSTALLER_VERSION}`;
 // `go mod download -json github.com/gentleman-programming/gentle-ai/v2@v2.2.3`
 // with GOSUMDB=sum.golang.org reports this exact module SumDB checksum.
 export const GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM = "h1:GWFPqNIgPDv82BiCceWQBV6p9VKbFm51W//sKTKNn5c=";
@@ -330,11 +335,13 @@ async function verifyGoBuildMetadata(execute, goPath, binaryPath, environment, c
 	catch (error) { if (error instanceof GentleAiInstallerError) throw error; throw new GentleAiInstallerError(GENTLE_AI_GO_INSTALL_FAILED_CODE, "Gentle AI source build metadata could not be verified.", error); }
 }
 
+function escapeRegExp(value) { return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
 async function assertExactGentleAiVersion(execute, binaryPath, environment, cwd) {
 	let result;
 	try { result = await runCommand(execute, binaryPath, ["version"], commandOptions(environment, cwd)); }
 	catch (error) { throw new GentleAiInstallerError(GENTLE_AI_VERSION_MISMATCH_CODE, `Gentle AI source build at ${binaryPath} could not report its version.`, error); }
-	if (!/^gentle-ai 2\.2\.3\r?\n?$/.test(commandOutput(result))) throw new GentleAiInstallerError(GENTLE_AI_VERSION_MISMATCH_CODE, `Gentle AI source build reported ${JSON.stringify(commandOutput(result).trim())}; expected gentle-ai ${INSTALLER_VERSION}.`);
+	if (!new RegExp(`^gentle-ai ${escapeRegExp(INSTALLER_VERSION)}\\r?\\n?$`).test(commandOutput(result))) throw new GentleAiInstallerError(GENTLE_AI_VERSION_MISMATCH_CODE, `Gentle AI source build reported ${JSON.stringify(commandOutput(result).trim())}; expected gentle-ai ${INSTALLER_VERSION}.`);
 }
 
 function sameFile(before, after) { return before.dev === after.dev && before.ino === after.ino && before.size === after.size && before.mtimeMs === after.mtimeMs; }
