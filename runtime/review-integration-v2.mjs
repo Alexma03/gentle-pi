@@ -713,12 +713,17 @@ export function decodeReviewCapabilitiesV2(value         , verifiedExecutableDig
 	if (selfReportedDigest !== normalizedVerifiedDigest) throw new TypeError("review provider executable digest mismatch");
 
 	const advertisedOperations = stringArray(body.operations, "capabilities.operations", { minimum: REQUIRED_OPERATIONS.length, unique: true });
-	const gates = enumArray(body.gates, REQUIRED_GATES, "capabilities.gates", { minimum: 5, maximum: 5, unique: true });
-	const projections = enumArray(body.projections, REQUIRED_PROJECTIONS, "capabilities.projections", { minimum: 2, maximum: 2, unique: true });
+	// Gates and projections are, like operations and schemas, a superset promise
+	// rather than an exact manifest: a compatible provider release may advertise
+	// an additional gate or projection name beyond the required floor. Decode as
+	// a plain string array (not `enumArray` against the known enum) so an
+	// unknown addition is not rejected before assertSupersetOf can even run.
+	const advertisedGates = stringArray(body.gates, "capabilities.gates", { minimum: REQUIRED_GATES.length, unique: true });
+	const advertisedProjections = stringArray(body.projections, "capabilities.projections", { minimum: REQUIRED_PROJECTIONS.length, unique: true });
 	const advertisedSchemas = stringArray(body.schemas, "capabilities.schemas", { minimum: REQUIRED_SCHEMAS.length, unique: true });
 	assertSupersetOf(advertisedOperations, REQUIRED_OPERATIONS, "capabilities operations");
-	assertExactSet(gates, REQUIRED_GATES, "capabilities gates");
-	assertExactSet(projections, REQUIRED_PROJECTIONS, "capabilities projections");
+	assertSupersetOf(advertisedGates, REQUIRED_GATES, "capabilities gates");
+	assertSupersetOf(advertisedProjections, REQUIRED_PROJECTIONS, "capabilities projections");
 	assertSupersetOf(advertisedSchemas, REQUIRED_SCHEMAS, "capabilities schemas");
 
 	const features = exactRecord(body.features, "capabilities.features", ["mandatory", "optional"]);
@@ -765,8 +770,8 @@ export function decodeReviewCapabilitiesV2(value         , verifiedExecutableDig
 		buildId,
 		executableDigest: selfReportedDigest,
 		operations: new Set(REQUIRED_OPERATIONS),
-		gates: new Set(gates),
-		projections: new Set(projections),
+		gates: new Set(REQUIRED_GATES),
+		projections: new Set(REQUIRED_PROJECTIONS),
 		schemas: new Set(REQUIRED_SCHEMAS),
 		mandatoryFeatures: new Set(mandatoryNames),
 		optionalFeatures: new Set(optional.filter((feature) => feature.supported && (FEATURE_NAMES                     ).includes(feature.name)).map((feature) => feature.name)),
