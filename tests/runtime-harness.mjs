@@ -1035,6 +1035,11 @@ async function run() {
 			/Wrote openspec\/config\.yaml/,
 			"/sdd-init must not announce openspec/config.yaml when artifactStore is engram",
 		);
+		assert.match(
+			ctx.ui.notifications.at(-1).message,
+			/SDD initialized for engram:/,
+		);
+		assert.equal(ctx.ui.notifications.at(-1).level, "info");
 	} finally {
 		pi.setActiveTools(["read", "bash", "edit", "write"]);
 		await rm(engramSddInitCwd, { recursive: true, force: true });
