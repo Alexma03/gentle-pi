@@ -116,13 +116,26 @@ test("sdd-orchestrator-workflow.md carries the provider defect handoff section",
 	assert.match(SDD_WORKFLOW, /## Provider Defect Handoff/);
 });
 
-test("sdd-orchestrator-workflow.md lists all three semantic choice tokens", () => {
+test("sdd-orchestrator-workflow.md lists all three semantic choice tokens in order", () => {
 	for (const token of CHOICE_TOKENS) {
 		assert.ok(
 			SDD_WORKFLOW.includes(token),
 			`sdd-orchestrator-workflow.md missing semantic choice token: ${token}`,
 		);
 	}
+
+	const positions = CHOICE_TOKENS.map((token) => SDD_WORKFLOW.indexOf(token));
+	for (const pos of positions) {
+		assert.notEqual(pos, -1, "a choice token is missing; ordering assertion is meaningless");
+	}
+	assert.ok(
+		positions[0] < positions[1],
+		`report_and_continue must appear before continue_without_reporting in sdd-orchestrator-workflow.md; got positions ${positions}`,
+	);
+	assert.ok(
+		positions[1] < positions[2],
+		`continue_without_reporting must appear before stop_here in sdd-orchestrator-workflow.md; got positions ${positions}`,
+	);
 });
 
 test("sdd-orchestrator-workflow.md references the full contract in orchestrator-delegation.md", () => {
