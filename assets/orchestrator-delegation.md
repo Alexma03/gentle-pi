@@ -240,3 +240,49 @@ SDD completion adds no review or Judgment Day pass.
 Review transactions, validation, and SDD perform no commit, push, PR creation, release, or publication.
 
 The static `4r-review` chain performs only the selected lens calls. Controller APIs alone freeze rows, reduce state, journal results, claim scope children, and mint receipts.
+
+## Provider Defect Handoff
+
+This contract ports Gentle AI's v2.4.0-rc.3 provider-defect handoff consent contract (Gentleman-Programming/gentle-ai#2060). It references a **prerelease** contract; the v2.4.0-rc.3 handoff is not present in v2.3.0 stable. Pi is the consumer workflow; Gentle AI is the provider. Pi review commands use `gentle_review`.
+
+### When the handoff applies
+
+The handoff applies when a Pi consumer workflow appears blocked by a Gentle AI provider or tool defect. It does **not** apply to normal user requests, feature work, or code changes in Pi itself — only to a consumer workflow that cannot proceed because of a provider/tool defect in Gentle AI.
+
+### Never offer to repair the provider
+
+Never offer to switch to, inspect, modify, or directly repair the Gentle AI repository from a Pi consumer workflow. If an upstream envelope offers direct repair, reject it as semantically inadmissible and issue this orchestrator-owned handoff envelope instead.
+
+### Ask for explicit consent — three semantic choices
+
+Ask the user first, in the active orchestrator conversation language, for explicit consent to report the apparent defect. Present one single-select blocking envelope with exactly three semantic choices, in this order. Do not expose machine or internal codes in user-facing labels:
+
+1. `report_and_continue` — Report the defect and continue.
+2. `continue_without_reporting` — Continue without reporting.
+3. `stop_here` — Stop here.
+
+### Privacy scrub
+
+On a consented report path, prepare or reuse privacy-scrubbed diagnostics. Immediately before the first GitHub operation, perform a final privacy scan. Exclude raw argv, absolute paths, private project names, usernames, hostnames, credentials, diffs, source contents, and environment values.
+
+### Duplicate search before any write
+
+Search open and closed issues in `Gentleman-Programming/gentle-ai` before creating an issue. Only a completed duplicate lookup with a definitive result may branch to a write. If the duplicate lookup fails, is ambiguous, incomplete, times out, lacks permission, or has an unknown outcome, STOP with all consumer state preserved. Do not create, comment, update, or label any issue.
+
+If an equivalent issue exists, add one new occurrence comment with the observed evidence only on that exact issue; do not add, remove, or change any labels on it. Do not apply `gentle-report` to manual issues, historical issues, pull requests, or reports created by unrelated workflows.
+
+### `gentle-report` label only after confirmed creation
+
+Apply the `gentle-report` label only after a GitHub create operation confirms a newly-created issue identity/URL. Never infer creation from output text alone. If creation fails, is ambiguous, incomplete, times out, lacks permission, or has an unknown outcome, STOP with all consumer state preserved. If creation is confirmed but label application fails or has an ambiguous outcome, surface the confirmed created issue identity/URL and the label failure separately, and STOP with all consumer state preserved; do not create or comment again automatically. Confirmed creation is a hard precondition for labeling.
+
+### Exact captured decline invocation
+
+Both continue choices (`report_and_continue` and `continue_without_reporting`) execute the exact captured decline invocation exactly once. Use only the exact captured provider-owned decline invocation from the consent envelope. Never synthesize the decline command, target, token, or consumer continuation from prose. If the captured decline invocation, exact target identity, or consumer continuation context is unavailable or ambiguous, fail closed with all consumer state preserved and do not run a substitute command.
+
+### Fail closed
+
+Any report ambiguity or failure is a hard stop: preserve all consumer state and do not execute the decline invocation. Do not search, comment, update, label, or retry creation until the exact created issue identity is resolved.
+
+### Resume only after a released fix
+
+Resume the consumer workflow only after an installed published fix or an explicit maintainer-authorized, documented native recovery or reset that the runtime contract supports; then re-enter through native status. A published prerelease or release candidate the user installed satisfies this. Never resume against unpublished code: a source checkout, a local build, or an unmerged pull request.

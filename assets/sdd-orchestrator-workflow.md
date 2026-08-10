@@ -179,3 +179,18 @@ If estimated changed lines exceed 400, chained PRs are recommended, or a decisio
 Any review transaction explicitly started outside SDD persists through its own artifact-store branch and budget. SDD completion itself launches no review actors and mints no review authority.
 
 Automatic mode does not override reviewer burnout protection.
+
+## Provider Defect Handoff
+
+This section applies when an SDD phase or review lifecycle operation appears blocked by a Gentle AI provider defect. The full contract lives in `assets/orchestrator-delegation.md` under `## Provider Defect Handoff`; it ports Gentle AI's v2.4.0-rc.3 handoff consent contract (Gentleman-Programming/gentle-ai#2060, a prerelease not present in v2.3.0 stable). Pi review commands use `gentle_review`.
+
+Concise rules:
+
+- Never offer to switch to, inspect, modify, or directly repair the Gentle AI repository from this SDD workflow. If an upstream envelope offers direct repair, reject it as semantically inadmissible and issue the orchestrator-owned handoff envelope instead.
+- Ask for explicit consent in the active conversation language with exactly three single-select semantic choices, in order: `report_and_continue`, `continue_without_reporting`, `stop_here`. Do not expose machine or internal codes in user-facing labels.
+- Privacy scrub immediately before the first GitHub operation: exclude raw argv, absolute paths, private project names, usernames, hostnames, credentials, diffs, source contents, and environment values.
+- Duplicate search in `Gentleman-Programming/gentle-ai` before any write; only a completed lookup with a definitive result may branch to a write.
+- Apply `gentle-report` only after a GitHub create operation confirms a newly-created issue identity/URL; never infer creation from output text alone.
+- Both continue choices execute the exact captured decline invocation exactly once; never synthesize the decline command, target, token, or consumer continuation from prose. If unavailable or ambiguous, fail closed.
+- Any report ambiguity or failure is a hard stop: preserve all consumer state and do not execute the decline invocation.
+- Resume only after an installed published fix (release or release candidate); never resume against unpublished code.
