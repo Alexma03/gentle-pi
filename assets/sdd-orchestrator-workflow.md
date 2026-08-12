@@ -132,6 +132,10 @@ skill_resolution
 
 The parent should synthesize these envelopes, not paste long raw reports unless needed.
 
+### Key Learnings closing block (routing)
+
+Every installed SDD phase executor agent (`assets/agents/sdd-*.md`) carries the effective `## Key Learnings Closing` contract in its own loaded prompt; this workflow file documents routing only and is not the executor authority. Each phase executor closes its final report text with a `## Key Learnings` block that the Engram memory provider passively extracts. Generic delegated workers receive the same closing instruction via `assets/orchestrator-delegation.md`.
+
 ## Automatic Mode Gatekeeper
 
 In `auto` execution mode, the parent/orchestrator is the quality gate between SDD phases. After a delegated phase returns and before launching the next phase, validate that the phase actually reached its objective. This validation is autonomous: do not ask the user on the happy path, but stop and report if the gate catches a real problem.

@@ -61,6 +61,10 @@ For generic non-SDD technical verification that executes or delegates commands, 
 
 Use `sdd-explore` and `sdd-verify` only inside SDD. Use review lenses only inside explicit review transactions.
 
+#### Key Learnings closing block
+
+When delegating to a generic Explore/general worker (`gentle-ai-explore`, `gentle-ai-worker`, `gentle-ai-verify`) or their native `Agent` fallback, include the same `## Key Learnings` closing instruction in the delegated prompt: after the worker returns its normal result envelope or handoff, it closes its final response text with a `## Key Learnings` block of 1–5 numbered items, each a standalone factual sentence of at least 20 characters and at least 4 words, omitting the block when there is genuinely no reusable learning. The block layers on after the structured Return contract and does not alter its fields. This applies to final response text only — not intermediate tool output. The Engram memory provider automatically extracts and persists these items as passive capture; the worker does not parse the block or invoke passive-capture tools itself. This is separate from explicit `mem_save` artifact/decision persistence. Agents that must return strict JSON (review lenses, `review-refuter`, `review-validator`, Judgment Day judges and fix agent) never receive this closing instruction; their strict output shape is unchanged.
+
 For delegation other than bounded multi-file writes, use the generic fallback:
 
 If `subagent_*` tools are unavailable, fall back to Pi's native `Agent` tool or another available delegation mechanism. The delegation trigger remains mandatory; the fallback changes the runtime, not the requirement to delegate. If no delegation mechanism is available, stop the complex work and explain the blocker instead of silently continuing inline.
