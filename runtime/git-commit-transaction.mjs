@@ -181,14 +181,17 @@ function absoluteGitPath(cwd        , name        )         {
 	return isAbsolute(value) ? value : resolve(cwd, value);
 }
 
+function resolveHead(cwd        )                     {
+	try { return git(cwd, ["rev-parse", "--verify", "HEAD"]); } catch { return undefined; }
+}
+
 function repositoryBinding(cwd        )                    {
 	const root = realpathSync(git(cwd, ["rev-parse", "--show-toplevel"]));
 	const commonDirValue = git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
 	const gitDirValue = git(root, ["rev-parse", "--path-format=absolute", "--git-dir"]);
 	const commonDir = realpathSync(commonDirValue);
 	const gitDir = realpathSync(gitDirValue);
-	const roots = git(root, ["rev-list", "--max-parents=0", "HEAD"]).split(/\r?\n/).filter(Boolean).sort();
-	const repositoryId = sha256(canonicalJson({ common_directory: commonDir, roots }));
+	const repositoryId = sha256(canonicalJson({ common_directory: commonDir }));
 	const worktreeKey = sha256(gitDir).slice("sha256:".length, "sha256:".length + 24);
 	const stateDir = join(commonDir, "gentle-pi", "commit-transactions", worktreeKey);
 	return {
@@ -242,11 +245,11 @@ function decodeRecord(value         )                          {
 	if (record.schema !== TRANSACTION_SCHEMA) throw new Error("commit transaction record schema is incompatible");
 	for (const field of [
 		"transaction_id", "repository_id", "repository_root", "common_directory", "git_directory",
-		"command", "command_hash", "original_head", "original_head_tree", "original_index_tree",
+		"command", "command_hash", "original_index_tree",
 		"original_index_hash", "authorized_pre_hook_tree", "state", "created_at", "updated_at", "record_hash",
 	]) if (typeof record[field] !== "string" || (record[field]          ).length === 0) throw new Error(`commit transaction record ${field} is invalid`);
 	if (!isStringArray(record.arguments) || !isStringArray(record.invocation_ids) || !isStringArray(record.lineage_history)) throw new Error("commit transaction record arrays are invalid");
-	for (const field of ["post_hook_tree", "post_hook_index_hash", "authorized_tree", "authority_revision", "gate_context_hash", "committed_head", "committed_tree", "git_created_head", "git_created_tree", "error"]         ) {
+	for (const field of ["original_head", "original_head_tree", "post_hook_tree", "post_hook_index_hash", "authorized_tree", "authority_revision", "gate_context_hash", "committed_head", "committed_tree", "git_created_head", "git_created_tree", "error"]         ) {
 		if (record[field] !== undefined && typeof record[field] !== "string") throw new Error(`commit transaction record ${field} is invalid`);
 	}
 	if (!Number.isSafeInteger(record.hook_runs) || (record.hook_runs          ) < 0) throw new Error("commit transaction hook count is invalid");
@@ -438,7 +441,7 @@ export function prepareCommitTransactionInvocation(input
  )                              {
 	assertSafeCommitArguments(input.arguments);
 	const binding = repositoryBinding(input.cwd);
-	const head = git(binding.root, ["rev-parse", "--verify", "HEAD"]);
+	const head = resolveHead(binding.root);
 	const currentTree = git(binding.root, ["write-tree"]);
 	if (currentTree !== input.authorization.intendedTree) throw new Error("commit transaction pre-hook index no longer matches its controller authorization");
 	let transactionId = randomUUID();
@@ -541,7 +544,7 @@ function validateNativeTree(result                      , lineageId        , tre
 }
 
 function createRecord(binding                   , invocation                             , now            )                          {
-	const head = git(binding.root, ["rev-parse", "--verify", "HEAD"]);
+	const head = resolveHead(binding.root);
 	const tree = git(binding.root, ["write-tree"]);
 	if (tree !== invocation.authorization.intendedTree) throw new Error("commit transaction index changed after controller authorization");
 	const timestamp = now().toISOString();
@@ -556,7 +559,7 @@ function createRecord(binding                   , invocation                    
 		command_hash: invocation.commandHash,
 		arguments: [...invocation.arguments],
 		original_head: head,
-		original_head_tree: git(binding.root, ["rev-parse", "--verify", "HEAD^{tree}"]),
+		original_head_tree: head === undefined ? undefined : git(binding.root, ["rev-parse", "--verify", "HEAD^{tree}"]),
 		original_index_tree: tree,
 		original_index_hash: indexFingerprint(binding.root),
 		authorized_pre_hook_tree: invocation.authorization.intendedTree,
@@ -572,13 +575,17 @@ function createRecord(binding                   , invocation                    
 function assertInvocationMatches(binding                   , record                         , invocation                             )       {
 	if (record.repository_id !== binding.repositoryId || record.repository_root !== binding.root || record.common_directory !== binding.commonDir || record.git_directory !== binding.gitDir) throw new Error("commit transaction repository identity changed");
 	if (record.transaction_id !== invocation.transactionId || record.command_hash !== invocation.commandHash || record.command !== invocation.command || canonicalJson(record.arguments) !== canonicalJson(invocation.arguments)) throw new Error("commit transaction exact retry does not match the durable command intent");
-	if (git(binding.root, ["rev-parse", "--verify", "HEAD"]) !== record.original_head) throw new Error("commit transaction HEAD changed before reconciliation");
+	if (resolveHead(binding.root) !== record.original_head) throw new Error("commit transaction HEAD changed before reconciliation");
 }
 
 function recoverCompletedCommit(binding                   , record                         , now            )                                      {
 	if (record.state !== COMMIT_TRANSACTION_STATE.COMMIT_RUNNING && record.state !== COMMIT_TRANSACTION_STATE.COMMITTED) return undefined;
-	const head = git(binding.root, ["rev-parse", "--verify", "HEAD"]);
+	const head = resolveHead(binding.root);
 	if (head === record.original_head) return undefined;
+	if (head === undefined) {
+		transition(binding, record, COMMIT_TRANSACTION_STATE.INCIDENT, { error: "HEAD disappeared during commit transaction" }, now);
+		throw new Error("commit transaction incident: HEAD disappeared during commit; publication remains blocked");
+	}
 	const tree = git(binding.root, ["rev-parse", "--verify", "HEAD^{tree}"]);
 	if (record.git_created_head === undefined || record.git_created_tree === undefined || head !== record.git_created_head || tree !== record.git_created_tree || tree !== record.authorized_tree) {
 		transition(binding, record, COMMIT_TRANSACTION_STATE.INCIDENT, { committed_head: head, committed_tree: tree, error: "HEAD identity differs from the exact Git-created authorized commit" }, now);
@@ -685,14 +692,15 @@ export async function runGitCommitTransaction(
 		const commit = await runProcess("git", ["-c", `core.hooksPath=${proxy}`, "commit", ...invocation.arguments], binding.root);
 		if (dependencies.failpoint === "after-commit-before-proof") throw new Error("commit transaction test interruption after Git returned");
 		record = readRecord(binding.activePath) ?? record;
-		const head = git(binding.root, ["rev-parse", "--verify", "HEAD"]);
-		const headTree = git(binding.root, ["rev-parse", "--verify", "HEAD^{tree}"]);
-		if (head !== record.original_head && head === record.git_created_head && headTree === record.git_created_tree && headTree === record.authorized_tree) {
+		const head = resolveHead(binding.root);
+		const headTree = head === undefined ? undefined : git(binding.root, ["rev-parse", "--verify", "HEAD^{tree}"]);
+		const headChanged = head !== record.original_head;
+		if (headChanged && head === record.git_created_head && headTree === record.git_created_tree && headTree === record.authorized_tree) {
 			const committed = transition(binding, record, COMMIT_TRANSACTION_STATE.COMMITTED, { committed_head: head, committed_tree: headTree, ...(commit.code === 0 && commit.signal === null ? {} : { error: `Git returned ${commit.signal ?? `exit ${commit.code}`} after creating the authorized commit` }) }, now);
 			archive(binding, committed);
-			return { transactionId: record.transaction_id, status: "committed", head, tree: headTree };
+			return { transactionId: record.transaction_id, status: "committed", head: head , tree: headTree  };
 		}
-		if (head !== record.original_head) {
+		if (headChanged) {
 			transition(binding, record, COMMIT_TRANSACTION_STATE.INCIDENT, { committed_head: head, committed_tree: headTree, error: "HEAD identity differs from the exact Git-created authorized commit" }, now);
 			throw new Error("commit transaction incident: HEAD identity changed after Git created the authorized commit; publication remains blocked");
 		}
@@ -702,7 +710,7 @@ export async function runGitCommitTransaction(
 		if (record !== undefined && dependencies.signal?.aborted === true && existsSync(binding.activePath)) {
 			try {
 				const active = readRecord(binding.activePath) ?? record;
-				if (git(binding.root, ["rev-parse", "--verify", "HEAD"]) === active.original_head) transition(binding, active, COMMIT_TRANSACTION_STATE.INTERRUPTED, { error: "commit transaction was cancelled" }, now);
+				if (resolveHead(binding.root) === active.original_head) transition(binding, active, COMMIT_TRANSACTION_STATE.INTERRUPTED, { error: "commit transaction was cancelled" }, now);
 			} catch { /* retain the earlier durable state */ }
 		}
 		throw error;
@@ -783,7 +791,7 @@ export function abandonCommitTransaction(cwd        )                          {
 	try {
 		const record = readRecord(binding.activePath);
 		if (record === undefined) throw new Error("active commit transaction disappeared during recovery");
-		if (git(binding.root, ["rev-parse", "--verify", "HEAD"]) !== record.original_head) throw new Error("cannot abandon a commit transaction after HEAD changed; reconcile the committed tree instead");
+		if (resolveHead(binding.root) !== record.original_head) throw new Error("cannot abandon a commit transaction after HEAD changed; reconcile the committed tree instead");
 		const abandoned = transition(binding, record, COMMIT_TRANSACTION_STATE.ABANDONED, { error: "explicitly abandoned without changing HEAD or index" }, now);
 		return archive(binding, abandoned);
 	} finally { releaseLock(); }

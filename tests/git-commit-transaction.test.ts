@@ -300,3 +300,62 @@ test("cancellation cannot strand a commit after HEAD advances", async (t) => {
 	assert.equal(result.status, "committed");
 	assert.deepEqual(inspectCommitTransaction(cwd), { status: "clean" });
 });
+
+function unbornRepository(t: test.TestContext): string {
+	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-commit-transaction-unborn-"));
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	git(cwd, "init", "-b", "main");
+	git(cwd, "config", "user.name", "Commit Transaction Test");
+	git(cwd, "config", "user.email", "commit-transaction@example.invalid");
+	writeFileSync(join(cwd, "initial.txt"), "first commit\n");
+	git(cwd, "add", "initial.txt");
+	return cwd;
+}
+
+test("an unborn repository creates its first reviewed commit without a prior HEAD", async (t) => {
+	const cwd = unbornRepository(t);
+	const intendedTree = git(cwd, "write-tree");
+	const command = `git commit ${JSON.stringify("-m")} ${JSON.stringify("initial")}`;
+	const invocation = prepareCommitTransactionInvocation({
+		command,
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId: "unborn-first",
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree,
+		},
+	});
+	const result = await runGitCommitTransaction(invocation, { nativeReviewCli: native(cwd, "unborn-first") });
+	assert.equal(result.status, "committed");
+	assert.equal(result.tree, intendedTree);
+	assert.equal(result.head, git(cwd, "rev-parse", "HEAD"));
+	assert.equal(git(cwd, "rev-parse", "HEAD^{tree}"), intendedTree);
+	assert.deepEqual(inspectCommitTransaction(cwd), { status: "clean" });
+	const verified = verifyCommitTransactionResult(cwd, result.transactionId);
+	assert.equal(verified.tree, intendedTree);
+});
+
+test("an unborn repository that fails to commit leaves no HEAD and allows exact retry", async (t) => {
+	const cwd = unbornRepository(t);
+	const intendedTree = git(cwd, "write-tree");
+	const command = `git commit ${JSON.stringify("-m")} ${JSON.stringify("initial")}`;
+	const invocation = prepareCommitTransactionInvocation({
+		command,
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId: "unborn-retry",
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree,
+		},
+	});
+	await assert.rejects(
+		runGitCommitTransaction(invocation, { nativeReviewCli: native(cwd, "unborn-retry", "invalidated") }),
+		/native pre-commit validation denied/,
+	);
+	assert.throws(() => git(cwd, "rev-parse", "--verify", "HEAD"), /fatal|Needed/i);
+	assert.equal(inspectCommitTransaction(cwd).record?.state, COMMIT_TRANSACTION_STATE.VALIDATION_FAILED);
+});
