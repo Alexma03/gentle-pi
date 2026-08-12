@@ -47,6 +47,20 @@ function readMarkdownSection(source: string, heading: string): string {
 	return lines.slice(start + 1, end).join("\n").trim();
 }
 
+// Extracts one command line beginning with `commandPrefix` so payload args bind
+// to the correct command shape; `--cwd`, `--change`, `--request-id` appear in
+// both acquire and settle, so a section-wide match stays green on arg removal.
+function extractCommandLine(section: string, commandPrefix: string): string {
+	const escaped = commandPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const re = new RegExp(`^[ \t]*${escaped}.*$`, "m");
+	const match = section.match(re);
+	assert.ok(
+		match,
+		`Native Runtime Attempt Authority section must contain a command line starting with "${commandPrefix}"`,
+	);
+	return match[0];
+}
+
 test("workflow asset has exactly one Native Runtime Attempt Authority section", () => {
 	const section = readMarkdownSection(read(WORKFLOW), SECTION);
 	assert.ok(section.length > 0, "section must be non-empty");
@@ -89,17 +103,38 @@ test("workflow requires distinct request IDs with own-ID-only idempotent replay"
 	assert.match(section, /own ID only for idempotent replay/i);
 });
 
-test("workflow settle requires the full evidence semantics and bounded routing states", () => {
+test("workflow acquire command line binds every mandatory payload argument", () => {
 	const section = readMarkdownSection(read(WORKFLOW), SECTION);
-	for (const field of [
-		"outcome",
-		"evidence-revision",
-		"diagnosis",
-		"harness-disposition",
-		"cleanup-evidence",
-		"process-evidence",
+	const acquire = extractCommandLine(section, "gentle-ai sdd-attempt acquire ");
+	for (const arg of [
+		"--cwd <repo>",
+		"--change <change>",
+		"--request-id <id>",
+		"--work-unit <label>",
+		"--evidence-goal <goal>",
+		"--max-attempts <count>",
+		"--max-changed-lines <count>",
 	]) {
-		assert.match(section, new RegExp(`--${field}`), `settle must reference --${field}`);
+		assert.ok(acquire.includes(arg), `acquire command is missing ${arg}; command: ${acquire}`);
+	}
+});
+
+test("workflow settle command line binds mandatory arguments and routing invariants", () => {
+	const section = readMarkdownSection(read(WORKFLOW), SECTION);
+	const settle = extractCommandLine(section, "gentle-ai sdd-attempt settle ");
+	for (const arg of [
+		"--cwd <repo>",
+		"--change <change>",
+		"--token <token>",
+		"--request-id <id>",
+		"--outcome <failed|interrupted|passed>",
+		"--evidence-revision <sha256:...>",
+		"--diagnosis <text>",
+		"--harness-disposition <reused|invalidated>",
+		"--cleanup-evidence <text>",
+		"--process-evidence <text>",
+	]) {
+		assert.ok(settle.includes(arg), `settle command is missing ${arg}; command: ${settle}`);
 	}
 	assert.match(section, /never `none`/);
 	assert.match(section, /proceed\|blocked\|complete/);
