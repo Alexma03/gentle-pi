@@ -181,8 +181,47 @@ function absoluteGitPath(cwd        , name        )         {
 	return isAbsolute(value) ? value : resolve(cwd, value);
 }
 
+// Runs a probe that may exit nonzero as an expected signal (absent ref, unborn
+// HEAD). Returns the exit status and trimmed stdout. Timeout and I/O failures
+// propagate instead of being masked as a status, so callers fail closed.
+function probeGit(cwd        , args                   )                                     {
+	try {
+		const stdout = execFileSync("git", args, {
+			cwd,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "pipe"],
+			timeout: GIT_TIMEOUT_MS,
+			windowsHide: true,
+		});
+		return { status: 0, stdout: stdout.trim() };
+	} catch (error) {
+		const detail = error                                                                                           ;
+		if (detail.code === "ETIMEDOUT" || detail.killed === true) throw error;
+		if (typeof detail.status === "number") return { status: detail.status, stdout: typeof detail.stdout === "string" ? detail.stdout.trim() : "" };
+		throw error;
+	}
+}
+
+// Resolves HEAD to a commit SHA, or undefined only for a valid unborn symbolic
+// HEAD (symbolic HEAD pointing at a branch with no commits). Timeout, I/O,
+// corruption, and all other failures propagate (fail closed on uncertain HEAD
+// state). Classification uses status-based probes, not localized stderr text.
 function resolveHead(cwd        )                     {
-	try { return git(cwd, ["rev-parse", "--verify", "HEAD"]); } catch { return undefined; }
+	try {
+		return git(cwd, ["rev-parse", "--verify", "HEAD"]);
+	} catch (error) {
+		const detail = error                                                ;
+		if (detail.code === "ETIMEDOUT" || detail.killed === true) throw error;
+		if (typeof detail.status !== "number") throw error;
+		const symbolic = probeGit(cwd, ["symbolic-ref", "--quiet", "HEAD"]);
+		if (symbolic.status !== 0) throw error;
+		// show-ref --verify --quiet distinguishes: status 1 = ref absent (valid
+		// unborn), status 0 = ref exists and valid (rethrow original HEAD error),
+		// any other status (128, etc.) = corruption/missing object (fail closed).
+		const refProbe = probeGit(cwd, ["show-ref", "--verify", "--quiet", symbolic.stdout]);
+		if (refProbe.status === 1) return undefined;
+		throw error;
+	}
 }
 
 function repositoryBinding(cwd        )                    {

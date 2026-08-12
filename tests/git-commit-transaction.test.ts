@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,6 +14,7 @@ import {
 	runGitCommitTransaction,
 	verifyCommitTransactionResult,
 } from "../lib/git-commit-transaction.ts";
+import type { CommitTransactionInvocation } from "../lib/git-commit-transaction.ts";
 import type { NativeReviewCli, NativeValidateResult } from "../lib/native-review-cli.ts";
 
 function git(cwd: string, ...arguments_: string[]): string {
@@ -358,4 +359,56 @@ test("an unborn repository that fails to commit leaves no HEAD and allows exact 
 	);
 	assert.throws(() => git(cwd, "rev-parse", "--verify", "HEAD"), /fatal|Needed/i);
 	assert.equal(inspectCommitTransaction(cwd).record?.state, COMMIT_TRANSACTION_STATE.VALIDATION_FAILED);
+});
+
+function unbornInvocation(cwd: string, lineageId: string): CommitTransactionInvocation {
+	return prepareCommitTransactionInvocation({
+		command: "git commit -m initial",
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId,
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree: git(cwd, "write-tree"),
+		},
+	});
+}
+
+test("resolveHead fails closed for a corrupt HEAD ref instead of masking it as unborn", (t) => {
+	const cwd = unbornRepository(t);
+	// Garbage ref (not a valid SHA): symbolic-ref --quiet HEAD fails (128),
+	// so resolveHead rethrows instead of returning undefined.
+	mkdirSync(join(cwd, ".git", "refs", "heads"), { recursive: true });
+	writeFileSync(join(cwd, ".git", "refs", "heads", "main"), "z".repeat(40));
+	assert.throws(() => unbornInvocation(cwd, "corrupt-head"));
+	assert.equal(inspectCommitTransaction(cwd).status, "clean");
+});
+
+test("resolveHead does not mask a symbolic HEAD pointing to a missing object as unborn", (t) => {
+	const cwd = unbornRepository(t);
+	// Valid-format SHA with no object: rev-parse --verify HEAD succeeds (returns
+	// the SHA), so resolveHead never enters the unborn classification.
+	mkdirSync(join(cwd, ".git", "refs", "heads"), { recursive: true });
+	writeFileSync(join(cwd, ".git", "refs", "heads", "main"), "0123456789abcdef0123456789abcdef01234567\n");
+	const invocation = unbornInvocation(cwd, "missing-object-head");
+	assert.equal(invocation.cwd, realpathSync(cwd));
+	assert.equal(inspectCommitTransaction(cwd).status, "clean");
+});
+
+test("resolveHead propagates a probe timeout instead of masking it as an unborn HEAD", (t) => {
+	const cwd = unbornRepository(t);
+	const wrapperDir = mkdtempSync(join(tmpdir(), "gentle-pi-commit-transaction-timeout-"));
+	t.after(() => rmSync(wrapperDir, { recursive: true, force: true }));
+	const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+	writeFileSync(join(wrapperDir, "git"), `#!/bin/sh\nif [ "$1" = "rev-parse" ] && [ "$2" = "--verify" ] && [ "$3" = "HEAD" ] && [ $# -eq 3 ]; then\nsleep 30\nelse\nexec ${realGit} "$@"\nfi\n`);
+	chmodSync(join(wrapperDir, "git"), 0o755);
+	const originalPath = process.env.PATH;
+	process.env.PATH = `${wrapperDir}:${originalPath}`;
+	try {
+		assert.throws(() => unbornInvocation(cwd, "timeout-head"));
+	} finally {
+		process.env.PATH = originalPath;
+	}
+	assert.equal(inspectCommitTransaction(cwd).status, "clean");
 });

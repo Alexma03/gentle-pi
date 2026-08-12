@@ -723,6 +723,37 @@ function checkoutMaterializedEntries(root: string, entries: readonly CandidateTr
 	flush();
 }
 
+// Creates an unborn worktree (symbolic HEAD pointing at a branch with no
+// commits, no ref written, no phantom commit). Git 2.42+ supports --orphan
+// directly; older Git lacks the flag and reports an unsupported-option usage
+// error (exit status 129). Only that exact status triggers the fallback: a
+// temporary empty-tree commit seeds a detached --no-checkout worktree, then
+// a symbolic-ref rewrite makes HEAD unborn. The temporary commit is never
+// referenced by any ref and is GC-able, so it is not a phantom commit. The
+// fallback uses a deterministic author/committer identity and timestamp in a
+// copied environment so it does not depend on user.name/user.email or the
+// ambient date. Contributor HEAD, branch, refs, and index are never touched.
+function addUnbornWorktree(cwd: string, root: string, branch: string, env: NodeJS.ProcessEnv, executor: CandidateGitExecutor): void {
+	const primary = probeCandidateGit(cwd, ["worktree", "add", "--orphan", "-b", branch, root], env, executor);
+	if (primary.status === 0) return;
+	// Only the unsupported-option usage status (129, pre-2.42 Git lacking --orphan)
+	// triggers the fallback. Every other status propagates as a git-failure.
+	if (primary.status !== 129 || existsSync(root)) throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.GIT_FAILURE, ["worktree", "add", "--orphan", "-b", branch, root], resolveCandidateGitTimeoutMs(env));
+	const fallbackEnv = {
+		...env,
+		GIT_AUTHOR_NAME: "gentle-ai-candidate",
+		GIT_AUTHOR_EMAIL: "gentle-ai-candidate@example.invalid",
+		GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
+		GIT_COMMITTER_NAME: "gentle-ai-candidate",
+		GIT_COMMITTER_EMAIL: "gentle-ai-candidate@example.invalid",
+		GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
+	};
+	const emptyTree = git(cwd, ["mktree"], fallbackEnv, executor);
+	const tempCommit = git(cwd, ["commit-tree", "-m", "gentle-ai-candidate", emptyTree], fallbackEnv, executor);
+	git(cwd, ["worktree", "add", "--no-checkout", "--detach", root, tempCommit], env, executor);
+	git(root, ["symbolic-ref", "HEAD", `refs/heads/${branch}`], env, executor);
+}
+
 function materializeCandidateView(request: CreateCandidateViewRequest, executor: CandidateGitExecutor): CandidateViewRecord {
 	const contributorRoot = realpathSync(request.contributorRoot);
 	if (!lstatSync(contributorRoot).isDirectory()) throw new CandidateViewError("contributor root is not a directory");
@@ -748,10 +779,11 @@ function materializeCandidateView(request: CreateCandidateViewRequest, executor:
 		if (!committedOnly) git(contributorRoot, ["add", "-A"], environment, executor);
 		const candidateTree = git(contributorRoot, ["write-tree"], environment, executor);
 		const root = join(parent, randomUUID());
-		// An unborn repository has no commit to detach a worktree at, so use an
-		// orphan worktree (unborn branch, no commit, no ref written until a
-		// commit) to host the materialized candidate tree without a phantom commit.
-		if (unborn) git(contributorRoot, ["worktree", "add", "--orphan", "-b", `gentle-ai-candidate-${randomUUID()}`, root], process.env, executor);
+		// An unborn repository has no commit to detach a worktree at. addUnbornWorktree
+		// creates an orphan worktree (unborn branch, no commit, no ref) to host the
+		// materialized candidate tree without a phantom commit, with a fallback for
+		// Git versions older than 2.42 that do not support --orphan.
+		if (unborn) addUnbornWorktree(contributorRoot, root, `gentle-ai-candidate-${randomUUID()}`, process.env, executor);
 		else git(contributorRoot, ["worktree", "add", "--detach", "--no-checkout", root, candidateCommit.commit], process.env, executor);
 		try {
 			git(root, ["read-tree", candidateTree], process.env, executor);

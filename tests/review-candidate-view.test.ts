@@ -1408,3 +1408,40 @@ test("candidate view probe does not convert a ref-existence probe timeout into a
 	assert.ok(failure instanceof CandidateViewError, "ref-existence probe timeout must fail closed");
 	assert.equal((failure as CandidateViewError).reason, "candidate-view-timeout");
 });
+
+test("candidate view unborn worktree falls back when --orphan is unsupported, preserving isolation, no phantom commit, and contributor immutability", (t) => {
+	const contributorRoot = unbornRepository(t);
+	const indexBefore = readFileSync(join(contributorRoot, ".git", "index"));
+	// Intercept --orphan with status 129 (Git < 2.42 unknown option).
+	const executor: CandidateGitExecutor = (file, args, options) => {
+		if (args[0] === "worktree" && args[1] === "add" && args.includes("--orphan")) throw Object.assign(new Error("unknown option"), { status: 129 });
+		return execFileSync(file, args, options);
+	};
+	const view = new CandidateViewRegistry(executor).create({ contributorRoot });
+	try {
+		assert.equal(readFileSync(join(view.root, "staged.txt"), "utf8"), "first staged\n");
+		assert.deepEqual(view.paths, ["staged.txt"]);
+		assert.equal(view.baseTree, emptyTreeOf(contributorRoot));
+		// No phantom commit; contributor index untouched.
+		assert.throws(() => git(contributorRoot, "rev-parse", "--verify", "HEAD"), /fatal/i);
+		assert.equal(git(contributorRoot, "rev-list", "--all").length, 0);
+		assert.deepEqual(readFileSync(join(contributorRoot, ".git", "index")), indexBefore);
+	} finally {
+		view.cleanup();
+	}
+	assert.equal(git(contributorRoot, "worktree", "list").split("\n").filter((line) => line.includes("gentle-ai-candidate")).length, 0);
+	assert.equal(git(contributorRoot, "rev-list", "--all").length, 0);
+});
+
+test("candidate view unborn worktree propagates a non-usage --orphan failure instead of falling back", (t) => {
+	const contributorRoot = unbornRepository(t);
+	// A non-129 status must not trigger the fallback.
+	const executor: CandidateGitExecutor = (file, args, options) => {
+		if (args[0] === "worktree" && args[1] === "add" && args.includes("--orphan")) throw Object.assign(new Error("genuine failure"), { status: 128 });
+		return execFileSync(file, args, options);
+	};
+	let failure: unknown;
+	try { new CandidateViewRegistry(executor).create({ contributorRoot }); } catch (error) { failure = error; }
+	assert.ok(failure instanceof CandidateViewError, "a non-usage --orphan failure must propagate");
+	assert.equal((failure as CandidateViewError).reason, "candidate-view-git-failure");
+});
