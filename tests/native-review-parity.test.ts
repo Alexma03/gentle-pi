@@ -662,7 +662,7 @@ test("granted consent preserves the completed native start when local latch pers
 
 	assert.deepEqual(answers, ["granted"]);
 	assert.equal(latchWrites, 1);
-	assert.ok(result.result, "the completed native start result must remain authoritative");
+	assert.deepEqual(result.result, { lineage_id: "native-lineage", state: "reviewing", risk_tier: "high", selected_lenses: ["review-risk", "review-resilience", "review-readability", "review-reliability"], changed_files: 1, original_changed_lines: 1, correction_budget: 1, action: "created", lenses_required: true });
 	assert.equal((result.actor_binding as { workspace_root: string }).workspace_root, realpathSync(cwd));
 	assert.equal(readReviewConsentLatch(cwd), false);
 	assert.equal(notices.length, 1);
