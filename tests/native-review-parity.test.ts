@@ -441,12 +441,15 @@ interface RegisteredEventFixture {
 	(event: unknown, ctx: ExtensionContext): Promise<unknown> | unknown;
 }
 
-function runtime(nativeReviewCli: NativeReviewCli | null): { controller: RegisteredTool; commands: Map<string, RegisteredCommandFixture>; events: Map<string, RegisteredEventFixture> } {
+function runtime(
+	nativeReviewCli: NativeReviewCli | null,
+	writeReviewConsentLatch: typeof recordReviewConsentLatch = recordReviewConsentLatch,
+): { controller: RegisteredTool; commands: Map<string, RegisteredCommandFixture>; events: Map<string, RegisteredEventFixture> } {
 	const tools = new Map<string, RegisteredTool>();
 	const commands = new Map<string, RegisteredCommandFixture>();
 	const events = new Map<string, RegisteredEventFixture>();
 	const dependencies = { nativeReviewCli, candidateViews: new CandidateViewRegistry() } as unknown as Parameters<typeof createGentleAiExtension>[0];
-	createGentleAiExtension(dependencies)({
+	__testing.createGentleAiExtension(dependencies, writeReviewConsentLatch)({
 		on(name: string, handler: RegisteredEventFixture) { events.set(name, handler); },
 		registerTool(definition: RegisteredTool & { name: string }) { tools.set(definition.name, definition); },
 		registerCommand(name: string, definition: RegisteredCommandFixture) { commands.set(name, definition); },
@@ -611,7 +614,11 @@ test("consent relay returns the identical complete parent-visible envelope with 
 
 test("explicit consent follow-up grants or declines exactly once", async (t) => {
 	for (const answer of ["granted", "declined"] as const) {
-		const cwd = repository(t);
+		const repositoryCwd = repository(t);
+		const cwd = `${repositoryCwd}-alias`;
+		symlinkSync(repositoryCwd, cwd, process.platform === "win32" ? "junction" : "dir");
+		t.after(() => rmSync(cwd, { force: true }));
+		const canonicalCwd = realpathSync(cwd);
 		assert.equal(readReviewConsentLatch(cwd), false);
 		const { native, answers, startRequests, answerRequests } = relayedConsentNative(cwd);
 		const { controller } = runtime(native);
@@ -627,8 +634,8 @@ test("explicit consent follow-up grants or declines exactly once", async (t) => 
 		assert.equal(answerRequests[0]?.consent.targetIdentity, startRequests[0]?.targetIdentity);
 		if (answer === "granted") {
 			const actorBinding = result.actor_binding as { workspace_root: string; candidate_root: string };
-			assert.equal(actorBinding.workspace_root, realpathSync(cwd));
-			assert.notEqual(actorBinding.candidate_root, cwd);
+			assert.equal(actorBinding.workspace_root, canonicalCwd);
+			assert.notEqual(actorBinding.candidate_root, canonicalCwd);
 			assert.equal(readReviewConsentLatch(cwd), true);
 		} else {
 			assert.equal(result.outcome, "consent-declined-this-candidate");
@@ -639,6 +646,28 @@ test("explicit consent follow-up grants or declines exactly once", async (t) => 
 		}
 		await assert.rejects(() => answerConsent(controller, blocked.consent_binding, answer, headlessContext(cwd)), /unknown, expired, or already consumed/);
 	}
+});
+
+test("granted consent preserves the completed native start when local latch persistence fails", async (t) => {
+	const cwd = repository(t);
+	const { native, answers } = relayedConsentNative(cwd);
+	const notices: Array<{ message: string; type?: string }> = [];
+	let latchWrites = 0;
+	const { controller } = runtime(native, () => {
+		latchWrites += 1;
+		throw new Error("injected consent latch failure");
+	});
+	const blocked = await blockedConsent(controller, "consent-latch-failure", headlessContext(cwd, notices));
+	const result = await answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd, notices));
+
+	assert.deepEqual(answers, ["granted"]);
+	assert.equal(latchWrites, 1);
+	assert.ok(result.result, "the completed native start result must remain authoritative");
+	assert.equal((result.actor_binding as { workspace_root: string }).workspace_root, realpathSync(cwd));
+	assert.equal(readReviewConsentLatch(cwd), false);
+	assert.equal(notices.length, 1);
+	assert.equal(notices[0]?.type, "warning");
+	assert.match(notices[0]?.message ?? "", /native review start completed, but Pi could not record the local consent latch/i);
 });
 
 // Issue #247: a local binding mismatch was indistinguishable from a provider
