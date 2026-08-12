@@ -154,6 +154,40 @@ On gate pass, continue automatically to the next phase. On gate fail, rerun the 
 
 The gatekeeper is additive: it does not relax the Review Workload Guard, Strict TDD Forwarding, native status dependency checks, or mandatory delegation rules. It never creates a post-SDD review pass.
 
+## Native Runtime Attempt Authority
+
+The package-local Gentle AI runtime owns the Git-common-dir compact SDD attempt ledger. It is the sole attempt and changed-line budget authority for both OpenSpec and Engram flows on Pi. Pi must not implement a local attempt mirror, counter, token store, state machine, or extension interception layer; such code would duplicate provider authority and could not truthfully settle all runs.
+
+Before every runtime-bearing `sdd-apply`, `sdd-verify`, or remediation actor/harness launch, the orchestrator MUST call the compact acquire:
+
+```text
+gentle-ai sdd-attempt acquire --cwd <repo> --change <change> --request-id <id> --work-unit <label> --evidence-goal <goal> --max-attempts <count> --max-changed-lines <count>
+```
+
+Pass `--token` only to continue an active attempt; pass `--remediates-evidence-revision` only for an unmanaged remediation. Do not invent continuation or remediation state the provider has not returned.
+
+The provider returns exactly one routing state from `proceed|blocked|complete`:
+
+- `proceed`: launch only on `proceed`; retain the opaque token for settle.
+- `blocked`: do not launch; stop and report.
+- `complete`: do not launch; the objective is settled.
+
+Never persist caller-authored attempt counters, tokens, or state in OpenSpec artifacts, Engram memory, prompts, or any Pi-owned state.
+
+After the external run completes, call the compact settle with a request ID distinct from acquire, reusing an operation's own ID only for idempotent replay of that exact operation:
+
+```text
+gentle-ai sdd-attempt settle --cwd <repo> --change <change> --token <token> --request-id <id> --outcome <failed|interrupted|passed> --evidence-revision <sha256:...> --diagnosis <text> --harness-disposition <reused|invalidated> --cleanup-evidence <text> --process-evidence <text>
+```
+
+Every settle field is required: `cwd`, `change`, `token`, `request-id`, `outcome`, `evidence-revision`, `diagnosis`, `harness-disposition`, `cleanup-evidence`, and `process-evidence`. `evidence-revision` is never `none`. Pass `--successor-lineage` only for a distinct approved successor; the current/bound lineage remains itself otherwise. Pass `--remediates-evidence-revision` only when repairing a specific failed evidence revision. Settle derives binding and remediation inputs; the orchestrator never invents them.
+
+`status`, `begin`, `finish`, and `reset` are diagnostic/compatibility surfaces, not the normal runtime route. Route continuation only from the provider-returned `proceed|blocked|complete`. `reset` is never automatic and requires an explicit maintainer scope decision.
+
+### Gatekeeper Reconciliation
+
+The Automatic Mode Gatekeeper one-rerun rule above is a quality gate, not a launch authorization. A rerun never bypasses native attempt authority: every rerun still requires a fresh compact acquire, and the rerun must stop immediately if the provider returns `blocked` or `complete`. The gatekeeper quality rule is preserved and remains subordinate to this authority.
+
 ## SDD Phase Delegation Mode
 
 Launch SDD phase subagents with `subagent_run` `mode: "task"` when the parent needs the phase result to route the next step. Do not use `mode: "background"` for SDD phases that must feed continuation; background completion is a notification/history mechanism, not an orchestration resume guarantee.
