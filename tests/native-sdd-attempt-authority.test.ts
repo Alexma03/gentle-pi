@@ -52,14 +52,33 @@ function readMarkdownSection(source: string, heading: string): string {
 // both acquire and settle, so a section-wide match stays green on arg removal.
 function extractCommandLine(section: string, commandPrefix: string): string {
 	const escaped = commandPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const re = new RegExp(`^[ \t]*${escaped}.*$`, "m");
-	const match = section.match(re);
-	assert.ok(
-		match,
-		`Native Runtime Attempt Authority section must contain a command line starting with "${commandPrefix}"`,
+	const re = new RegExp(`^[ \t]*${escaped}.*$`, "gm");
+	const matches = section.match(re) ?? [];
+	assert.equal(
+		matches.length,
+		1,
+		`Native Runtime Attempt Authority section must contain exactly one command line starting with "${commandPrefix}" (found ${matches.length})`,
 	);
-	return match[0];
+	const [line] = matches;
+	return line;
 }
+
+test("extractCommandLine rejects duplicate matching command lines (negative control)", () => {
+	for (const prefix of [
+		"gentle-ai sdd-attempt acquire ",
+		"gentle-ai sdd-attempt settle ",
+	]) {
+		const duplicate = [
+			`${prefix}--cwd repo --change change --request-id id`,
+			`${prefix}--cwd repo2 --change change2 --request-id id2`,
+		].join("\n");
+		assert.throws(
+			() => extractCommandLine(duplicate, prefix),
+			/exactly one command line/,
+			`duplicate ${prefix.trim()} lines must be rejected`,
+		);
+	}
+});
 
 test("workflow asset has exactly one Native Runtime Attempt Authority section", () => {
 	const section = readMarkdownSection(read(WORKFLOW), SECTION);
