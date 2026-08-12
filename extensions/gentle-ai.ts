@@ -126,6 +126,7 @@ import {
 } from "../lib/native-review-cli.ts";
 import type { ReviewConsentV2, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 import { assertDistinctCorrectionEvidence, resolveCorrectionStep, type CorrectionEvidence, type CorrectionOutcome, type CorrectionStep } from "../lib/review-correction-lifecycle.ts";
+import { recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
 
 const GRAPH_V1_ORDINARY_READ_ONLY = "Graph-v1 ordinary review authority is read-only; use native compact-v2 review operations";
 import {
@@ -5199,7 +5200,9 @@ async function executeReviewControllerOperation(
 					...nativeStartPreAuthorityRejection(),
 				};
 			}
-			return completeNativeStart(parameters.operation, answered.start, pending.repositoryCwd, pending.candidateView, candidateViews);
+			const completed = completeNativeStart(parameters.operation, answered.start, pending.repositoryCwd, pending.candidateView, candidateViews);
+			if (input.answer === "granted") recordReviewConsentLatch(pending.repositoryCwd);
+			return completed;
 		} catch (error) {
 			const value = error as { mutationOutcome?: unknown };
 			if (value.mutationOutcome === "none") candidateViews?.cleanup(pending.candidateView.token);
