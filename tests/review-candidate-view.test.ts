@@ -1436,7 +1436,9 @@ test("candidate view unborn worktree falls back when --orphan is unsupported, pr
 test("candidate view unborn worktree propagates a non-usage --orphan failure instead of falling back", (t) => {
 	const contributorRoot = unbornRepository(t);
 	// A non-129 status must not trigger the fallback.
+	const calls: string[][] = [];
 	const executor: CandidateGitExecutor = (file, args, options) => {
+		calls.push([...args]);
 		if (args[0] === "worktree" && args[1] === "add" && args.includes("--orphan")) throw Object.assign(new Error("genuine failure"), { status: 128 });
 		return execFileSync(file, args, options);
 	};
@@ -1444,4 +1446,6 @@ test("candidate view unborn worktree propagates a non-usage --orphan failure ins
 	try { new CandidateViewRegistry(executor).create({ contributorRoot }); } catch (error) { failure = error; }
 	assert.ok(failure instanceof CandidateViewError, "a non-usage --orphan failure must propagate");
 	assert.equal((failure as CandidateViewError).reason, "candidate-view-git-failure");
+	assert.ok(!calls.some((args) => args[0] === "commit-tree"), "the fallback must not create a temporary commit");
+	assert.ok(!calls.some((args) => args[0] === "worktree" && args.includes("--detach")), "the fallback must not add a detached worktree");
 });

@@ -406,7 +406,16 @@ test("resolveHead propagates a probe timeout instead of masking it as an unborn 
 	const originalPath = process.env.PATH;
 	process.env.PATH = `${wrapperDir}:${originalPath}`;
 	try {
-		assert.throws(() => unbornInvocation(cwd, "timeout-head"));
+		// The probe wrapper sleeps past GIT_TIMEOUT_MS (10s), so execFileSync
+		// kills the process and resolveHead rethrows the raw timeout error
+		// rather than classifying it as an unborn HEAD. Accept only a failure
+		// that genuinely represents a timeout, not any arbitrary error.
+		assert.throws(
+			() => unbornInvocation(cwd, "timeout-head"),
+			(error: unknown) => error !== null && typeof error === "object"
+				&& ((error as { code?: unknown }).code === "ETIMEDOUT" || (error as { killed?: unknown }).killed === true),
+			"resolveHead must propagate a probe timeout instead of masking it as an unborn HEAD",
+		);
 	} finally {
 		process.env.PATH = originalPath;
 	}
