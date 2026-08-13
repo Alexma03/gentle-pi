@@ -230,7 +230,20 @@ function repositoryBinding(cwd        )                    {
 	const gitDirValue = git(root, ["rev-parse", "--path-format=absolute", "--git-dir"]);
 	const commonDir = realpathSync(commonDirValue);
 	const gitDir = realpathSync(gitDirValue);
-	const repositoryId = sha256(canonicalJson({ common_directory: commonDir }));
+	// Preserve the durable repository identity across the unborn-handling
+	// upgrade: a born repository keeps the byte-for-byte previous formula
+	// `sha256(canonicalJson({ common_directory: commonDir, roots }))` with
+	// `roots` the sorted root commits reachable from HEAD. An unborn
+	// repository has no HEAD, so `rev-list HEAD` cannot run; resolveHead
+	// already classifies HEAD state and propagates timeout/corruption/I/O
+	// failures rather than masking them, so the unborn branch gets a
+	// deterministic safe roots representation (the empty set) without
+	// hiding real errors.
+	const head = resolveHead(root);
+	const roots = head === undefined
+		? []
+		: git(root, ["rev-list", "--max-parents=0", "HEAD"]).split(/\r?\n/).filter(Boolean).sort();
+	const repositoryId = sha256(canonicalJson({ common_directory: commonDir, roots }));
 	const worktreeKey = sha256(gitDir).slice("sha256:".length, "sha256:".length + 24);
 	const stateDir = join(commonDir, "gentle-pi", "commit-transactions", worktreeKey);
 	return {

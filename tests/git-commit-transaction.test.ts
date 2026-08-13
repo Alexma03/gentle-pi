@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
 	COMMIT_TRANSACTION_STATE,
 	assertNoUnresolvedCommitTransaction,
+	abandonCommitTransaction,
 	inspectCommitTransaction,
 	prepareCommitTransactionInvocation,
 	reconcileCommitTransaction,
@@ -359,6 +361,31 @@ test("an unborn repository that fails to commit leaves no HEAD and allows exact 
 	);
 	assert.throws(() => git(cwd, "rev-parse", "--verify", "HEAD"), /fatal|Needed/i);
 	assert.equal(inspectCommitTransaction(cwd).record?.state, COMMIT_TRANSACTION_STATE.VALIDATION_FAILED);
+	// A denied attempt leaves the index intact and HEAD unborn, so the exact
+	// commit command can be retried. The failed transaction requires explicit
+	// recovery: abandon archives it (HEAD never moved, so abandon is allowed),
+	// then a fresh invocation authorizes the same tree and commits successfully.
+	abandonCommitTransaction(cwd);
+	assert.equal(inspectCommitTransaction(cwd).status, "clean");
+	const retry = prepareCommitTransactionInvocation({
+		command,
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId: "unborn-retry",
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree,
+		},
+	});
+	const result = await runGitCommitTransaction(retry, { nativeReviewCli: native(cwd, "unborn-retry") });
+	assert.equal(result.status, "committed");
+	assert.equal(result.tree, intendedTree);
+	assert.equal(result.head, git(cwd, "rev-parse", "HEAD"));
+	assert.equal(git(cwd, "rev-parse", "HEAD^{tree}"), intendedTree);
+	assert.deepEqual(inspectCommitTransaction(cwd), { status: "clean" });
+	const verified = verifyCommitTransactionResult(cwd, result.transactionId);
+	assert.equal(verified.tree, intendedTree);
 });
 
 function unbornInvocation(cwd: string, lineageId: string): CommitTransactionInvocation {
@@ -375,25 +402,105 @@ function unbornInvocation(cwd: string, lineageId: string): CommitTransactionInvo
 	});
 }
 
-test("resolveHead fails closed for a corrupt HEAD ref instead of masking it as unborn", (t) => {
-	const cwd = unbornRepository(t);
-	// Garbage ref (not a valid SHA): symbolic-ref --quiet HEAD fails (128),
-	// so resolveHead rethrows instead of returning undefined.
-	mkdirSync(join(cwd, ".git", "refs", "heads"), { recursive: true });
-	writeFileSync(join(cwd, ".git", "refs", "heads", "main"), "z".repeat(40));
-	assert.throws(() => unbornInvocation(cwd, "corrupt-head"));
+// Mirrors lib/git-commit-transaction.ts canonicalJson + sha256 so tests can
+// prove the durable repository identity is byte-for-byte compatible with the
+// previous formula `sha256(canonicalJson({ common_directory: commonDir, roots }))`.
+function canonicalJson(value: unknown): string {
+	if (value === null || typeof value !== "object") return JSON.stringify(value);
+	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+	const object = value as Record<string, unknown>;
+	return `{${Object.keys(object).filter((key) => object[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+}
+function identitySha256(value: string): string {
+	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+test("a born repository keeps the durable transaction identity formula with sorted root commits across the unborn-handling upgrade", async (t) => {
+	const cwd = repository(t);
+	stage(cwd);
+	installHook(cwd, "pre-commit", "exit 23");
+	const commonDir = realpathSync(git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+	const roots = git(cwd, "rev-list", "--max-parents=0", "HEAD").split(/\r?\n/).filter(Boolean).sort();
+	const expected = identitySha256(canonicalJson({ common_directory: commonDir, roots }));
+	await assert.rejects(
+		runGitCommitTransaction(invocation(cwd, "born-identity"), { nativeReviewCli: native(cwd, "born-identity") }),
+		/pre-commit hook failed/,
+	);
+	const record = inspectCommitTransaction(cwd).record;
+	assert.ok(record, "a failing hook leaves an active transaction record carrying the repository identity");
+	assert.equal(record!.repository_id, expected);
+	assert.equal(record!.common_directory, commonDir);
+	abandonCommitTransaction(cwd);
 	assert.equal(inspectCommitTransaction(cwd).status, "clean");
 });
 
-test("resolveHead does not mask a symbolic HEAD pointing to a missing object as unborn", (t) => {
+test("an unborn repository derives a deterministic repository identity without rev-list HEAD and without masking errors", async (t) => {
 	const cwd = unbornRepository(t);
-	// Valid-format SHA with no object: rev-parse --verify HEAD succeeds (returns
-	// the SHA), so resolveHead never enters the unborn classification.
+	const commonDir = realpathSync(git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+	// Unborn has no root commits reachable from HEAD; the identity uses the
+	// empty roots set, which is deterministic and avoids `rev-list HEAD`.
+	const expected = identitySha256(canonicalJson({ common_directory: commonDir, roots: [] }));
+	const intendedTree = git(cwd, "write-tree");
+	const command = `git commit ${JSON.stringify("-m")} ${JSON.stringify("initial")}`;
+	const invocation = prepareCommitTransactionInvocation({
+		command,
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId: "unborn-identity",
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree,
+		},
+	});
+	await assert.rejects(
+		runGitCommitTransaction(invocation, { nativeReviewCli: native(cwd, "unborn-identity", "invalidated") }),
+		/native pre-commit validation denied/,
+	);
+	const record = inspectCommitTransaction(cwd).record;
+	assert.ok(record, "a denied unborn attempt leaves an active transaction record carrying the repository identity");
+	assert.equal(record!.repository_id, expected);
+	assert.equal(record!.common_directory, commonDir);
+	abandonCommitTransaction(cwd);
+	assert.equal(inspectCommitTransaction(cwd).status, "clean");
+});
+
+// Resolves the canonical absolute git common directory for asserting the
+// absence of the transaction state root without assuming a literal `.git`.
+function transactionStateRoot(cwd: string): string {
+	const commonDir = realpathSync(git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+	return join(commonDir, "gentle-pi", "commit-transactions");
+}
+
+test("preparation fails closed for a corrupt HEAD ref without writing transaction state and reports corruption", (t) => {
+	const cwd = unbornRepository(t);
+	// A garbage ref (not a valid SHA) makes HEAD unresolvable. Resolving root
+	// commits during repository binding rethrows, so preparation must throw,
+	// no transaction state may be written, and inspection reports corruption
+	// (repository identity itself cannot be resolved while HEAD is corrupt).
+	mkdirSync(join(cwd, ".git", "refs", "heads"), { recursive: true });
+	writeFileSync(join(cwd, ".git", "refs", "heads", "main"), "z".repeat(40));
+	assert.throws(() => unbornInvocation(cwd, "corrupt-head"));
+	assert.equal(existsSync(transactionStateRoot(cwd)), false, "no transaction state root is written for a corrupt HEAD");
+	const inspection = inspectCommitTransaction(cwd);
+	assert.equal(inspection.status, "corrupted", "repository corruption makes inspection corrupted even with no transaction state written");
+	assert.ok(typeof inspection.reason === "string" && inspection.reason.length > 0, "inspection reason is present and actionable");
+});
+
+test("preparation fails closed for a symbolic HEAD pointing at a missing object instead of classifying it as unborn", (t) => {
+	const cwd = unbornRepository(t);
+	// A valid-format SHA with no object: rev-parse --verify HEAD succeeds, so
+	// resolveHead returns a commit id rather than classifying HEAD as unborn.
+	// Resolving root commits then fails on the missing object, so preparation
+	// must throw, no transaction state may be written, and inspection reports
+	// corruption. This must never be classified as an unborn empty-roots repo.
 	mkdirSync(join(cwd, ".git", "refs", "heads"), { recursive: true });
 	writeFileSync(join(cwd, ".git", "refs", "heads", "main"), "0123456789abcdef0123456789abcdef01234567\n");
-	const invocation = unbornInvocation(cwd, "missing-object-head");
-	assert.equal(invocation.cwd, realpathSync(cwd));
-	assert.equal(inspectCommitTransaction(cwd).status, "clean");
+	assert.throws(() => unbornInvocation(cwd, "missing-object-head"));
+	assert.equal(existsSync(transactionStateRoot(cwd)), false, "no transaction state root is written for a missing-object HEAD");
+	const inspection = inspectCommitTransaction(cwd);
+	assert.equal(inspection.status, "corrupted", "a missing-object HEAD is repository corruption, not a clean or unborn repo");
+	assert.ok(typeof inspection.reason === "string" && inspection.reason.length > 0, "inspection reason is present and actionable");
 });
 
 test("resolveHead propagates a probe timeout instead of masking it as an unborn HEAD", (t) => {

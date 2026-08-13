@@ -779,13 +779,19 @@ function materializeCandidateView(request: CreateCandidateViewRequest, executor:
 		if (!committedOnly) git(contributorRoot, ["add", "-A"], environment, executor);
 		const candidateTree = git(contributorRoot, ["write-tree"], environment, executor);
 		const root = join(parent, randomUUID());
-		// An unborn repository has no commit to detach a worktree at. addUnbornWorktree
-		// creates an orphan worktree (unborn branch, no commit, no ref) to host the
-		// materialized candidate tree without a phantom commit, with a fallback for
-		// Git versions older than 2.42 that do not support --orphan.
-		if (unborn) addUnbornWorktree(contributorRoot, root, `gentle-ai-candidate-${randomUUID()}`, process.env, executor);
-		else git(contributorRoot, ["worktree", "add", "--detach", "--no-checkout", root, candidateCommit.commit], process.env, executor);
+		// The worktree is created under the same try/catch cleanup boundary as
+		// the read-tree materialization that follows. addUnbornWorktree's
+		// fallback path can register a worktree with `worktree add` and then
+		// fail on a later step (for example `symbolic-ref`); moving creation
+		// here ensures any such partial registration is removed by the catch
+		// below instead of leaking a registered/admin worktree and directory.
 		try {
+			// An unborn repository has no commit to detach a worktree at. addUnbornWorktree
+			// creates an orphan worktree (unborn branch, no commit, no ref) to host the
+			// materialized candidate tree without a phantom commit, with a fallback for
+			// Git versions older than 2.42 that do not support --orphan.
+			if (unborn) addUnbornWorktree(contributorRoot, root, `gentle-ai-candidate-${randomUUID()}`, process.env, executor);
+			else git(contributorRoot, ["worktree", "add", "--detach", "--no-checkout", root, candidateCommit.commit], process.env, executor);
 			git(root, ["read-tree", candidateTree], process.env, executor);
 			const tree = parseTree(root, candidateTree, executor);
 			checkoutMaterializedEntries(root, tree.entries, executor);

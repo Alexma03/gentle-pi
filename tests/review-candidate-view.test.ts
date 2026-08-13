@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1448,4 +1448,27 @@ test("candidate view unborn worktree propagates a non-usage --orphan failure ins
 	assert.equal((failure as CandidateViewError).reason, "candidate-view-git-failure");
 	assert.ok(!calls.some((args) => args[0] === "commit-tree"), "the fallback must not create a temporary commit");
 	assert.ok(!calls.some((args) => args[0] === "worktree" && args.includes("--detach")), "the fallback must not add a detached worktree");
+});
+
+test("candidate view cleans up a partially registered unborn fallback worktree when a later step fails", (t) => {
+	const contributorRoot = unbornRepository(t);
+	// Force the --orphan path to take the pre-2.42 fallback, then fail the
+	// symbolic-ref rewrite that follows `worktree add --no-checkout --detach`.
+	// The worktree is already registered with Git at that point; the cleanup
+	// boundary must remove both the registered worktree and its directory.
+	const executor: CandidateGitExecutor = (file, args, options) => {
+		if (args[0] === "worktree" && args[1] === "add" && args.includes("--orphan")) throw Object.assign(new Error("unknown option"), { status: 129 });
+		if (args[0] === "symbolic-ref") throw Object.assign(new Error("symbolic-ref failed"), { status: 1 });
+		return execFileSync(file, args, options);
+	};
+	let failure: unknown;
+	try { new CandidateViewRegistry(executor).create({ contributorRoot }); } catch (error) { failure = error; }
+	assert.ok(failure instanceof CandidateViewError, "the symbolic-ref failure must propagate");
+	assert.equal((failure as CandidateViewError).reason, "candidate-view-git-failure");
+	// No registered/admin worktree remains.
+	assert.equal(git(contributorRoot, "worktree", "list").split("\n").filter((line) => line.includes("gentle-ai-candidate")).length, 0);
+	// No candidate directory remains under the candidate-view parent.
+	const parent = join(realpathSync(git(contributorRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")), "gentle-ai", "candidate-views");
+	const leftover = existsSync(parent) ? readdirSync(parent).filter((entry) => lstatSync(join(parent, entry)).isDirectory()) : [];
+	assert.deepEqual(leftover, [], "no candidate directory remains after a partial unborn fallback failure");
 });
