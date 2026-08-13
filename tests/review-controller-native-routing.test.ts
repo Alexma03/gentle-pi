@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -4834,8 +4834,12 @@ test("large repository end-to-end: tiny candidate diff reaches START, reviewer d
 		},
 		targetStatus: async (request) => {
 			if (request.lineageId === undefined) return candidateStartTargetStatus(request);
-			const candidate = candidateViews.resolveForFinalize(request.lineageId);
-			return targetStatusFixture({ lineageId, baseTree: candidate.baseTree, currentCandidateTree: candidate.candidateTree, paths: candidate.paths });
+			const statusCandidate = new CandidateViewRegistry().create({ contributorRoot: request.cwd, baseRef: baseCommit });
+			try {
+				return targetStatusFixture({ lineageId, baseTree: statusCandidate.baseTree, currentCandidateTree: statusCandidate.candidateTree, paths: statusCandidate.paths });
+			} finally {
+				statusCandidate.cleanup();
+			}
 		},
 	}), undefined, undefined, undefined, candidateViews);
 
@@ -4849,6 +4853,9 @@ test("large repository end-to-end: tiny candidate diff reaches START, reviewer d
 		assert.equal(frozen.baseTree, baseTree);
 		assert.equal(frozen.candidateTree, candidateTree);
 		assert.deepEqual(frozen.paths, ["unchanged-0000.txt"]);
+		assert.equal(readdirSync(frozen.root).filter((entry) => entry !== ".git").length, largeCount);
+		assert.equal(readFileSync(join(frozen.root, "unchanged-0000.txt"), "utf8"), "candidate\n");
+		assert.equal(readFileSync(join(frozen.root, "unchanged-4999.txt"), "utf8"), "base\n");
 
 		// Reviewer dispatch injects the controller-owned candidate view carrying only the
 		// tiny changed scope — never the 5000-entry unchanged repository bulk.
