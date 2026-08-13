@@ -1700,6 +1700,44 @@ async function run() {
 		const restoredAgent = await readFile(join(modelsCwd, ".pi", "agents", "sdd-apply.md"), "utf8");
 		assert.match(restoredAgent, /model: restore\/provider/);
 		assert.match(restoredAgent, /thinking: high/);
+
+		// issue #286: `thinking: "max"` must survive save normalization and
+		// reach both subagents.json (effort) and agent frontmatter (thinking).
+		ctx.ui.custom = () =>
+			Promise.resolve({
+				type: "save",
+				config: { "sdd-apply": { model: "openai/gpt-5", thinking: "max" } },
+			});
+		await commands.get("gentle:models").handler("", ctx);
+		const maxSavedConfig = JSON.parse(await readFile(globalModelsPath, "utf8"));
+		assert.equal(maxSavedConfig["sdd-apply"].thinking, "max");
+		const maxSubagents = JSON.parse(
+			await readFile(join(modelsCwd, ".pi", "subagents.json"), "utf8"),
+		);
+		assert.equal(maxSubagents.model_profiles["sdd-apply"].effort, "max");
+		const maxApplyAgent = await readFile(
+			join(modelsCwd, ".pi", "agents", "sdd-apply.md"),
+			"utf8",
+		);
+		assert.match(maxApplyAgent, /thinking: max/);
+
+		// issue #286: effort picker must offer `max` after `xhigh` and save it.
+		let maxPickerCalls = 0;
+		ctx.ui.custom = (factory) =>
+			new Promise((resolve) => {
+				maxPickerCalls += 1;
+				const panel = factory(null, null, null, resolve);
+				if (maxPickerCalls === 1) {
+					panel.handleInput(kittyE); // open effort picker (set-all row)
+					for (let i = 0; i < 7; i++) panel.handleInput("j"); // max
+					panel.handleInput("\r");
+					panel.handleInput("\u0013"); // ctrl+s saves the draft
+					return;
+				}
+			});
+		await commands.get("gentle:models").handler("", ctx);
+		const pickerMaxConfig = JSON.parse(await readFile(globalModelsPath, "utf8"));
+		assert.equal(pickerMaxConfig["sdd-apply"].thinking, "max");
 	} finally {
 		await rm(modelsCwd, { recursive: true, force: true });
 		await rm(globalModelsPath, { force: true });

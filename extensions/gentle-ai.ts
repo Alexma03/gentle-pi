@@ -556,7 +556,16 @@ const CORE_MODEL_AGENT_NAMES = [
 ] as const;
 const CORE_MODEL_AGENT_NAME_SET = new Set<string>(CORE_MODEL_AGENT_NAMES);
 
-type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+const THINKING_LEVELS = [
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const;
+type ThinkingLevel = (typeof THINKING_LEVELS)[number];
 interface AgentRoutingEntry {
 	model?: string;
 	thinking?: ThinkingLevel;
@@ -580,12 +589,7 @@ const CUSTOM_MODEL = "Custom model id";
 const INHERIT_THINKING = "Inherit effort";
 const THINKING_OPTIONS: (ThinkingLevel | typeof INHERIT_THINKING)[] = [
 	INHERIT_THINKING,
-	"off",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
+	...THINKING_LEVELS,
 ];
 
 const MODEL_CONTROL_OPTIONS = [
@@ -805,12 +809,8 @@ function writePersonaMode(cwd: string, mode: PersonaMode): string[] {
 
 function isThinkingLevel(value: unknown): value is ThinkingLevel {
 	return (
-		value === "off" ||
-		value === "minimal" ||
-		value === "low" ||
-		value === "medium" ||
-		value === "high" ||
-		value === "xhigh"
+		typeof value === "string" &&
+		(THINKING_LEVELS as readonly string[]).includes(value)
 	);
 }
 
