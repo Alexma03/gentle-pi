@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -124,15 +125,70 @@ test("provider ownership: no Pi TypeScript runtime parses Key Learnings or invok
 	for (const root of roots) {
 		const absRoot = join(ROOT, root);
 		if (!existsSync(absRoot)) continue;
-		for (const entry of readdirSync(absRoot, { withFileTypes: true })) {
-			if (!entry.isFile() || !/\.(ts|mjs)$/.test(entry.name)) continue;
-			const text = readFileSync(join(absRoot, entry.name), "utf8");
+		for (const file of listCodeFiles(absRoot)) {
+			const text = readFileSync(file, "utf8");
 			for (const [label, regex] of forbidden) {
-				if (regex.test(text)) failures.push(`${root}/${entry.name}: ${label}`);
+				if (regex.test(text)) failures.push(`${relative(ROOT, file)}: ${label}`);
 			}
 		}
 	}
 	assert.deepEqual(failures, [], "Pi must not parse Key Learnings or invoke passive-capture tools");
+});
+
+// Recursive walker over a provider root. Replaces the previous direct-children
+// scan so nested `.ts`/`.mjs` runtime code cannot evade the ownership guard.
+// Directories are recursed; only regular `.ts`/`.mjs` files are yielded;
+// symlinks (file or directory) are never followed, preventing loops and
+// external traversal. Output is sorted for deterministic failure messages.
+// Fail-closed: traversal/read errors propagate so a forbidden file under an
+// unreadable directory cannot silently evade the guard.
+function listCodeFiles(rootDir: string): string[] {
+	const out: string[] = [];
+	const stack: string[] = [rootDir];
+	while (stack.length > 0) {
+		const dir = stack.pop()!;
+		for (const e of readdirSync(dir, { withFileTypes: true })) {
+			if (e.isSymbolicLink()) continue;
+			const full = join(dir, e.name);
+			if (e.isDirectory()) stack.push(full);
+			else if (e.isFile() && /\.(ts|mjs)$/.test(e.name)) out.push(full);
+		}
+	}
+	return out.sort();
+}
+
+test("listCodeFiles recurses nested code, ignores non-code files, and skips symlinks", () => {
+	const tmp = mkdtempSync(join(tmpdir(), "kl-walker-"));
+	try {
+		const nested = join(tmp, "a", "b");
+		mkdirSync(nested, { recursive: true });
+		writeFileSync(join(nested, "leak.ts"), "Key Learnings leak\n");
+		writeFileSync(join(tmp, "a", "leak.mjs"), "key_learnings\n");
+		writeFileSync(join(tmp, "a", "notes.md"), "Key Learnings in prose\n");
+		writeFileSync(join(tmp, "a", "data.json"), '{"k":"Key Learnings"}\n');
+		const files = listCodeFiles(tmp);
+		assert.ok(files.some((f) => f.endsWith("leak.ts")), "nested .ts must be discovered");
+		assert.ok(files.some((f) => f.endsWith("leak.mjs")), "shallow .mjs must be discovered");
+		assert.ok(!files.some((f) => f.endsWith(".md")), "non-code .md must be ignored");
+		assert.ok(!files.some((f) => f.endsWith(".json")), "non-code .json must be ignored");
+		// Symlink controls: skip when the platform rejects symlink creation.
+		const dirLink = join(tmp, "link-dir");
+		const fileLink = join(tmp, "link-file.ts");
+		let symlinksSupported = true;
+		try {
+			symlinkSync(join(tmp, "a"), dirLink, "dir");
+			symlinkSync(join(tmp, "a", "leak.mjs"), fileLink, "file");
+		} catch {
+			symlinksSupported = false;
+		}
+		if (symlinksSupported) {
+			const walked = listCodeFiles(tmp);
+			assert.ok(!walked.includes(fileLink), "symlinked .ts file must not be followed");
+			assert.ok(!walked.some((f) => f === dirLink || f.startsWith(dirLink + sep)), "symlinked directory must not be traversed");
+		}
+	} finally {
+		rmSync(tmp, { recursive: true, force: true });
+	}
 });
 
 test("strict review and Judgment Day agents do not gain Key Learnings or trailing-prose instruction", () => {
