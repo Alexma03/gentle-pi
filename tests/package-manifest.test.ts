@@ -1142,7 +1142,7 @@ test("v2.1.2 release package and runtime stop before publication", () => {
 	assert.equal(packageJson.version, "2.1.2", "the release manifest must remain explicitly pinned to v2.1.2");
 	assert.equal(
 		packageJson.scripts?.test,
-		"node --experimental-strip-types --test tests/*.test.ts && pnpm run test:harness",
+		"node --experimental-strip-types --test tests/*.test.ts && pnpm run check:provider-contract && pnpm run test:harness",
 	);
 	assert.ok(packageJson.files?.includes("assets/"));
 	assert.ok(packageJson.files?.includes("contracts/"));
