@@ -52,6 +52,22 @@ test("contracts/ walk fails on a contractHashes entry that is missing from disk"
 	}
 });
 
+test("contracts/ walk excludes the provider contract mirror subtree, whose bytes are pinned by its own lock", () => {
+	const fixtureRoot = makeFixtureRoot();
+	try {
+		mkdirSync(join(fixtureRoot, "contracts/review-provider-contract-mirror/v1.1.0/bundle"), { recursive: true });
+		writeFileSync(join(fixtureRoot, "contracts/review-provider-contract-mirror/provider-contract.lock.json"), "{}\n");
+		writeFileSync(join(fixtureRoot, "contracts/review-provider-contract-mirror/v1.1.0/bundle/README.md"), "mirror\n");
+
+		const { unlistedOnDisk, listedButMissing } = reconcileContractsOnDisk(fixtureRoot, {});
+
+		assert.deepEqual(unlistedOnDisk, []);
+		assert.deepEqual(listedButMissing, []);
+	} finally {
+		rmSync(fixtureRoot, { recursive: true, force: true });
+	}
+});
+
 test("sources <-> runtime/*.mjs walk fails when a generated runtime file is absent from the generator's sources array", () => {
 	const fixtureRoot = makeFixtureRoot();
 	try {
