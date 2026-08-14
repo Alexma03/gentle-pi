@@ -1843,6 +1843,47 @@ test("native START binds an acknowledged committed range and native identity to 
 	}
 });
 
+test("native START binds a default dirty-inclusive candidate on an unborn repository against Git's empty tree", async (t) => {
+	// Unborn repository: symbolic HEAD, no commits, staged + untracked content.
+	// The default targetStatus helper builds a REAL candidate view from this
+	// repo, so this exercises the real resolveCandidateBase/materializeCandidate
+	// path on an unborn repository, not a synthetic adapter stub.
+	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-native-controller-unborn-"));
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	execFileSync("git", ["init", "-b", "main"], { cwd });
+	writeFileSync(join(cwd, "staged.txt"), "first staged\n");
+	execFileSync("git", ["add", "staged.txt"], { cwd });
+	writeFileSync(join(cwd, "untracked.ts"), "export const untracked = true;\n");
+	const emptyTree = execFileSync("git", ["-C", cwd, "mktree"], { encoding: "utf8", input: "" }).trim();
+	const candidateViews = new CandidateViewRegistry();
+	const requests: Parameters<NativeReviewCli["start"]>[0][] = [];
+	const { controller } = runtime(fakeNative({
+		start: async (request) => {
+			requests.push(request);
+			return { lineageId: "unborn-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}), undefined, undefined, undefined, candidateViews);
+	const started = await controller.execute("unborn-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const view = candidateViews.resolveForLens("unborn-lineage", "review-reliability");
+	try {
+		// The unborn candidate base is Git's empty tree, not a phantom commit.
+		assert.equal(view.baseTree, emptyTree);
+		assert.equal(view.baseCommit, "HEAD");
+		assert.equal(view.committedOnly, false);
+		// Staged and untracked workspace content is preserved in the candidate.
+		assert.deepEqual(view.paths, ["staged.txt", "untracked.ts"]);
+		// No baseRef is sent to native START: the unborn default uses the
+		// workspace projection only, exactly as the provider expects.
+		assert.deepEqual(requests, [{ cwd, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" }]);
+		const actorBinding = (started.details as { actor_binding: { workspace_root: string; candidate_root: string; candidate_tree: string; candidate_paths: readonly string[] } }).actor_binding;
+		assert.equal(actorBinding.workspace_root, cwd);
+		assert.equal(actorBinding.candidate_tree, view.candidateTree);
+		assert.deepEqual(actorBinding.candidate_paths, view.paths);
+	} finally {
+		view.cleanup();
+	}
+});
+
 test("native START fails closed before mutation when the workspace target and immutable candidate view differ", async (t) => {
 	const cwd = repository(t);
 	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
