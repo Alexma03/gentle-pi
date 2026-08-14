@@ -11,7 +11,7 @@ import {
 	type CompactTargetedValidationInput,
 } from "./review-compact.ts";
 import { REVIEW_LENS } from "./review-triggers.ts";
-import { canonicalJsonV1, domainHashV1 } from "./review-canonical.ts";
+import { domainHashV1 } from "./review-canonical.ts";
 import { normalizeRefuterBatch, type RefuterBatch } from "./review-refuter-adapter.ts";
 import { CORRECTION_OUTCOMES, type CorrectionOutcome } from "./review-correction-lifecycle.ts";
 
@@ -28,13 +28,6 @@ export class CompactReviewContractError extends Error {
 		this.area = area;
 		this.code = code;
 	}
-}
-
-export interface CompactStartContractInput {
-	cwd: string;
-	lineageId?: string;
-	policyHash: string;
-	projection?: { kind: "complete" };
 }
 
 export interface CompactFinalizeContractInput {
@@ -59,22 +52,6 @@ export interface NativeRefuterRequestInput {
 export interface NativeRefuterRequest {
 	request_hash: string;
 	findings: CompactFinding[];
-}
-
-export interface NativeValidationRequestInput {
-	lineageId: string;
-	candidateTree: string;
-	state: unknown;
-}
-
-export interface NativeValidationRequest {
-	request_hash: string;
-	lineage_id: string;
-	blocking_finding_ids: string[];
-	fix_finding_ids: string[];
-	correction_candidate_tree: string;
-	correction_identity: string;
-	validation_criteria: readonly string[];
 }
 
 function fail(area: string, code: string, message: string): never {
@@ -225,45 +202,6 @@ export function deriveNativeRefuterRequest(input: NativeRefuterRequestInput): Na
 	};
 }
 
-export function deriveNativeValidationRequest(input: NativeValidationRequestInput): NativeValidationRequest {
-	const state = record(input.state, "review/finalize.validation-request");
-	if (string(state.lineage_id, "review/finalize.validation-request.lineage_id") !== input.lineageId || state.state !== "correction_required") fail("review/finalize.validation-request", "state", "requires the authoritative correction-required lineage");
-	const initial = record(state.initial_snapshot, "review/finalize.validation-request.initial_snapshot");
-	const initialCandidateTree = string(initial.candidate_tree, "review/finalize.validation-request.initial_snapshot.candidate_tree");
-	const fix_finding_ids = strings(state.fix_finding_ids, "review/finalize.validation-request.fix_finding_ids");
-	if (!Array.isArray(state.findings)) fail("review/finalize.validation-request.findings", "type", "must be an array");
-	const outcomes = state.outcomes === undefined ? undefined : record(state.outcomes, "review/finalize.validation-request.outcomes");
-	const blocking_finding_ids = state.findings.flatMap((finding, index) => {
-		const row = record(finding, `review/finalize.validation-request.findings[${index}]`);
-		if (row.severity !== COMPACT_SEVERITY.BLOCKER && row.severity !== COMPACT_SEVERITY.CRITICAL) return [];
-		const id = string(row.id, `review/finalize.validation-request.findings[${index}].id`);
-		// Mirror native FINALIZE semantics (#171): only corroborated severe findings
-		// block correction validation. Severe findings classified pre-existing or
-		// base-only carry the non-blocking `info` outcome, are routed to follow-ups,
-		// and must stay inert in the targeted-validation request.
-		if (outcomes === undefined) return [id];
-		const outcome = outcomes[id] === undefined ? undefined : enumValue(outcomes[id], COMPACT_FINDING_OUTCOME, `review/finalize.validation-request.outcomes.${id}`);
-		return outcome === COMPACT_FINDING_OUTCOME.CORROBORATED ? [id] : [];
-	});
-	if (canonicalJsonV1(fix_finding_ids.toSorted()) !== canonicalJsonV1(blocking_finding_ids.toSorted())) fail("review/finalize.validation-request", "finding-ids", "fix IDs must exactly match frozen blocking findings");
-	const correction_identity = domainHashV1("compact-correction-identity", { initial_candidate_tree: initialCandidateTree, correction_candidate_tree: input.candidateTree });
-	const validation_criteria = ["original_criteria", "correction_regression", "follow_ups"] as const;
-	return { lineage_id: input.lineageId, blocking_finding_ids, fix_finding_ids, correction_candidate_tree: input.candidateTree, correction_identity, validation_criteria, request_hash: domainHashV1("compact-validation-request", { lineage_id: input.lineageId, blocking_finding_ids, fix_finding_ids, correction_identity, validation_criteria }) };
-}
-
-export function parseCompactStartInput(value: unknown): CompactStartContractInput {
-	const input = exact(value, "review/start", ["cwd", "policyHash"], ["lineageId", "projection"]);
-	const policyHash = string(input.policyHash, "review/start.policyHash");
-	if (!DIGEST.test(policyHash)) fail("review/start.policyHash", "digest", "is malformed");
-	let projection: { kind: "complete" } | undefined;
-	if (input.projection !== undefined) {
-		const raw = exact(input.projection, "review/start.projection", ["kind"]);
-		if (raw.kind !== "complete") fail("review/start.projection.kind", "enum", "must be complete");
-		projection = { kind: "complete" };
-	}
-	return { cwd: string(input.cwd, "review/start.cwd"), ...(optionalLineage(input.lineageId, "review/start.lineageId") === undefined ? {} : { lineageId: optionalLineage(input.lineageId, "review/start.lineageId")! }), policyHash, ...(projection === undefined ? {} : { projection }) };
-}
-
 function parseCompactFinalizeInputValue(value: unknown, preserveFinalEvidence: boolean): CompactFinalizeContractInput {
 	const input = exact(value, "review/finalize", ["cwd"], ["lineageId", "review_result", "correction_line_forecast", "validation_proof", "validation", "final_evidence", "final_verification_passed", "final_verification_outcome", "refuter_batch"]);
 	const outcomeFields = Number(input.final_verification_passed !== undefined) + Number(input.final_verification_outcome !== undefined);
@@ -290,10 +228,6 @@ function parseCompactFinalizeInputValue(value: unknown, preserveFinalEvidence: b
 		}
 	}
 	return { cwd: string(input.cwd, "review/finalize.cwd"), ...(optionalLineage(input.lineageId, "review/finalize.lineageId") === undefined ? {} : { lineageId: optionalLineage(input.lineageId, "review/finalize.lineageId")! }), ...(input.review_result === undefined ? {} : { review_result: parseReviewResult(input.review_result, "review/finalize.review_result") }), ...(correction_line_forecast === undefined ? {} : { correction_line_forecast }), ...(input.validation_proof === undefined ? {} : { validation_proof: parseValidationProof(input.validation_proof, "review/finalize.validation_proof") }), ...(input.validation === undefined ? {} : { validation: parseValidation(input.validation, "review/finalize.validation") }), ...(final_evidence === undefined ? {} : { final_evidence }), ...(input.final_verification_passed === undefined ? {} : { final_verification_passed: input.final_verification_passed }), ...(final_verification_outcome === undefined ? {} : { final_verification_outcome }), ...(input.refuter_batch === undefined ? {} : { refuter_batch: input.refuter_batch }) };
-}
-
-export function parseCompactFinalizeInput(value: unknown): CompactFinalizeContractInput {
-	return parseCompactFinalizeInputValue(value, false);
 }
 
 export function parseNativeCompactFinalizeInput(value: unknown): CompactFinalizeContractInput & { refuter_batch?: RefuterBatch } {

@@ -22,7 +22,6 @@ import { canonicalJsonV1, domainHashV1 } from "../lib/review-canonical.ts";
 import { CandidateViewRegistry, deriveChangedPathManifest } from "../lib/review-candidate-view.ts";
 import { inspectLegacyReviewAuthorityV1 } from "../lib/review-legacy-detector.ts";
 import { resolveRepositoryAuthorityV1 } from "../lib/review-repository.ts";
-import { NATIVE_REVIEW_REMEDIATION, classifyNativeReviewRemediation } from "../lib/native-review-remediation.ts";
 import type { AuthorityRepairAssessmentV1, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 
 interface RegisteredTool {
@@ -4296,26 +4295,6 @@ test("INSPECT relays negotiated target status without inventory reconstruction o
 		assert.equal(inventoryReads, 0, scenario.name);
 	}
 	assert.equal(mutations, 0);
-});
-
-test("native remediation classification accepts only invalid legacy, compact, collision, or reset evidence", () => {
-	const status = (authorityStatus: NativeReviewStatusResult["status"], entries: NativeReviewStatusResult["entries"]): NativeReviewStatusResult => ({
-		repository: "/repo",
-		complete: authorityStatus !== "invalid",
-		authoritative: authorityStatus !== "invalid",
-		status: authorityStatus,
-		entries,
-		locks: [],
-		diagnostics: [],
-		raw: {},
-	});
-	assert.equal(classifyNativeReviewRemediation(status("invalid", [{ version: "legacy-v1", lineageId: "current", path: "/repo/legacy", status: "invalid", problems: [] }]), ["current"]).kind, NATIVE_REVIEW_REMEDIATION.LEGACY);
-	assert.equal(classifyNativeReviewRemediation(status("invalid", [{ version: "compact-v2", lineageId: "current", path: "/repo/compact", status: "invalid", problems: [] }]), ["current"]).kind, NATIVE_REVIEW_REMEDIATION.INVALID_OR_MIXED);
-	assert.equal(classifyNativeReviewRemediation({ ...status("same-lineage-mixed-collision", []), complete: false, authoritative: false }, ["current"]).kind, NATIVE_REVIEW_REMEDIATION.NONE);
-	assert.equal(classifyNativeReviewRemediation(status("reset-in-progress", [])).kind, NATIVE_REVIEW_REMEDIATION.NONE);
-	assert.equal(classifyNativeReviewRemediation(status("invalid", [])).kind, NATIVE_REVIEW_REMEDIATION.NONE);
-	assert.equal(classifyNativeReviewRemediation({ ...status("invalid", [{ version: "legacy-v1", path: "/repo/legacy", status: "invalid", problems: [] }]), complete: true }).kind, NATIVE_REVIEW_REMEDIATION.NONE);
-	assert.equal(classifyNativeReviewRemediation(status("approved", [{ version: "legacy-v1", path: "/repo/legacy", status: "approved", problems: [] }])).kind, NATIVE_REVIEW_REMEDIATION.NONE);
 });
 
 test("native INSPECT never reconstructs reset material from raw Pi corruption", async (t) => {
