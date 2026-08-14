@@ -791,6 +791,27 @@ test("candidate-scoped decline creates no authority and the next candidate asks 
 	assert.deepEqual(answers, ["declined", "declined"]);
 });
 
+// Upstream gentle-ai.review-integration.consent/v3 consent is per-candidate:
+// the clone-local latch records only that the one-time question was already
+// put to the user, never that any later candidate is pre-approved. A fresh
+// START with the latch already recorded must still relay the complete
+// blocking envelope, and only an explicit ANSWER_CONSENT may resolve it.
+test("a pre-recorded consent latch never suppresses a later candidate's consent envelope or auto-answers it", async (t) => {
+	const cwd = repository(t);
+	recordReviewConsentLatch(cwd);
+	assert.equal(readReviewConsentLatch(cwd), true);
+	const { native, answers, startRequests } = relayedConsentNative(cwd);
+	const { controller } = runtime(native);
+	const blocked = await blockedConsent(controller, "consent-latched-fresh-start", headlessContext(cwd));
+	assert.deepEqual(blocked.consent, candidateConsent(cwd).raw, "the full consent envelope is relayed despite the pre-recorded latch");
+	assert.deepEqual(answers, [], "the latch must never auto-answer a later candidate's consent");
+	assert.equal(blocked.lineage_created, false);
+	assert.equal(startRequests.length, 1);
+	const result = await answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd));
+	assert.deepEqual(answers, ["granted"], "explicit ANSWER_CONSENT is still required to proceed");
+	assert.ok(result.result);
+});
+
 test("low-risk zero-lens START remains silent", async (t) => {
 	const cwd = repository(t);
 	const { native } = fakeOrganicNative({ riskEvidence: undefined, lensesRequired: false });
