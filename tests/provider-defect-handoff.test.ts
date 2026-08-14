@@ -6,11 +6,13 @@ import test from "node:test";
 // ---------------------------------------------------------------------------
 // Provider Defect Handoff — structural readback tests (issue #256, track 5)
 //
-// Pins the port of Gentle AI's v2.4.0-rc.3 provider-defect handoff consent
-// contract (Gentleman-Programming/gentle-ai#2060) into Pi's lazy-loaded
-// orchestrator assets. The contract is a prerelease (not in v2.3.0 stable).
-// These tests assert structural presence and ordering of the contract's key
-// elements; they do not execute any lifecycle command.
+// Pins the port of Gentle AI's v2.4.0-rc.8 provider-defect handoff consent
+// contract (the gentle-ai.review-integration.consent/v3 envelope; canonical
+// source internal/assets/generic/sdd-orchestrator.md at tag v2.4.0-rc.8 of
+// Gentleman-Programming/gentle-ai) into Pi's lazy-loaded orchestrator assets.
+// The contract is a prerelease (not in v2.3.0 stable). These tests assert
+// structural presence, ordering, and the removal of stale rc.3-era rules; they
+// do not execute any lifecycle command.
 // ---------------------------------------------------------------------------
 
 const REPO_ROOT = join(import.meta.dirname, "..");
@@ -22,6 +24,35 @@ const SDD_WORKFLOW = readFileSync(SDD_WORKFLOW_PATH, "utf8");
 
 const CHOICE_TOKENS = ["report_and_continue", "continue_without_reporting", "stop_here"] as const;
 
+// rc.8 choice-1 ordering mirrors gentle-ai v2.4.0-rc.8 blocking_prompt_contract_test.go; asserted only where phrases exist.
+function assertChoice1Order(haystack: string, anchors: readonly string[], surface: string): void {
+	const positions = anchors.map((p) => haystack.indexOf(p));
+	anchors.forEach((p, i) => assert.notEqual(positions[i], -1, `${surface}: missing rc.8 choice-1 anchor: ${JSON.stringify(p)}`));
+	for (let i = 1; i < positions.length; i++) {
+		assert.ok(positions[i - 1] < positions[i], `${surface}: rc.8 anchor ${i} must precede ${i + 1}; got ${positions}`);
+	}
+}
+
+const countOccurrences = (haystack: string, needle: string): number => haystack.split(needle).length - 1;
+
+const DELEGATION_CHOICE1_ORDER = [
+	"complete a definitive lookup across open and closed issues for an equivalent defect",
+	"derive its evidence channel only from its build string",
+	"If the equivalent has no verifiable relevant published fix, add exactly one occurrence comment",
+	"A fix published only to the other evidence channel is not a relevant published fix",
+	"If the installed build predates that release, recommend installing the published fix",
+	"perform no further GitHub mutation and no blind retry",
+	"Confirmed creation requires the GitHub create operation to confirm a newly-created issue identity",
+	"execute the shared candidate-scoped continuation below",
+] as const;
+
+const SDD_CHOICE1_ORDER = [
+	"Complete a definitive lookup across open and closed issues",
+	"Derive the evidence channel only from the installed build string",
+	"If the installed build predates the relevant published fix",
+	"perform no further GitHub mutation and no blind retry",
+] as const;
+
 // ---------------------------------------------------------------------------
 // 1 — assets/orchestrator-delegation.md structural presence
 // ---------------------------------------------------------------------------
@@ -30,22 +61,23 @@ test("orchestrator-delegation.md carries the provider defect handoff section", (
 	assert.match(DELEGATION, /## Provider Defect Handoff/);
 });
 
-test("orchestrator-delegation.md references the v2.4.0-rc.3 prerelease contract", () => {
-	assert.match(DELEGATION, /v2\.4\.0-rc\.3/);
+test("orchestrator-delegation.md references the v2.4.0-rc.8 prerelease contract", () => {
+	assert.match(DELEGATION, /v2\.4\.0-rc\.8/);
 	assert.match(DELEGATION, /prerelease/i);
+	assert.match(DELEGATION, /gentle-ai\.review-integration\.consent\/v3/);
 });
 
 test("orchestrator-delegation.md lists all three semantic choice tokens", () => {
 	for (const token of CHOICE_TOKENS) {
 		assert.ok(
-			DELEGATION.includes(token),
+			DELEGATION.includes(`\`${token}\``),
 			`orchestrator-delegation.md missing semantic choice token: ${token}`,
 		);
 	}
 });
 
 test("orchestrator-delegation.md orders the three choices: report_and_continue, continue_without_reporting, stop_here", () => {
-	const positions = CHOICE_TOKENS.map((token) => DELEGATION.indexOf(token));
+	const positions = CHOICE_TOKENS.map((token) => DELEGATION.indexOf(`\`${token}\``));
 	for (const pos of positions) {
 		assert.notEqual(pos, -1, "a choice token is missing; ordering assertion is meaningless");
 	}
@@ -59,72 +91,166 @@ test("orchestrator-delegation.md orders the three choices: report_and_continue, 
 	);
 });
 
+test("orchestrator-delegation.md preserves the rc.8 choice-1 sub-bullet ordering", () => {
+	assertChoice1Order(DELEGATION, DELEGATION_CHOICE1_ORDER, "orchestrator-delegation.md");
+});
+
+test("orchestrator-delegation.md states the admissibility-before-relay rule", () => {
+	assert.match(DELEGATION, /Before losslessly relaying any blocking choice envelope, classify its semantic admissibility/i);
+	assert.match(DELEGATION, /The test is what produced the failure, not what the work was doing when it happened/i);
+});
+
 test("orchestrator-delegation.md states the never-offer-to-repair rule", () => {
 	assert.match(
 		DELEGATION,
-		/Never offer to switch to, inspect, modify, or directly repair the Gentle AI repository/i,
+		/never offer to switch to, inspect, modify, or directly repair the Gentle AI repository/i,
 	);
+	assert.match(DELEGATION, /reject it as semantically inadmissible and issue this separate orchestrator-owned handoff envelope/i);
 });
 
 test("orchestrator-delegation.md states the consent requirement", () => {
-	assert.match(DELEGATION, /Ask the user first[\s\S]*explicit consent to report/i);
-	assert.match(DELEGATION, /single-select/i);
+	assert.match(DELEGATION, /Ask the user first, in the active orchestrator conversation language/i);
+	assert.match(DELEGATION, /for explicit consent to report the apparent defect/i);
+	assert.match(DELEGATION, /one single-select blocking envelope with exactly three semantic choices in this order/i);
 });
 
-test("orchestrator-delegation.md states the privacy scrub requirement", () => {
-	assert.match(DELEGATION, /privacy-scrubbed/i);
-	assert.match(DELEGATION, /final privacy scan/i);
+test("orchestrator-delegation.md states the privacy scrub requirement and ordering", () => {
+	assert.match(DELEGATION, /Immediately before the first GitHub operation, perform a final privacy scan/i);
+	assert.match(DELEGATION, /This scan precedes the definitive lookup, report creation, and occurrence comment/i);
 	assert.match(DELEGATION, /raw argv, absolute paths, private project names, usernames, hostnames, credentials, diffs, source contents, and environment values/i);
 });
 
-test("orchestrator-delegation.md states the duplicate search in Gentleman-Programming/gentle-ai", () => {
-	assert.match(DELEGATION, /Gentleman-Programming\/gentle-ai/);
-	assert.match(DELEGATION, /Search open and closed issues/i);
-	assert.match(DELEGATION, /completed duplicate lookup with a definitive result/i);
+test("orchestrator-delegation.md states the definitive lookup gate", () => {
+	assert.match(DELEGATION, /complete a definitive lookup across open and closed issues for an equivalent defect or canonical tracker/i);
+	assert.match(DELEGATION, /completed open\+closed lookup with a classifiable result; incomplete, error, or unknown is not definitive/i);
+	assert.match(DELEGATION, /Only a definitive lookup may branch to GitHub mutation/i);
 });
 
-test("orchestrator-delegation.md states the gentle-report label rule (only after confirmed creation)", () => {
-	assert.match(DELEGATION, /gentle-report/);
-	assert.match(DELEGATION, /only after a GitHub create operation confirms a newly-created issue identity/i);
+test("orchestrator-delegation.md states evidence-channel routing from installed build string", () => {
+	assert.match(DELEGATION, /derive its evidence channel only from its build string/i);
+	assert.match(DELEGATION, /recognized prerelease tags are `-rc\.` and `-main\.`; every other build is stable/i);
+	assert.match(DELEGATION, /That release is a relevant published fix only when it is in the installed build's evidence channel/i);
+	assert.match(DELEGATION, /A main-only commit, local\/source build, unmerged PR, or unsupported assertion is not published-fix evidence/i);
+});
+
+test("orchestrator-delegation.md states other-channel occurrence routing", () => {
+	assert.match(DELEGATION, /A fix published only to the other evidence channel is not a relevant published fix for this occurrence: add exactly one occurrence comment/i);
+	assert.match(DELEGATION, /note where the fix is published/i);
+	assert.match(DELEGATION, /Do not recommend switching channels; channel choice is the user's/i);
+});
+
+test("orchestrator-delegation.md states outdated-build and regression routing", () => {
+	assert.match(DELEGATION, /If the installed build predates that release, recommend installing the published fix and reproducing; do not create or comment for that occurrence yet/i);
+	assert.match(DELEGATION, /treat it as a possible regression: reproduction on a build proven to contain that fix/i);
+	assert.match(DELEGATION, /comment on a suitable canonical tracker, or create a linked regression issue when that tracker is unsuitable/i);
+	assert.match(DELEGATION, /Never reopen automatically/i);
+});
+
+test("orchestrator-delegation.md states confirmed-creation identity requirement", () => {
+	assert.match(DELEGATION, /Confirmed creation requires the GitHub create operation to confirm a newly-created issue identity\/URL/i);
 	assert.match(DELEGATION, /Never infer creation from output text alone/i);
 });
 
+test("orchestrator-delegation.md states the uncertainty continuation (decline invocation runs, not withheld)", () => {
+	assert.match(DELEGATION, /perform no further GitHub mutation and no blind retry/i);
+	assert.match(
+		DELEGATION,
+		/execute the exact captured provider-owned decline invocation exactly once, validate it, re-enter native negotiated STATUS, and resume the already-held consumer continuation/i,
+	);
+	assert.match(DELEGATION, /do not search, comment, update, or retry creation until the exact created issue identity is resolved, then use the uncertainty continuation below/i);
+});
+
 test("orchestrator-delegation.md states the exact-captured-decline-invocation rule", () => {
-	assert.match(DELEGATION, /exact captured decline invocation/i);
+	assert.match(DELEGATION, /Both continue choices execute that exact captured decline invocation exactly once/i);
+	assert.match(DELEGATION, /`choices\[answer="declined"\]\.invocation` from the `gentle-ai\.review-integration\.consent\/v3` envelope/i);
 	assert.match(
 		DELEGATION,
 		/Never synthesize the decline command, target, token, or consumer continuation from prose/i,
 	);
+	assert.match(DELEGATION, /fail closed with all consumer state preserved and do not run a substitute command/i);
+	assert.match(DELEGATION, /validate `action: "declined"`, `consent: "declined_this_candidate"`, and the exact target identity match/i);
 });
 
-test("orchestrator-delegation.md states the fail-closed rule", () => {
-	assert.match(DELEGATION, /fail closed/i);
-	assert.match(DELEGATION, /Any report ambiguity or failure is a hard stop/i);
+test("orchestrator-delegation.md states handoff scope and mode preservation", () => {
+	assert.match(DELEGATION, /Do not invoke `gentle-ai review mode disable` at clone or global scope within this handoff/i);
+	assert.match(DELEGATION, /Do not turn RDD off or on within this handoff/i);
+	assert.match(DELEGATION, /The result carries no lineage or receipt; ordinary delivery is unmanaged by the candidate choice, and the next candidate asks again/i);
 });
 
-test("orchestrator-delegation.md states the resume-only-after-released-fix rule", () => {
-	assert.match(DELEGATION, /Resume the consumer workflow only after an installed published fix/i);
-	assert.match(DELEGATION, /Never resume against unpublished code/i);
-	assert.match(DELEGATION, /release candidate/i);
+test("orchestrator-delegation.md states observed-evidence reporting", () => {
+	assert.match(DELEGATION, /Report observed evidence, not an unconfirmed root cause/i);
+	assert.match(DELEGATION, /sanitized version\/build, OS\/architecture\/client/i);
+	assert.match(DELEGATION, /bounded attempts and outcomes, failure envelopes, mutation outcome/i);
+	assert.match(DELEGATION, /expected and actual behavior, a minimal reproduction/i);
+	assert.match(DELEGATION, /safe opaque reason\/revision identifiers, and preserved-state evidence/i);
+});
+
+test("orchestrator-delegation.md states the resume route (published fix or maintainer-authorized recovery)", () => {
+	assert.match(DELEGATION, /Resume after an installed published fix or an explicit maintainer-authorized, documented native recovery or reset/i);
+	assert.match(DELEGATION, /A published prerelease or release candidate the user installed satisfies this/i);
+	assert.match(DELEGATION, /Never resume against unpublished code: a source checkout, a local build, or an unmerged pull request/i);
 });
 
 // ---------------------------------------------------------------------------
-// 2 — assets/sdd-orchestrator-workflow.md structural presence
+// 2 — Prohibited stale rc.3-era rules (must NOT survive in the handoff)
+// ---------------------------------------------------------------------------
+
+test("orchestrator-delegation.md does NOT carry the gentle-report label discipline", () => {
+	assert.equal(
+		DELEGATION.includes("gentle-report"),
+		false,
+		"the v2.4.0-rc.8 handoff removed the gentle-report label discipline; the string must not appear",
+	);
+});
+
+test("orchestrator-delegation.md does NOT make published fixes the sole resumption route", () => {
+	assert.equal(
+		DELEGATION.includes("Resume only after an installed published fix"),
+		false,
+		"rc.8 prohibits 'Resume only after an installed published fix' as the sole resumption route",
+	);
+	assert.equal(
+		DELEGATION.includes("latest version"),
+		false,
+		"rc.8 prohibits 'latest version' wording in the handoff",
+	);
+});
+
+test("orchestrator-delegation.md does NOT retain the rc.3 hard-stop that withholds the decline invocation", () => {
+	assert.equal(
+		DELEGATION.includes("Any report ambiguity or failure is a hard stop: preserve all consumer state and do not execute the decline invocation"),
+		false,
+		"rc.8 replaced the rc.3 hard-stop wedge with the uncertainty continuation that executes the decline invocation",
+	);
+});
+
+test("orchestrator-delegation.md does NOT reference the rc.3 canon", () => {
+	assert.equal(DELEGATION.includes("v2.4.0-rc.3"), false, "stale rc.3 version reference must be removed");
+	assert.equal(DELEGATION.includes("gentle-ai#2060"), false, "stale rc.3 issue reference must be removed");
+});
+
+// ---------------------------------------------------------------------------
+// 3 — assets/sdd-orchestrator-workflow.md structural presence
 // ---------------------------------------------------------------------------
 
 test("sdd-orchestrator-workflow.md carries the provider defect handoff section", () => {
 	assert.match(SDD_WORKFLOW, /## Provider Defect Handoff/);
 });
 
+test("sdd-orchestrator-workflow.md references v2.4.0-rc.8 and the consent/v3 envelope", () => {
+	assert.match(SDD_WORKFLOW, /v2\.4\.0-rc\.8/);
+	assert.match(SDD_WORKFLOW, /gentle-ai\.review-integration\.consent\/v3/);
+});
+
 test("sdd-orchestrator-workflow.md lists all three semantic choice tokens in order", () => {
 	for (const token of CHOICE_TOKENS) {
 		assert.ok(
-			SDD_WORKFLOW.includes(token),
+			SDD_WORKFLOW.includes(`\`${token}\``),
 			`sdd-orchestrator-workflow.md missing semantic choice token: ${token}`,
 		);
 	}
 
-	const positions = CHOICE_TOKENS.map((token) => SDD_WORKFLOW.indexOf(token));
+	const positions = CHOICE_TOKENS.map((token) => SDD_WORKFLOW.indexOf(`\`${token}\``));
 	for (const pos of positions) {
 		assert.notEqual(pos, -1, "a choice token is missing; ordering assertion is meaningless");
 	}
@@ -138,6 +264,10 @@ test("sdd-orchestrator-workflow.md lists all three semantic choice tokens in ord
 	);
 });
 
+test("sdd-orchestrator-workflow.md preserves the rc.8 choice-1 ordering on the concise surface", () => {
+	assertChoice1Order(SDD_WORKFLOW, SDD_CHOICE1_ORDER, "sdd-orchestrator-workflow.md");
+});
+
 test("sdd-orchestrator-workflow.md references the full contract in orchestrator-delegation.md", () => {
 	assert.match(
 		SDD_WORKFLOW,
@@ -145,25 +275,70 @@ test("sdd-orchestrator-workflow.md references the full contract in orchestrator-
 	);
 });
 
-test("sdd-orchestrator-workflow.md states the key rules concisely", () => {
+test("sdd-orchestrator-workflow.md states the rc.8 concise rules", () => {
+	// admissibility
+	assert.match(SDD_WORKFLOW, /Classify admissibility before relaying/i);
 	// never-repair
 	assert.match(
 		SDD_WORKFLOW,
 		/Never offer to switch to, inspect, modify, or directly repair the Gentle AI repository/i,
 	);
 	// consent
-	assert.match(SDD_WORKFLOW, /Ask for explicit consent/i);
+	assert.match(SDD_WORKFLOW, /Ask the user first, in the active conversation language, for explicit consent to report the apparent defect/i);
 	// privacy
 	assert.match(SDD_WORKFLOW, /Privacy scrub immediately before the first GitHub operation/i);
-	// duplicate
-	assert.match(SDD_WORKFLOW, /Duplicate search in `Gentleman-Programming\/gentle-ai`/i);
-	// label after confirmed creation
-	assert.match(SDD_WORKFLOW, /gentle-report/);
-	assert.match(SDD_WORKFLOW, /only after a GitHub create operation confirms a newly-created issue identity/i);
+	// definitive lookup
+	assert.match(SDD_WORKFLOW, /Complete a definitive lookup across open and closed issues in `Gentleman-Programming\/gentle-ai`/i);
+	// evidence channel
+	assert.match(SDD_WORKFLOW, /recognized prerelease tags are `-rc\.` and `-main\.`; every other build is stable/i);
+	assert.match(SDD_WORKFLOW, /never recommend switching channels/i);
+	// outdated + regression
+	assert.match(SDD_WORKFLOW, /If the installed build predates the relevant published fix, recommend installing it and reproducing/i);
+	assert.match(SDD_WORKFLOW, /treat it as a possible regression/i);
+	assert.match(SDD_WORKFLOW, /never reopen automatically/i);
+	// confirmed creation
+	assert.match(SDD_WORKFLOW, /Confirmed creation requires the GitHub create operation to confirm a newly-created issue identity\/URL/i);
+	// uncertainty continuation
+	assert.match(SDD_WORKFLOW, /perform no further GitHub mutation and no blind retry/i);
+	assert.match(SDD_WORKFLOW, /execute the exact captured provider-owned decline invocation exactly once, validate it, re-enter native negotiated STATUS, and resume the already-held consumer continuation/i);
 	// exact decline
-	assert.match(SDD_WORKFLOW, /exact captured decline invocation/i);
-	// fail-closed
-	assert.match(SDD_WORKFLOW, /fail closed/i);
-	// resume after fix
-	assert.match(SDD_WORKFLOW, /Resume only after an installed published fix/i);
+	assert.match(SDD_WORKFLOW, /Both continue choices execute that exact captured decline invocation exactly once/i);
+	assert.match(SDD_WORKFLOW, /never synthesize the decline command, target, token, or consumer continuation from prose/i);
+	// scope/mode
+	assert.match(SDD_WORKFLOW, /Do not invoke `gentle-ai review mode disable` at clone or global scope within this handoff/i);
+	assert.match(SDD_WORKFLOW, /Do not turn RDD off or on within this handoff/i);
+	// resume
+	assert.match(SDD_WORKFLOW, /Resume after an installed published fix or an explicit maintainer-authorized, documented native recovery or reset/i);
+	assert.match(SDD_WORKFLOW, /Never resume against unpublished code/i);
+});
+
+test("sdd-orchestrator-workflow.md does NOT carry the gentle-report label discipline", () => {
+	assert.equal(
+		SDD_WORKFLOW.includes("gentle-report"),
+		false,
+		"sdd-orchestrator-workflow.md must not reference the removed gentle-report label",
+	);
+});
+
+test("sdd-orchestrator-workflow.md does NOT make published fixes the sole resumption route", () => {
+	assert.equal(
+		SDD_WORKFLOW.includes("Resume only after an installed published fix"),
+		false,
+		"sdd-orchestrator-workflow.md must not state the prohibited sole-resumption route",
+	);
+});
+
+test("sdd-orchestrator-workflow.md does NOT retain the rc.3 hard-stop that withholds the decline invocation", () => {
+	assert.equal(
+		SDD_WORKFLOW.includes("Any report ambiguity or failure is a hard stop: preserve all consumer state and do not execute the decline invocation"),
+		false,
+		"sdd-orchestrator-workflow.md must not retain the rc.3 hard-stop wedge",
+	);
+});
+
+test("both handoff surfaces invoke `gentle-ai review mode disable` exactly once", () => {
+	for (const [name, asset] of [["orchestrator-delegation.md", DELEGATION], ["sdd-orchestrator-workflow.md", SDD_WORKFLOW]] as const) {
+		const n = countOccurrences(asset, "gentle-ai review mode disable");
+		assert.equal(n, 1, `${name} must invoke "gentle-ai review mode disable" exactly once; got ${n}`);
+	}
 });
