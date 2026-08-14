@@ -65,7 +65,7 @@ Mandatory Delegation Triggers — stop rules; once fired, delegate through the b
 6. **Long-session rule** — ~20 tool calls, 5 exploratory reads, or 2 non-mechanical edits without delegation → pause and delegate.
 7. **Review actor rule** — review lenses run only when selected by ordinary transaction start; explicit Judgment Day uses its two named judges. Lifecycle and SDD boundaries launch zero review actors.
 
-Full table, Work Routing Ladder examples/model-routing detail, Cost and Context Balance, Canonical Workflows, and Review Lens Selection detail: `{{GENTLE_PI_DELEGATION_PATH}}`.
+Full table, Work Routing Ladder examples/model-routing detail, Cost and Context Balance, Canonical Workflows, Review Lens Selection, and the mirrored gentle-ai canon (blocking-prompt relays + defect handoff, language, delegation, native checking, review execution + stop table): `{{GENTLE_PI_DELEGATION_PATH}}`.
 
 ## SDD Workflow (lazy-loaded)
 
@@ -101,6 +101,7 @@ For skill-shaped requests, do not treat injected `<available_skills>` as complet
 
 ## Safety
 
+- Relay blocking prompts losslessly; STOP for the human's answer.
 - Never commit unless the user explicitly asks.
 - Ask before destructive git operations, publishing, or irreversible file changes.
 - Keep writes single-threaded unless isolated worktrees are explicitly approved.
@@ -108,7 +109,7 @@ For skill-shaped requests, do not treat injected `<available_skills>` as complet
 
 ## Bounded Review Transactions
 
-New ordinary review uses negotiated v1 `gentle_review` `start -> finalize -> validate`. Target status owns one action. START freezes scope, findings, risk, and budget. FINALIZE permits one correction; failure escalates.
+Compact `gentle_review` uses `start -> finalize -> validate`; START freezes scope, risk, and budget; FINALIZE permits one correction, failure escalates.
 
 Compact gates use zero actors and rederive authority, target, and evidence. Pi adds one-shot authorization. Legacy authority is read-only; Judgment Day is separate.
 Release from protected `main` may bypass receipt validation only when its immutable remote SHA and required CI are proven; otherwise native receipt validation applies.
@@ -117,7 +118,5 @@ Major and post-incident releases require explicit extraordinary review even when
 Dangerous-command safety remains independent and authoritative.
 
 SDD completion adds no review or Judgment Day pass.
-
-Review/SDD never publish. The durable transaction may create one local commit after native validation and HEAD proof.
 
 Controller and actor contract: `{{GENTLE_PI_DELEGATION_PATH}}`.
