@@ -313,6 +313,24 @@ const REQUIRED_MANDATORY_FEATURES = Object.freeze(FEATURE_NAMES.filter((name) =>
 
 
 
+// Provider-owned completing form for a host-mediated capture slot
+// (gentle-pi#311 P4). The provider issues the exact operation and argument
+// tokens that submit the captured bytes; the host substitutes only the
+// artifact location into the declared {{value}} slot and never synthesizes
+// or filters the form itself.
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1048,8 +1066,23 @@ function decodeTransitionArguments(value         , label        )               
 	});
 }
 
+function decodeCaptureSubmission(value         , label        )                            {
+	const submission = exactRecord(value, label, ["operation_token", "argument_tokens", "values"]);
+	const operationToken = text(submission.operation_token, `${label}.operation_token`, { minimum: 1, pattern: /^[a-z0-9-]+$/ });
+	const argumentTokens = stringArray(submission.argument_tokens, `${label}.argument_tokens`, { minimum: 1 });
+	const values = array(submission.values, `${label}.values`, (entry, entryLabel) => {
+		const row = exactRecord(entry, entryLabel, ["slot", "domain", "substitution_location"]);
+		return {
+			slot: nonempty(row.slot, `${entryLabel}.slot`),
+			domain: nonempty(row.domain, `${entryLabel}.domain`),
+			substitutionLocation: integer(row.substitution_location, `${entryLabel}.substitution_location`, 0, argumentTokens.length - 1),
+		};
+	}, { minimum: 1 });
+	return { operationToken, argumentTokens, values };
+}
+
 function decodeCollectInput(value         , label        )                       {
-	const input = exactRecord(value, label, ["name", "schema", "capture_operation", "arguments"], ["artifact_subject", "base_tree", "candidate_tree", "changed_path_manifest", "validation_request"]);
+	const input = exactRecord(value, label, ["name", "schema", "capture_operation", "arguments"], ["artifact_subject", "base_tree", "candidate_tree", "changed_path_manifest", "validation_request", "submission"]);
 	const name = text(input.name, `${label}.name`, { minimum: 1, pattern: /^[a-z0-9_]+$/ });
 	const schema = nonempty(input.schema, `${label}.schema`);
 	const captureOperation = nonempty(input.capture_operation, `${label}.capture_operation`);
@@ -1070,6 +1103,9 @@ function decodeCollectInput(value         , label        )                      
 	} else if (input.artifact_subject !== undefined || input.base_tree !== undefined || input.candidate_tree !== undefined || input.changed_path_manifest !== undefined) {
 		throw new TypeError(`${label} carries capture-result fields without review.capture-result`);
 	}
+	if (input.submission !== undefined && captureOperation !== "review.capture-result") {
+		throw new TypeError(`${label}.submission is only valid for review.capture-result`);
+	}
 
 	return {
 		name,
@@ -1081,6 +1117,7 @@ function decodeCollectInput(value         , label        )                      
 		...(input.candidate_tree === undefined ? {} : { candidateTree: gitTree(input.candidate_tree, `${label}.candidate_tree`) }),
 		...(input.changed_path_manifest === undefined ? {} : { changedPathManifest: array(input.changed_path_manifest, `${label}.changed_path_manifest`, decodeChangedPathEntry, { unique: true }) }),
 		...(input.validation_request === undefined ? {} : { validationRequest: decodeTargetedValidationRequestV1(input.validation_request, `${label}.validation_request`) }),
+		...(input.submission === undefined ? {} : { submission: decodeCaptureSubmission(input.submission, `${label}.submission`) }),
 	};
 }
 

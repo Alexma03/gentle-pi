@@ -6,8 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { __testing } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
-import { REVIEW_HOST_RELAY_FAILURE, REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE, ReviewHostRelayError, type ReviewHostRelayRequest } from "../lib/review-host-relay.ts";
-import type { ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
+import { REVIEW_HOST_RELAY_FAILURE, REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE, REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE, ReviewHostRelayError, type ReviewHostRelayRequest } from "../lib/review-host-relay.ts";
+import type { ReviewCaptureSubmissionV1, ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 
 // Wiring contract (gentle-pi#311 P4): the compact controller FINALIZE lane
 // routes pi-slot capture inputs through the host relay ONLY when the
@@ -39,7 +39,16 @@ function bindingArguments(lineageId: string, lens: string, order: number): Revie
 	];
 }
 
-function relayCollectInput(lineageId: string, lens: string, order: number, materialize = true): ReviewCollectInputV3 {
+function providerSubmission(lineageId: string, lens: string, order: number): ReviewCaptureSubmissionV1 {
+	const bindingTokens = bindingArguments(lineageId, lens, order).map((argument) => argument.token!);
+	return {
+		operationToken: "capture-result",
+		argumentTokens: [...bindingTokens, "--input={{value}}"],
+		values: [{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitutionLocation: bindingTokens.length }],
+	};
+}
+
+function relayCollectInput(lineageId: string, lens: string, order: number, materialize = true, submission: ReviewCaptureSubmissionV1 | "provider" | "absent" = "provider"): ReviewCollectInputV3 {
 	return {
 		name: "reviewer_result",
 		schema: "https://gentle-ai.dev/schema/review/reviewer/v1",
@@ -51,6 +60,7 @@ function relayCollectInput(lineageId: string, lens: string, order: number, mater
 				{ name: "materialize", value: "true", token: "--materialize=true" },
 			] : []),
 		],
+		...(materialize && submission !== "absent" ? { submission: submission === "provider" ? providerSubmission(lineageId, lens, order) : submission } : {}),
 	};
 }
 
@@ -149,9 +159,10 @@ test("materialize-marked pi slots route through the host relay in provider order
 
 	assert.equal(relayed.length, 2);
 	assert.deepEqual(relayed[0]!.captureArgumentTokens, inputs[0]!.arguments.map((argument) => argument.token));
-	assert.deepEqual(relayed[0]!.submitArgumentTokens, bindingArguments(lineageId, "review-risk", 0).map((argument) => argument.token));
+	// The provider-owned completing form reaches the relay verbatim.
+	assert.deepEqual(relayed[0]!.submission, providerSubmission(lineageId, "review-risk", 0));
 	assert.deepEqual(relayed[1]!.captureArgumentTokens, inputs[1]!.arguments.map((argument) => argument.token));
-	assert.deepEqual(relayed[1]!.submitArgumentTokens, bindingArguments(lineageId, "review-reliability", 1).map((argument) => argument.token));
+	assert.deepEqual(relayed[1]!.submission, providerSubmission(lineageId, "review-reliability", 1));
 
 	assert.equal(harness.finalizeCalls, 0, "the relay never invokes native finalize itself");
 	assert.equal(harness.statusCalls.length, 2, "STATUS is re-queried after all slots are captured");
@@ -249,6 +260,30 @@ test("a transport failure mid-collection stops immediately and directs STATUS re
 	assert.match(String(result.next_action), /exact same bound slot/);
 	assert.equal(harness.finalizeCalls, 0);
 	assert.equal(harness.statusCalls.length, 1, "no automatic relaunch after transport failure");
+});
+
+test("materialize tokens without a provider submission fail closed as a typed contract mismatch", async (t) => {
+	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
+	const cwd = repository(t);
+	const lineageId = "relay-lineage";
+	const harness = nativeHarness([finalizeStatus(lineageId, [relayCollectInput(lineageId, "review-reliability", 0, true, "absent")])]);
+	let relayCalls = 0;
+	__testing.setReviewHostRelayRunnerForTesting(async () => {
+		relayCalls += 1;
+		return { promptByteLength: 1, resultByteLength: 1, submission: "{}" };
+	});
+
+	const result = await runFinalize(cwd, harness, lineageId);
+
+	assert.equal(relayCalls, 0, "the completing form is never synthesized, so nothing launches");
+	assert.equal(result.status, "blocked");
+	assert.equal(result.outcome, "pi-host-relay-transport-failure");
+	assert.deepEqual(result.failure, { kind: "submission-contract-mismatch", stage: "binding", exit_code: null, timed_out: false });
+	assert.equal(result.reason, REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE);
+	assert.equal(result.mutation_performed, false);
+	assert.equal(result.mutation_outcome, "none");
+	assert.equal(harness.finalizeCalls, 0);
+	assert.equal(harness.statusCalls.length, 1, "no relaunch and no post-capture STATUS after the contract mismatch");
 });
 
 test("collect inputs without the provider-issued materialize token never reach the relay", async (t) => {

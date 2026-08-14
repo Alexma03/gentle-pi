@@ -7,14 +7,16 @@ import { createNodeExecFileAdapter } from "../lib/native-review-cli.ts";
 import {
 	REVIEW_HOST_RELAY_FAILURE,
 	REVIEW_HOST_RELAY_PI_ARGV,
+	REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
 	REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
 	ReviewHostRelayError,
 	classifyReviewHostRelayRefusal,
+	resolveReviewHostRelaySubmission,
 	reviewHostRelaySlots,
 	runReviewHostRelaySlot,
 } from "../lib/review-host-relay.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "../lib/review-relay-contract.ts";
-import type { ReviewCollectInputV3 } from "../lib/review-integration-v2.ts";
+import { decodeReviewNextTransitionV3, type ReviewCaptureSubmissionV1, type ReviewCollectInputV3 } from "../lib/review-integration-v2.ts";
 
 // ---------------------------------------------------------------------------
 // Fake binaries. Following the repo's fake-executable idiom (shell/git
@@ -35,11 +37,12 @@ if (argv.some((token) => token === "--materialize" || token.startsWith("--materi
 	if (mode === "handshake") { process.stderr.write(process.env.RELAY_FAKE_HANDSHAKE_STDERR || "the active runtime is not eligible for immutable receipt review"); process.exit(1); }
 	process.stderr.write("materialize exploded\\n"); process.exit(3);
 }
-const inputIndex = argv.indexOf("--input");
-if (inputIndex >= 0) {
+const inputToken = argv.find((token) => token === "--input" || token.startsWith("--input="));
+if (inputToken !== undefined) {
 	const mode = process.env.RELAY_FAKE_SUBMIT_MODE || "ok";
 	if (mode === "ok") {
-		const bytes = fs.readFileSync(argv[inputIndex + 1]);
+		const inputPath = inputToken.startsWith("--input=") ? inputToken.slice("--input=".length) : argv[argv.indexOf("--input") + 1];
+		const bytes = fs.readFileSync(inputPath);
 		if (process.env.RELAY_FAKE_SUBMIT_CAPTURE) fs.writeFileSync(process.env.RELAY_FAKE_SUBMIT_CAPTURE, bytes);
 		process.stdout.write(JSON.stringify({ schema: "gentle-ai.review-result-artifact/v2", admission_decision: "completed" }));
 		process.exit(0);
@@ -123,6 +126,14 @@ const BINDING_TOKENS = Object.freeze([
 ]);
 const CAPTURE_TOKENS = Object.freeze([...BINDING_TOKENS, "--agent=pi", "--materialize=true"]);
 
+// The provider-owned completing form: exact operation and argument tokens
+// with one declared {{value}} substitution slot for the artifact path.
+const SUBMISSION: ReviewCaptureSubmissionV1 = Object.freeze({
+	operationToken: "capture-result",
+	argumentTokens: Object.freeze([...BINDING_TOKENS, "--input={{value}}"]),
+	values: Object.freeze([{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitutionLocation: BINDING_TOKENS.length }]),
+});
+
 // Prompt and result bytes deliberately include binary-unsafe content: NUL,
 // control bytes, quotes, backslashes, CRLF, multi-byte UTF-8, and bytes that
 // are not valid UTF-8 at all. The relay must move them verbatim.
@@ -138,7 +149,7 @@ const PI_OUTPUT_BYTES = Buffer.concat([
 function relayRequest(fixture: RelayHarness, overrides: Record<string, unknown> = {}) {
 	return {
 		captureArgumentTokens: CAPTURE_TOKENS,
-		submitArgumentTokens: BINDING_TOKENS,
+		submission: SUBMISSION,
 		gentleAiExecutable: fixture.gentleAi,
 		piExecutable: fixture.pi,
 		environment: {
@@ -211,10 +222,14 @@ test("relay happy path moves prompt and result bytes verbatim through a fresh em
 	assert.equal(gentleAiCalls.length, 2);
 	// (a) exact provider tokens, verbatim, in provider order.
 	assert.deepEqual(gentleAiCalls[0]!.argv, ["review", "capture-result", ...CAPTURE_TOKENS]);
-	// (d) same exact binding args plus only --input; no agent/materialize.
-	assert.deepEqual(gentleAiCalls[1]!.argv.slice(0, 2 + BINDING_TOKENS.length), ["review", "capture-result", ...BINDING_TOKENS]);
-	assert.equal(gentleAiCalls[1]!.argv.at(-2), "--input");
-	assert.equal(gentleAiCalls[1]!.argv.length, 2 + BINDING_TOKENS.length + 2);
+	// (d) the provider-owned submission form, verbatim: its exact operation
+	// and argument tokens with only the artifact path substituted into the
+	// declared {{value}} slot. No agent/materialize, nothing synthesized.
+	assert.deepEqual(gentleAiCalls[1]!.argv.slice(0, 2 + BINDING_TOKENS.length), ["review", SUBMISSION.operationToken, ...BINDING_TOKENS]);
+	const substituted = gentleAiCalls[1]!.argv.at(-1)!;
+	assert.match(substituted, /^--input=\S+$/);
+	assert.equal(substituted.includes("{{value}}"), false);
+	assert.equal(gentleAiCalls[1]!.argv.length, 2 + SUBMISSION.argumentTokens.length);
 	assert.equal(gentleAiCalls[1]!.argv.some((token) => token.includes("--agent") || token.includes("--materialize")), false);
 	// Handshake declared on both gentle-ai invocations even though the base
 	// environment carried none.
@@ -346,7 +361,7 @@ test("refusal classification distinguishes unknown-flag, handshake, and other", 
 // Slot detection — the provider decides; nothing is inferred.
 // ---------------------------------------------------------------------------
 
-function collectInput(overrides: Partial<{ captureOperation: string; arguments: ReviewCollectInputV3["arguments"] }> = {}): ReviewCollectInputV3 {
+function collectInput(overrides: Partial<{ captureOperation: string; arguments: ReviewCollectInputV3["arguments"]; submission: ReviewCaptureSubmissionV1 | undefined }> = {}): ReviewCollectInputV3 {
 	const argumentsList: ReviewCollectInputV3["arguments"] = overrides.arguments ?? [
 		{ name: "lineage", value: "review-1d5aadacc600e167", token: "--lineage=review-1d5aadacc600e167" },
 		{ name: "expected-revision", value: `sha256:${"c".repeat(64)}`, token: `--expected-revision=sha256:${"c".repeat(64)}` },
@@ -363,6 +378,7 @@ function collectInput(overrides: Partial<{ captureOperation: string; arguments: 
 		schema: "https://gentle-ai.dev/schema/review/reviewer/v1",
 		captureOperation: overrides.captureOperation ?? "review.capture-result",
 		arguments: argumentsList,
+		...("submission" in overrides ? (overrides.submission === undefined ? {} : { submission: overrides.submission }) : { submission: SUBMISSION }),
 	};
 }
 
@@ -370,9 +386,16 @@ test("only provider-issued pi --materialize capture-result inputs become relay s
 	const slots = reviewHostRelaySlots([collectInput()]);
 	assert.equal(slots.length, 1);
 	assert.deepEqual(slots[0]!.captureArgumentTokens, [...CAPTURE_TOKENS]);
-	assert.deepEqual(slots[0]!.submitArgumentTokens, [...BINDING_TOKENS]);
+	// The provider-owned completing form passes through verbatim.
+	assert.deepEqual(slots[0]!.submission, SUBMISSION);
 	assert.equal(slots[0]!.lens, "review-reliability");
 	assert.equal(slots[0]!.order, "0");
+
+	// A materialize slot whose provider omitted the submission still becomes
+	// a slot (the provider decided the route); the relay then fails closed.
+	const missingSubmission = reviewHostRelaySlots([collectInput({ submission: undefined })]);
+	assert.equal(missingSubmission.length, 1);
+	assert.equal(missingSubmission[0]!.submission, undefined);
 
 	const withoutMaterialize = collectInput({ arguments: collectInput().arguments.filter((argument) => argument.name !== "materialize") });
 	assert.deepEqual(reviewHostRelaySlots([withoutMaterialize]), []);
@@ -387,8 +410,111 @@ test("only provider-issued pi --materialize capture-result inputs become relay s
 	assert.deepEqual(reviewHostRelaySlots([evidence]), []);
 });
 
-test("relay input validation rejects empty or malformed token lists before any process launches", async () => {
-	await assert.rejects(runReviewHostRelaySlot({ captureArgumentTokens: [], submitArgumentTokens: BINDING_TOKENS }), TypeError);
-	await assert.rejects(runReviewHostRelaySlot({ captureArgumentTokens: CAPTURE_TOKENS, submitArgumentTokens: [""] }), TypeError);
-	await assert.rejects(runReviewHostRelaySlot({ captureArgumentTokens: CAPTURE_TOKENS, submitArgumentTokens: BINDING_TOKENS, gentleAiExecutable: "gentle-ai" }), TypeError);
+test("relay input validation rejects empty or malformed inputs before any process launches", async () => {
+	await assert.rejects(runReviewHostRelaySlot({ captureArgumentTokens: [], submission: SUBMISSION }), TypeError);
+	await assert.rejects(runReviewHostRelaySlot({ captureArgumentTokens: [""], submission: SUBMISSION }), TypeError);
+	await assert.rejects(runReviewHostRelaySlot({ captureArgumentTokens: CAPTURE_TOKENS, submission: SUBMISSION, gentleAiExecutable: "gentle-ai" }), TypeError);
+});
+
+// ---------------------------------------------------------------------------
+// Provider-owned submission form — consumed verbatim, never synthesized.
+// ---------------------------------------------------------------------------
+
+test("a materialize slot without a provider submission fails closed before any process launches", async (t) => {
+	const fixture = harness(t);
+	const error = await rejectsWithRelayError(
+		runReviewHostRelaySlot(relayRequest(fixture, { submission: undefined })),
+		REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH,
+		"binding",
+	);
+	assert.equal(error.message, REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE);
+	assert.equal(error.mutationOutcome, "none");
+	assert.equal(readLog(fixture.logPath).length, 0, "no gentle-ai invocation was launched");
+	assert.equal(readLog(fixture.piLogPath).length, 0, "no pi subprocess was launched");
+	assert.equal(existsSync(fixture.submitCapturePath), false);
+});
+
+test("a submission form the relay cannot bind is a typed contract mismatch, never a repaired invocation", async (t) => {
+	const fixture = harness(t);
+	const twoValues: ReviewCaptureSubmissionV1 = {
+		...SUBMISSION,
+		values: [...SUBMISSION.values, { slot: "extra", domain: "artifact_path_or_stdin", substitutionLocation: 0 }],
+	};
+	await rejectsWithRelayError(runReviewHostRelaySlot(relayRequest(fixture, { submission: twoValues })), REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH, "binding");
+	const noSlot: ReviewCaptureSubmissionV1 = {
+		...SUBMISSION,
+		argumentTokens: [...BINDING_TOKENS, "--input=/etc/somewhere"],
+	};
+	await rejectsWithRelayError(runReviewHostRelaySlot(relayRequest(fixture, { submission: noSlot })), REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH, "binding");
+	const outOfBounds: ReviewCaptureSubmissionV1 = {
+		...SUBMISSION,
+		values: [{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitutionLocation: SUBMISSION.argumentTokens.length }],
+	};
+	await rejectsWithRelayError(runReviewHostRelaySlot(relayRequest(fixture, { submission: outOfBounds })), REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH, "binding");
+	assert.equal(readLog(fixture.logPath).length, 0);
+	assert.equal(readLog(fixture.piLogPath).length, 0);
+});
+
+test("resolveReviewHostRelaySubmission returns the provider binding untouched", () => {
+	const binding = resolveReviewHostRelaySubmission(SUBMISSION);
+	assert.equal(binding.operationToken, "capture-result");
+	assert.deepEqual(binding.argumentTokens, SUBMISSION.argumentTokens);
+	assert.equal(binding.substitutionLocation, BINDING_TOKENS.length);
+	assert.throws(() => resolveReviewHostRelaySubmission(undefined), (error: unknown) =>
+		error instanceof ReviewHostRelayError && error.kind === REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH && error.message === REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE);
+});
+
+test("the negotiated decoder carries the provider submission through the capture-result collect input", () => {
+	const lineageId = "review-1d5aadacc600e167";
+	const sha = `sha256:${"c".repeat(64)}`;
+	const tree = "3".repeat(40);
+	const rawSubmission = {
+		operation_token: "capture-result",
+		argument_tokens: [...BINDING_TOKENS, "--input={{value}}"],
+		values: [{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitution_location: BINDING_TOKENS.length }],
+	};
+	const rawInput = {
+		name: "reviewer_result",
+		schema: "https://gentle-ai.dev/schema/review/reviewer/v1",
+		capture_operation: "review.capture-result",
+		arguments: [
+			{ name: "lineage", value: lineageId, token: `--lineage=${lineageId}` },
+			{ name: "agent", value: "pi", token: "--agent=pi" },
+			{ name: "materialize", value: "true", token: "--materialize=true" },
+		],
+		artifact_subject: {
+			schema: "gentle-ai.review-artifact-subject/v2",
+			subject_hash: sha,
+			lineage_id: lineageId,
+			authority_revision: sha,
+			target_identity: sha,
+			base_tree: tree,
+			candidate_tree: tree,
+			changed_path_manifest_sha256: sha,
+			lens: "review-reliability",
+			selected_order: 0,
+		},
+		base_tree: tree,
+		candidate_tree: tree,
+		changed_path_manifest: [{ path: "app.ts", status: "M", old_mode: "100644", new_mode: "100644", deleted: false, type_changed: false, mode_only: false, intended_untracked: false }],
+		submission: rawSubmission,
+	};
+	const decoded = decodeReviewNextTransitionV3({ kind: "collect", reason_code: "reviewer_results_required", collect: { inputs: [rawInput] } });
+	assert.equal(decoded.collect!.inputs[0]!.submission!.operationToken, "capture-result");
+	assert.deepEqual(decoded.collect!.inputs[0]!.submission!.argumentTokens, rawSubmission.argument_tokens);
+	assert.deepEqual(decoded.collect!.inputs[0]!.submission!.values, [{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitutionLocation: BINDING_TOKENS.length }]);
+
+	// Strict rejections: submission outside capture-result, and a
+	// substitution location outside its own argument tokens.
+	assert.throws(() => decodeReviewNextTransitionV3({ kind: "collect", reason_code: "verification_evidence_required", collect: { inputs: [{
+		name: "verification_evidence",
+		schema: "gentle-ai.review-verification-evidence/v2",
+		capture_operation: "review.capture-evidence",
+		arguments: [{ name: "lineage", value: lineageId }],
+		submission: rawSubmission,
+	}] } }), /submission is only valid for review\.capture-result/);
+	assert.throws(() => decodeReviewNextTransitionV3({ kind: "collect", reason_code: "reviewer_results_required", collect: { inputs: [{
+		...rawInput,
+		submission: { ...rawSubmission, values: [{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitution_location: rawSubmission.argument_tokens.length }] },
+	}] } }), /substitution_location/);
 });

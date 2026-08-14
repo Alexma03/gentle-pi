@@ -312,6 +312,23 @@ export interface ReviewNextTransitionExecuteV3 {
 	command?: string;
 }
 
+// Provider-owned completing form for a host-mediated capture slot
+// (gentle-pi#311 P4). The provider issues the exact operation and argument
+// tokens that submit the captured bytes; the host substitutes only the
+// artifact location into the declared {{value}} slot and never synthesizes
+// or filters the form itself.
+export interface ReviewCaptureSubmissionValueV1 {
+	slot: string;
+	domain: string;
+	substitutionLocation: number;
+}
+
+export interface ReviewCaptureSubmissionV1 {
+	operationToken: string;
+	argumentTokens: readonly string[];
+	values: readonly ReviewCaptureSubmissionValueV1[];
+}
+
 export interface ReviewCollectInputV3 {
 	name: string;
 	schema: string;
@@ -322,6 +339,7 @@ export interface ReviewCollectInputV3 {
 	candidateTree?: string;
 	changedPathManifest?: readonly ChangedPathEntry[];
 	validationRequest?: ReviewTargetedValidationRequestV1;
+	submission?: ReviewCaptureSubmissionV1;
 }
 
 export interface ReviewNextTransitionV3 {
@@ -1047,8 +1065,23 @@ function decodeTransitionArguments(value: unknown, label: string): readonly Revi
 	});
 }
 
+function decodeCaptureSubmission(value: unknown, label: string): ReviewCaptureSubmissionV1 {
+	const submission = exactRecord(value, label, ["operation_token", "argument_tokens", "values"]);
+	const operationToken = text(submission.operation_token, `${label}.operation_token`, { minimum: 1, pattern: /^[a-z0-9-]+$/ });
+	const argumentTokens = stringArray(submission.argument_tokens, `${label}.argument_tokens`, { minimum: 1 });
+	const values = array(submission.values, `${label}.values`, (entry, entryLabel) => {
+		const row = exactRecord(entry, entryLabel, ["slot", "domain", "substitution_location"]);
+		return {
+			slot: nonempty(row.slot, `${entryLabel}.slot`),
+			domain: nonempty(row.domain, `${entryLabel}.domain`),
+			substitutionLocation: integer(row.substitution_location, `${entryLabel}.substitution_location`, 0, argumentTokens.length - 1),
+		};
+	}, { minimum: 1 });
+	return { operationToken, argumentTokens, values };
+}
+
 function decodeCollectInput(value: unknown, label: string): ReviewCollectInputV3 {
-	const input = exactRecord(value, label, ["name", "schema", "capture_operation", "arguments"], ["artifact_subject", "base_tree", "candidate_tree", "changed_path_manifest", "validation_request"]);
+	const input = exactRecord(value, label, ["name", "schema", "capture_operation", "arguments"], ["artifact_subject", "base_tree", "candidate_tree", "changed_path_manifest", "validation_request", "submission"]);
 	const name = text(input.name, `${label}.name`, { minimum: 1, pattern: /^[a-z0-9_]+$/ });
 	const schema = nonempty(input.schema, `${label}.schema`);
 	const captureOperation = nonempty(input.capture_operation, `${label}.capture_operation`);
@@ -1069,6 +1102,9 @@ function decodeCollectInput(value: unknown, label: string): ReviewCollectInputV3
 	} else if (input.artifact_subject !== undefined || input.base_tree !== undefined || input.candidate_tree !== undefined || input.changed_path_manifest !== undefined) {
 		throw new TypeError(`${label} carries capture-result fields without review.capture-result`);
 	}
+	if (input.submission !== undefined && captureOperation !== "review.capture-result") {
+		throw new TypeError(`${label}.submission is only valid for review.capture-result`);
+	}
 
 	return {
 		name,
@@ -1080,6 +1116,7 @@ function decodeCollectInput(value: unknown, label: string): ReviewCollectInputV3
 		...(input.candidate_tree === undefined ? {} : { candidateTree: gitTree(input.candidate_tree, `${label}.candidate_tree`) }),
 		...(input.changed_path_manifest === undefined ? {} : { changedPathManifest: array(input.changed_path_manifest, `${label}.changed_path_manifest`, decodeChangedPathEntry, { unique: true }) }),
 		...(input.validation_request === undefined ? {} : { validationRequest: decodeTargetedValidationRequestV1(input.validation_request, `${label}.validation_request`) }),
+		...(input.submission === undefined ? {} : { submission: decodeCaptureSubmission(input.submission, `${label}.submission`) }),
 	};
 }
 

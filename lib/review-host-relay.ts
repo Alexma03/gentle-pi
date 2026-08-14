@@ -11,8 +11,13 @@
 //      empty scratch directory, pipe the prompt through stdin, and take
 //      stdout as raw final bytes. Model/provider/profile selection stays
 //      user-owned: no --model, no --provider, environment untouched.
-//   3. Submit those bytes untouched through the same exact binding with
-//      `--input <tempfile>` (BOM-less: the buffer is written byte-for-byte).
+//   3. Submit those bytes untouched through the provider-owned `submission`
+//      form carried by the collect input: execute its exact operation and
+//      argument tokens with only the tempfile path substituted into the
+//      declared {{value}} slot (BOM-less: the buffer is written
+//      byte-for-byte). The host never synthesizes or filters the completing
+//      form; a materialize slot without a provider submission is a typed
+//      contract mismatch, never a rebuilt invocation.
 //
 // On any failure the relay returns a TYPED transport error and submits
 // nothing further. After a transport failure the caller re-queries negotiated
@@ -25,7 +30,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { resolveGentleAiBinary } from "./gentle-ai-binary.ts";
-import type { ReviewCollectInputV3 } from "./review-integration-v2.ts";
+import type { ReviewCaptureSubmissionV1, ReviewCollectInputV3 } from "./review-integration-v2.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "./review-relay-contract.ts";
 
 // The complete pinned lockdown argv for the reviewer `pi` subprocess: print
@@ -51,6 +56,7 @@ export const REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE =
 export const REVIEW_HOST_RELAY_FAILURE = {
 	RELAY_UNAVAILABLE: "relay-unavailable",
 	HANDSHAKE_REFUSED: "handshake-refused",
+	SUBMISSION_CONTRACT_MISMATCH: "submission-contract-mismatch",
 	MATERIALIZE_FAILED: "materialize-failed",
 	EMPTY_PROMPT: "empty-prompt",
 	PI_LAUNCH_FAILED: "pi-launch-failed",
@@ -60,7 +66,12 @@ export const REVIEW_HOST_RELAY_FAILURE = {
 } as const;
 export type ReviewHostRelayFailureKind = (typeof REVIEW_HOST_RELAY_FAILURE)[keyof typeof REVIEW_HOST_RELAY_FAILURE];
 
-export type ReviewHostRelayStage = "materialize" | "pi" | "submit";
+export type ReviewHostRelayStage = "binding" | "materialize" | "pi" | "submit";
+
+export const REVIEW_HOST_RELAY_SUBMISSION_VALUE_SLOT = "{{value}}";
+
+export const REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE =
+	"provider contract mismatch: the materialize capture input carries no provider-owned submission form; the host never synthesizes the completing form";
 
 export class ReviewHostRelayError extends Error {
 	readonly kind: ReviewHostRelayFailureKind;
@@ -119,8 +130,12 @@ export function classifyReviewHostRelayRefusal(stderr: string): "unknown-flag" |
 export interface ReviewHostRelaySlot {
 	/** Every provider-issued argument token, verbatim, in provider order. */
 	readonly captureArgumentTokens: readonly string[];
-	/** The same binding tokens without the agent/materialize control tokens. */
-	readonly submitArgumentTokens: readonly string[];
+	/**
+	 * The provider-owned completing form, verbatim. Absent only when the
+	 * provider violated its own contract; the relay then fails closed with a
+	 * typed submission-contract-mismatch error instead of synthesizing one.
+	 */
+	readonly submission?: ReviewCaptureSubmissionV1;
 	readonly lens?: string;
 	readonly order?: string;
 	readonly subjectHash?: string;
@@ -144,11 +159,42 @@ export function isReviewHostRelayCollectInput(input: ReviewCollectInputV3): bool
 export function reviewHostRelaySlots(inputs: readonly ReviewCollectInputV3[]): readonly ReviewHostRelaySlot[] {
 	return inputs.filter((input) => isReviewHostRelayCollectInput(input)).map((input) => ({
 		captureArgumentTokens: input.arguments.map((argument) => renderToken(argument)),
-		submitArgumentTokens: input.arguments.filter((argument) => argument.name !== "agent" && argument.name !== "materialize").map((argument) => renderToken(argument)),
+		...(input.submission === undefined ? {} : { submission: input.submission }),
 		...(argumentValue(input, "lens") === undefined ? {} : { lens: argumentValue(input, "lens") }),
 		...(argumentValue(input, "order") === undefined ? {} : { order: argumentValue(input, "order") }),
 		...(input.artifactSubject === undefined ? {} : { subjectHash: input.artifactSubject.subjectHash }),
 	}));
+}
+
+// Resolves the provider-owned submission form into an executable binding.
+// Fails closed with a typed contract-mismatch error whenever the completing
+// form is absent or cannot bind exactly one artifact value; the relay never
+// repairs, filters, or synthesizes it.
+export interface ReviewHostRelaySubmissionBinding {
+	readonly operationToken: string;
+	readonly argumentTokens: readonly string[];
+	readonly substitutionLocation: number;
+}
+
+export function resolveReviewHostRelaySubmission(submission: ReviewCaptureSubmissionV1 | undefined): ReviewHostRelaySubmissionBinding {
+	if (submission === undefined) {
+		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH, "binding", REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE);
+	}
+	if (submission.operationToken.length === 0 || submission.argumentTokens.length === 0 || submission.argumentTokens.some((token) => typeof token !== "string" || token.length === 0)) {
+		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH, "binding", "provider contract mismatch: the submission form carries an empty operation or argument token");
+	}
+	if (submission.values.length !== 1) {
+		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH, "binding", `provider contract mismatch: the submission form must bind exactly one artifact value, received ${submission.values.length}`);
+	}
+	const value = submission.values[0]!;
+	const location = value.substitutionLocation;
+	if (!Number.isSafeInteger(location) || location < 0 || location >= submission.argumentTokens.length) {
+		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH, "binding", "provider contract mismatch: the submission substitution location is outside its argument tokens");
+	}
+	if (!submission.argumentTokens[location]!.includes(REVIEW_HOST_RELAY_SUBMISSION_VALUE_SLOT)) {
+		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH, "binding", `provider contract mismatch: the submission token at location ${location} carries no ${REVIEW_HOST_RELAY_SUBMISSION_VALUE_SLOT} slot`);
+	}
+	return { operationToken: submission.operationToken, argumentTokens: submission.argumentTokens, substitutionLocation: location };
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +203,8 @@ export function reviewHostRelaySlots(inputs: readonly ReviewCollectInputV3[]): r
 
 export interface ReviewHostRelayRequest {
 	readonly captureArgumentTokens: readonly string[];
-	readonly submitArgumentTokens: readonly string[];
+	/** The provider-owned completing form; absent means contract mismatch. */
+	readonly submission?: ReviewCaptureSubmissionV1;
 	/** Absolute path; defaults to the verified package-local binary. */
 	readonly gentleAiExecutable?: string;
 	/** User-owned pi launcher; defaults to `pi` on PATH. */
@@ -250,7 +297,10 @@ function assertTokens(name: string, tokens: readonly string[]): void {
  */
 export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): Promise<ReviewHostRelayResult> {
 	assertTokens("capture", request.captureArgumentTokens);
-	assertTokens("submit", request.submitArgumentTokens);
+	// The completing form is validated before any process launches: a
+	// materialize slot without a provider-owned submission is a typed
+	// contract mismatch, never a synthesized invocation.
+	const submissionBinding = resolveReviewHostRelaySubmission(request.submission);
 	const gentleAi = request.gentleAiExecutable ?? resolveGentleAiBinary();
 	if (!isAbsolute(gentleAi)) throw new TypeError("Pi host relay requires an absolute gentle-ai executable path");
 	const baseEnvironment = request.environment ?? process.env;
@@ -317,13 +367,18 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.PI_EMPTY_OUTPUT, "pi", "pi subprocess produced no output bytes", { exitCode: 0, stderr: piRun.stderr.toString("utf8") });
 		}
 
-		// (d) Submit the raw final bytes untouched through the exact binding.
+		// (d) Submit the raw final bytes untouched through the provider-owned
+		// completing form: its exact operation and argument tokens, with only
+		// the artifact path substituted into the declared {{value}} slot.
 		const resultFile = join(stagingDirectory, "result.raw");
 		await writeFile(resultFile, resultBytes, { mode: 0o600 });
 		await chmod(resultFile, 0o600);
+		const submitTokens = submissionBinding.argumentTokens.map((token, index) =>
+			index === submissionBinding.substitutionLocation ? token.split(REVIEW_HOST_RELAY_SUBMISSION_VALUE_SLOT).join(resultFile) : token,
+		);
 		let submission: ProcessCapture;
 		try {
-			submission = await collectProcess(gentleAi, ["review", "capture-result", ...request.submitArgumentTokens, "--input", resultFile], {
+			submission = await collectProcess(gentleAi, ["review", submissionBinding.operationToken, ...submitTokens], {
 				cwd: process.cwd(),
 				env: gentleAiEnvironment,
 				timeoutMs: gentleAiTimeoutMs,

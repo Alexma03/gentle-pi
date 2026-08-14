@@ -55,6 +55,7 @@ import { CompactReviewContractError, deriveNativeRefuterRequest, parseNativeComp
 import { toNativeRefuterDocument } from "../lib/review-refuter-adapter.ts";
 import {
 	REVIEW_HOST_RELAY_FAILURE,
+	REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
 	REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
 	ReviewHostRelayError,
 	reviewHostRelaySlots,
@@ -5026,9 +5027,19 @@ async function executeReviewHostRelayCollection(
 	for (const slot of slots) {
 		let result: Awaited<ReturnType<ReviewHostRelayRunner>>;
 		try {
+			// A materialize slot without the provider-owned submission form is
+			// a provider contract mismatch: fail closed before any launch and
+			// never synthesize the completing form.
+			if (slot.submission === undefined) {
+				throw new ReviewHostRelayError(
+					REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH,
+					"binding",
+					REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
+				);
+			}
 			result = await activeReviewHostRelayRunner({
 				captureArgumentTokens: slot.captureArgumentTokens,
-				submitArgumentTokens: slot.submitArgumentTokens,
+				submission: slot.submission,
 				...(signal === undefined ? {} : { signal }),
 			});
 		} catch (error) {
