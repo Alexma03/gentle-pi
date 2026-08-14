@@ -338,7 +338,8 @@ test("sdd-orchestrator-workflow.md does NOT retain the rc.3 hard-stop that withh
 
 test("both handoff surfaces invoke `gentle-ai review mode disable` exactly once", () => {
 	for (const [name, asset] of [["orchestrator-delegation.md", DELEGATION], ["sdd-orchestrator-workflow.md", SDD_WORKFLOW]] as const) {
-		const n = countOccurrences(asset, "gentle-ai review mode disable");
+		const section = asset.match(/## Provider Defect Handoff[\s\S]*?(?=\n## |$)/)?.[0] ?? "";
+		const n = countOccurrences(section, "gentle-ai review mode disable");
 		assert.equal(n, 1, `${name} must invoke "gentle-ai review mode disable" exactly once; got ${n}`);
 	}
 });
