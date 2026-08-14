@@ -553,7 +553,9 @@ export default function (pi: ExtensionAPI) {
         if (selected.startsWith("Rose:")) config.showRose = !config.showRose;
         else if (selected.startsWith("Text logo:")) config.showTextLogo = !config.showTextLogo;
         else if (selected.startsWith("Color:")) {
-          config.color = await ctx.ui.select("Startup banner color", [...BANNER_COLORS]) as BannerColor;
+          const color = await ctx.ui.select("Startup banner color", [...BANNER_COLORS]);
+          if (!color) return;
+          config.color = color as BannerColor;
         }
         await writeBannerConfig(config);
         notifyBannerConfig(ctx, config);
@@ -577,9 +579,13 @@ export default function (pi: ExtensionAPI) {
       handler: async (args, ctx) => {
         const config = await readBannerConfig();
         const requested = String(args ?? "").trim() as BannerColor;
-        config.color = BANNER_COLORS.includes(requested)
-          ? requested
-          : await ctx.ui.select("Startup banner color", [...BANNER_COLORS]) as BannerColor;
+        if (BANNER_COLORS.includes(requested)) {
+          config.color = requested;
+        } else {
+          const selected = await ctx.ui.select("Startup banner color", [...BANNER_COLORS]);
+          if (!selected) return;
+          config.color = selected as BannerColor;
+        }
         await writeBannerConfig(config);
         notifyBannerConfig(ctx, config);
       },
