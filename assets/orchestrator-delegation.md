@@ -285,20 +285,16 @@ parent clarifies and checks git → ordinary controller binds a snapshot/route �
 
 Do not make every task SDD. Do make non-trivial tasks multi-agent at the narrowest useful point.
 
-### 3. SDD
+### 3. SDD (optional)
 
-Use SDD for large, ambiguous, architectural, product-facing, multi-area, or high-review-risk work.
+SDD is never selected by size, file count, or risk alone. Suggest it organically when durable proposal/spec/design/tasks would materially reduce substantial ambiguity (unclear requirements or acceptance criteria, architectural or product decisions, cross-cutting behavior changes), and let the user decide.
 
-Triggers:
+Select SDD only when one of these holds:
 
-- unclear requirements or acceptance criteria;
-- architectural/product decisions;
-- cross-cutting behavior changes;
-- expected large diff or reviewer burden;
-- need for specs/design/tasks before safe implementation;
 - user explicitly asks to use SDD, or invokes `/sdd-new`, `/sdd-ff`, or `/sdd-continue`.
+- the user accepts an SDD proposal.
 
-If the request is large enough for SDD, do not jump directly to implementation. Calibrate context, create artifacts, and ask for approval at the appropriate gates.
+Once SDD is selected, do not jump directly to implementation. Calibrate context, create artifacts, and ask for approval at the appropriate gates.
 
 ## Pi Delegation Bindings
 
@@ -308,7 +304,6 @@ Prefer delegation when fresh context improves correctness more than token saving
 - Use a single `worker` for one writer thread; do not run parallel writers unless isolated worktrees are explicitly approved.
 - When ordinary transaction start selects review actors, use the concrete lens named by the bound route. Do not call a generic `reviewer` subagent or add a later lifecycle review outside that transaction.
 - Use `outputMode: "file-only"` for large child reports and summarize only decisions, blockers, and paths in the parent thread.
-- Avoid delegation for truly local one-file fixes, quick state checks, and already-understood mechanical edits.
 
 ### Canonical Lightweight Workflows
 
@@ -330,29 +325,15 @@ After tooling/worktree incident:
 stop writes → parent captures git status → diagnose affected repos/worktrees with no edits → parent applies only confirmed recovery steps without reopening review authority
 ```
 
-### Review Lens Selection
+### Review Actor Materialization
 
-`reviewer` is an intent, not an installed subagent name. The parent must select concrete review agents by risk profile:
-
-| Context | Review lens |
-| --- | --- |
-| Clear naming, structure, maintainability, small refactors | `review-readability` |
-| Behavior, state, tests, determinism, regressions | `review-reliability` |
-| Shell/process integration, partial failures, recovery, degraded dependencies | `review-resilience` |
-| Security, permissions, data exposure/loss, architecture, dependencies | `review-risk` |
-| Large PR, hot path, or >400 changed lines | Full 4R: `review-risk`, `review-resilience`, `review-readability`, `review-reliability` |
-
-If multiple rows match, run the narrow set that covers the risk. Example: shell integration that mutates live state should use `review-reliability` plus `review-resilience`, not `review-readability` by default.
+Native RAR owns lens selection (canon Native Checking Contract above): the orchestrator never chooses which lenses run. This binding is materialization only. When a native transition or bound route names review actors, the parent launches exactly the named subagent definitions — `review-risk`, `review-resilience`, `review-readability`, `review-reliability` — with the provided scope and nothing more. `reviewer` remains an intent, never an installed subagent name; never launch a generic `reviewer` and never substitute, add, or drop a lens.
 
 ## Bounded Review Transaction Contract
 
 ### Compact Controller Routing
 
-Call `gentle_review` INSPECT before START. INSPECT delegates to negotiated target-scoped native status. When applicability is `unrelated` and native action is `start`, new ordinary review uses compact v2:
-
-```json
-{"operation":"start","input":"{\"mode\":\"ordinary\",\"policyPath\":\"<optional-repository-local-path>\"}"}
-```
+Call `gentle_review` INSPECT before START. INSPECT delegates to negotiated target-scoped native status. When applicability is `unrelated`, continue only through the provider-returned `next_transition` (canon Route above): invoke `review.start` only when the returned `execute.operation` names it, with its exact operation and ordered argument tokens unchanged. Never hardcode or substitute a START payload.
 
 Use `start -> finalize -> validate` for ordinary review. START derives complete Git/untracked scope, lineage, tier, selected lenses, authored changed lines, and the correction budget. Use graph-v1 `judgment-day` only when explicitly selected.
 

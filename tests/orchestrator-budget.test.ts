@@ -158,7 +158,18 @@ const DISPOSITION_MAP: DispositionRange[] = [
 	{ lines: [25, 29], target: "delegation", label: "Language Boundary LB5 (exceptions)" },
 	{ lines: [31, 40], target: "core", label: "Mental Model" },
 	{ lines: [42, 42], target: "core", label: "Work Routing Ladder heading" },
-	{ lines: [44, 110], target: "delegation", label: "Work Routing Ladder body + Pi Subagent Model Routing" },
+	{ lines: [44, 97], target: "delegation", label: "Work Routing Ladder body + Pi Subagent Model Routing" },
+	{
+		lines: [98, 107],
+		target: "obsolete",
+		label: "Size/risk-selected SDD tier replaced by explicit-request/accepted-proposal selection (#312)",
+	},
+	{ lines: [108, 108], target: "delegation", label: "SDD explicit-request trigger" },
+	{
+		lines: [109, 110],
+		target: "obsolete",
+		label: "Size-gated SDD entry replaced by explicit-selection gating (#312)",
+	},
 	{ lines: [112, 112], target: "core", label: "Delegation Rules heading" },
 	{ lines: [114, 114], target: "core", label: "Delegation Rules core question" },
 	{
@@ -177,9 +188,14 @@ const DISPOSITION_MAP: DispositionRange[] = [
 		label: "Superseded no-runtime inline exception",
 	},
 	{
-		lines: [134, 181],
+		lines: [134, 167],
 		target: "delegation",
-		label: "Mandatory Triggers remainder + Cost/Context Balance + Canonical Workflows + Review Lens Selection",
+		label: "Mandatory Triggers remainder + Cost/Context Balance + Canonical Workflows",
+	},
+	{
+		lines: [169, 181],
+		target: "obsolete",
+		label: "Parent-selected review lens table replaced by native RAR lens ownership (#312)",
 	},
 	{ lines: [183, 191], target: "core", label: "SDD Workflow pointer" },
 	{ lines: [193, 193], target: "core", label: "Memory Contract heading" },

@@ -85,12 +85,6 @@ function parseBatch(value: unknown): RefuterBatch | InvalidRefuterBatch {
 	return { schema: REFUTER_BATCH_SCHEMA, request_hash: batch.request_hash, results };
 }
 
-export function parseRefuterBatch(value: unknown): RefuterBatch {
-	const batch = parseBatch(value);
-	if ("status" in batch) throw new TypeError(batch.reason_code);
-	return batch;
-}
-
 export function toNativeRefuterDocument(batch: RefuterBatch): NativeRefuterDocument {
 	return { results: batch.results.map((row) => ({ ...row, proof_refs: [...row.proof_refs] })) };
 }
