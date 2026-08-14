@@ -4637,6 +4637,20 @@ function cleanupAllPendingReviewConsents(pendingReviewConsents: Map<string, Pend
 	for (const pending of [...pendingReviewConsents.values()]) cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews);
 }
 
+// An unused consent binding and the candidate view retained exclusively for
+// that binding expire as one lifecycle unit. TTL expiry is observable the
+// moment synchronous time says `expiresAt <= now`, so cleanup must be
+// synchronous with respect to that observation — the queued cleanup
+// macrotask is a safety net, not the authority. Pruning here (before any
+// later START may reuse the retained view) keeps timer order from deciding
+// correctness: a fresh candidate retry never reuses a view whose binding
+// already expired, so it cannot trip `candidate-target-projection-drift`.
+function pruneExpiredReviewConsents(pendingReviewConsents: Map<string, PendingReviewConsent>, candidateViews: CandidateViewRegistry | null, now: () => number): void {
+	for (const pending of [...pendingReviewConsents.values()]) {
+		if (pending.expiresAt <= now()) cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews);
+	}
+}
+
 function reviewConsentDigest(consent: ReviewConsentV2): string {
 	return createHash("sha256").update(JSON.stringify(consent)).digest("hex");
 }
@@ -5105,6 +5119,8 @@ async function executeReviewControllerOperation(
 	correctionEvidenceByLineage: Map<string, CorrectionEvidence> = new Map(),
 	pendingReviewConsents: Map<string, PendingReviewConsent> = new Map(),
 	writeReviewConsentLatch: typeof recordReviewConsentLatch = recordReviewConsentLatch,
+	reviewConsentNow: () => number = Date.now,
+	reviewConsentScheduleTimer: (callback: () => void, delayMs: number) => { unref: () => void } = setTimeout,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewControllerParameters(parametersValue);
 	const defaultCwd = resolveReviewControllerWorkspaceRoot(parameters.workspaceRoot, sessionCwd);
@@ -5264,7 +5280,7 @@ async function executeReviewControllerOperation(
 		if (typeof input.consentBinding !== "string" || input.consentBinding.length === 0) throw new Error("Review controller answer-consent requires an opaque consentBinding");
 		if (input.answer !== "granted" && input.answer !== "declined") throw new Error("Review controller answer-consent answer must be granted or declined");
 		const pending = pendingReviewConsents.get(input.consentBinding);
-		if (pending === undefined || pending.expiresAt <= Date.now()) {
+		if (pending === undefined || pending.expiresAt <= reviewConsentNow()) {
 			if (pending !== undefined) cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews);
 			throw new Error("Review controller consent binding is unknown, expired, or already consumed");
 		}
@@ -5372,6 +5388,12 @@ async function executeReviewControllerOperation(
 				return nativeOperationFailure(parameters.operation, error);
 			}
 			const replayKey = JSON.stringify({ cwd: defaultCwd, lineageId: parameters.lineageId ?? null, input: parameters.input ?? null, inputPath: parameters.inputPath ?? null });
+			// Synchronously drop any binding whose TTL has already elapsed
+			// before reusing its retained candidate view, so a fresh-candidate
+			// retry cannot reuse a view tied to an expired binding and trip
+			// candidate-target-projection-drift. Timer order must not decide
+			// correctness: the queued cleanup macrotask may not have fired yet.
+			pruneExpiredReviewConsents(pendingReviewConsents, candidateViews, reviewConsentNow);
 			let candidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			let nativeStartAttempted = false;
 			try {
@@ -5398,13 +5420,13 @@ async function executeReviewControllerOperation(
 					const consentCandidateView = candidateView;
 					const repositoryCwd = realpathSync(defaultCwd);
 					const consentDigest = reviewConsentDigest(error.consent);
-					const existing = [...pendingReviewConsents.values()].find((pending) => pending.repositoryCwd === repositoryCwd && pending.candidateView.token === consentCandidateView.token && pending.consentDigest === consentDigest && pending.expiresAt > Date.now());
+					const existing = [...pendingReviewConsents.values()].find((pending) => pending.repositoryCwd === repositoryCwd && pending.candidateView.token === consentCandidateView.token && pending.consentDigest === consentDigest && pending.expiresAt > reviewConsentNow());
 					if (existing === undefined) for (const pending of [...pendingReviewConsents.values()]) if (pending.candidateView.token === consentCandidateView.token) consumePendingReviewConsent(pending, pendingReviewConsents);
 					const id = existing?.id ?? randomUUID();
 					if (existing === undefined) {
-						const pending: PendingReviewConsent = { id, repositoryCwd, authorityCwd: defaultCwd, candidateView: consentCandidateView, consent: error.consent, consentDigest, expiresAt: Date.now() + PENDING_REVIEW_CONSENT_TTL_MS };
+						const pending: PendingReviewConsent = { id, repositoryCwd, authorityCwd: defaultCwd, candidateView: consentCandidateView, consent: error.consent, consentDigest, expiresAt: reviewConsentNow() + PENDING_REVIEW_CONSENT_TTL_MS };
 						pendingReviewConsents.set(id, pending);
-						pending.expiry = setTimeout(() => cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews), PENDING_REVIEW_CONSENT_TTL_MS);
+						pending.expiry = reviewConsentScheduleTimer(() => cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews), PENDING_REVIEW_CONSENT_TTL_MS);
 						pending.expiry.unref();
 					}
 					return {
@@ -6231,6 +6253,12 @@ export interface GentleAiRuntimeDependencies {
 	publicationProbe?: PublicationProbe;
 	publicationProbeTimeoutMs?: number;
 	bashTimeRevalidationTimeoutMs?: number;
+	// Deterministic test seam for the consent-binding TTL clock. Production
+	// leaves both undefined so the consent path observes real wall-clock time;
+	// tests inject a fake clock so expiry is observable without a 10-minute
+	// sleep and without relying on the queued cleanup macrotask firing.
+	now?: () => number;
+	scheduleTimer?: (callback: () => void, delayMs: number) => { unref: () => void };
 }
 
 export function createGentleAiExtension(dependencies: GentleAiRuntimeDependencies = {}): (pi: ExtensionAPI) => void {
@@ -6245,6 +6273,8 @@ function createGentleAiExtensionForTesting(
 	const publicationProbe = dependencies.publicationProbe ?? nodePublicationProbe;
 	const publicationProbeTimeoutMs = dependencies.publicationProbeTimeoutMs ?? PUBLICATION_PROBE_TIMEOUT_MS;
 	const bashTimeRevalidationTimeoutMs = dependencies.bashTimeRevalidationTimeoutMs ?? BASH_TIME_REVALIDATION_TIMEOUT_MS;
+	const reviewConsentNow = dependencies.now ?? (() => Date.now());
+	const reviewConsentScheduleTimer = dependencies.scheduleTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
 	if (!Number.isSafeInteger(publicationProbeTimeoutMs) || publicationProbeTimeoutMs <= 0) throw new TypeError("Publication probe timeout must be a positive safe integer");
 	if (!Number.isSafeInteger(bashTimeRevalidationTimeoutMs) || bashTimeRevalidationTimeoutMs <= 0) throw new TypeError("Bash-time revalidation timeout must be a positive safe integer");
 	return function gentleAi(pi: ExtensionAPI): void {
@@ -6305,6 +6335,8 @@ function createGentleAiExtensionForTesting(
 				correctionEvidenceByLineage,
 				pendingReviewConsents,
 				writeReviewConsentLatch,
+				reviewConsentNow,
+				reviewConsentScheduleTimer,
 			);
 			return {
 				content: [{ type: "text", text: JSON.stringify(details) }],

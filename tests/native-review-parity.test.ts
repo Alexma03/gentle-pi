@@ -444,11 +444,12 @@ interface RegisteredEventFixture {
 function runtime(
 	nativeReviewCli: NativeReviewCli | null,
 	writeReviewConsentLatch: typeof recordReviewConsentLatch = recordReviewConsentLatch,
+	clock?: { now?: () => number; scheduleTimer?: (callback: () => void, delayMs: number) => { unref: () => void } },
 ): { controller: RegisteredTool; commands: Map<string, RegisteredCommandFixture>; events: Map<string, RegisteredEventFixture> } {
 	const tools = new Map<string, RegisteredTool>();
 	const commands = new Map<string, RegisteredCommandFixture>();
 	const events = new Map<string, RegisteredEventFixture>();
-	const dependencies = { nativeReviewCli, candidateViews: new CandidateViewRegistry() } as unknown as Parameters<typeof createGentleAiExtension>[0];
+	const dependencies = { nativeReviewCli, candidateViews: new CandidateViewRegistry(), ...clock } as unknown as Parameters<typeof createGentleAiExtension>[0];
 	__testing.createGentleAiExtension(dependencies, writeReviewConsentLatch)({
 		on(name: string, handler: RegisteredEventFixture) { events.set(name, handler); },
 		registerTool(definition: RegisteredTool & { name: string }) { tools.set(definition.name, definition); },
@@ -773,6 +774,77 @@ test("successful explicit disable clears pending candidate consent binding even 
 	await command.handler("enable", headlessContext(cwd));
 	await assert.rejects(() => answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd)), /unknown, expired, or already consumed/);
 	assert.deepEqual(answers, []);
+});
+
+// Issue #264: an unused consent binding and the candidate view retained
+// exclusively for that binding must expire as one lifecycle unit before any
+// later START may reuse the view. Cleanup is synchronous with respect to the
+// observable TTL; the queued cleanup macrotask is a safety net, not the
+// authority, so a fresh-candidate retry after expiry must get a new binding
+// rather than tripping candidate-target-projection-drift on a stale view.
+const REVIEW_CONSENT_TTL_MS = 10 * 60 * 1000;
+
+function fakeConsentClock(): { now: () => number; scheduleTimer: (callback: () => void, delayMs: number) => { unref: () => void }; advance: (ms: number) => void; scheduled: Array<() => void> } {
+	const start = Date.now();
+	let nowMs = start;
+	const scheduled: Array<() => void> = [];
+	return {
+		now: () => nowMs,
+		// Never fires the callback: simulates a queued cleanup macrotask that
+		// has not yet gotten a turn on the event loop.
+		scheduleTimer: (callback) => { scheduled.push(callback); return { unref: () => {} }; },
+		advance: (ms) => { nowMs = start + ms; },
+		scheduled,
+	};
+}
+
+test("an expired unused binding prunes synchronously so a fresh-candidate retry gets a new binding, not candidate-target-projection-drift", async (t) => {
+	const cwd = repository(t);
+	const { native, startRequests } = relayedConsentNative(cwd);
+	const clock = fakeConsentClock();
+	const { controller } = runtime(native, recordReviewConsentLatch, { now: clock.now, scheduleTimer: clock.scheduleTimer });
+	// First START: consent-required, binding T1 retained with a queued cleanup timer.
+	const first = await blockedConsent(controller, "expired-fresh-1", headlessContext(cwd));
+	const firstBinding = first.consent_binding;
+	assert.equal(clock.scheduled.length, 1, "the TTL cleanup macrotask is queued for T1");
+	// The candidate changes: a later START on a FRESH candidate must not reuse T1.
+	writeFileSync(join(cwd, "app.ts"), "export const value = 3;\n");
+	// Advance time past the TTL without letting the queued cleanup macrotask fire.
+	clock.advance(REVIEW_CONSENT_TTL_MS + 1);
+	assert.equal(clock.scheduled.length, 1, "the queued cleanup macrotask has not fired");
+	const second = await execStart(controller, "expired-fresh-2", headlessContext(cwd));
+	// The fix: a fresh consent-required binding, not candidate-target-projection-drift.
+	assert.equal(second.status, "blocked");
+	assert.equal(second.outcome, "native-review-consent-required", "the stale view must not trip candidate-target-projection-drift");
+	assert.equal(typeof second.consent_binding, "string");
+	assert.notEqual(second.consent_binding, firstBinding, "a fresh candidate gets a fresh binding, not the stale one");
+	assert.equal(startRequests.length, 2, "native start was attempted for both candidates");
+	assert.equal(clock.scheduled.length, 2, "the fresh binding queued its own cleanup macrotask");
+});
+
+test("a non-expired same-candidate consent request reuses the same binding instead of creating a new one", async (t) => {
+	const cwd = repository(t);
+	const { native } = relayedConsentNative(cwd);
+	const clock = fakeConsentClock();
+	const { controller } = runtime(native, recordReviewConsentLatch, { now: clock.now, scheduleTimer: clock.scheduleTimer });
+	const first = await blockedConsent(controller, "dedup-1", headlessContext(cwd));
+	// Same candidate, same consent, still within TTL: the existing binding is reused.
+	const second = await blockedConsent(controller, "dedup-2", headlessContext(cwd));
+	assert.equal(second.consent_binding, first.consent_binding, "a non-expired same-candidate request deduplicates the binding");
+	assert.equal(clock.scheduled.length, 1, "no new cleanup macrotask is queued when the binding is reused");
+});
+
+test("an expired consent binding is rejected on answer-consent even before the queued cleanup macrotask fires", async (t) => {
+	const cwd = repository(t);
+	const { native } = relayedConsentNative(cwd);
+	const clock = fakeConsentClock();
+	const { controller } = runtime(native, recordReviewConsentLatch, { now: clock.now, scheduleTimer: clock.scheduleTimer });
+	const blocked = await blockedConsent(controller, "expired-answer-1", headlessContext(cwd));
+	// Advance past TTL without firing the queued cleanup macrotask.
+	clock.advance(REVIEW_CONSENT_TTL_MS + 1);
+	assert.equal(clock.scheduled.length, 1, "the queued cleanup macrotask has not fired");
+	await assert.rejects(() => answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd)), /unknown, expired, or already consumed/);
+	assert.equal(clock.scheduled.length, 1, "rejection was synchronous from the TTL observation, not from a fired macrotask");
 });
 
 test("candidate-scoped decline creates no authority and the next candidate asks again", async (t) => {
