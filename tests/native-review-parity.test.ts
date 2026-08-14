@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -21,7 +21,7 @@ import {
 	type NativeStartRequest,
 } from "../lib/native-review-cli.ts";
 import { CandidateViewRegistry } from "../lib/review-candidate-view.ts";
-import { recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
+import { readReviewConsentLatch, recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
 import type { AuthorityRepairAssessmentV1, ReviewConsentV2, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 
 // Queued-adapter clients never execute a real process; default to a fixed
@@ -441,12 +441,15 @@ interface RegisteredEventFixture {
 	(event: unknown, ctx: ExtensionContext): Promise<unknown> | unknown;
 }
 
-function runtime(nativeReviewCli: NativeReviewCli | null): { controller: RegisteredTool; commands: Map<string, RegisteredCommandFixture>; events: Map<string, RegisteredEventFixture> } {
+function runtime(
+	nativeReviewCli: NativeReviewCli | null,
+	writeReviewConsentLatch: typeof recordReviewConsentLatch = recordReviewConsentLatch,
+): { controller: RegisteredTool; commands: Map<string, RegisteredCommandFixture>; events: Map<string, RegisteredEventFixture> } {
 	const tools = new Map<string, RegisteredTool>();
 	const commands = new Map<string, RegisteredCommandFixture>();
 	const events = new Map<string, RegisteredEventFixture>();
 	const dependencies = { nativeReviewCli, candidateViews: new CandidateViewRegistry() } as unknown as Parameters<typeof createGentleAiExtension>[0];
-	createGentleAiExtension(dependencies)({
+	__testing.createGentleAiExtension(dependencies, writeReviewConsentLatch)({
 		on(name: string, handler: RegisteredEventFixture) { events.set(name, handler); },
 		registerTool(definition: RegisteredTool & { name: string }) { tools.set(definition.name, definition); },
 		registerCommand(name: string, definition: RegisteredCommandFixture) { commands.set(name, definition); },
@@ -610,8 +613,13 @@ test("consent relay returns the identical complete parent-visible envelope with 
 });
 
 test("explicit consent follow-up grants or declines exactly once", async (t) => {
-	const cwd = repository(t);
 	for (const answer of ["granted", "declined"] as const) {
+		const repositoryCwd = repository(t);
+		const cwd = `${repositoryCwd}-alias`;
+		symlinkSync(repositoryCwd, cwd, process.platform === "win32" ? "junction" : "dir");
+		t.after(() => rmSync(cwd, { force: true }));
+		const canonicalCwd = realpathSync(cwd);
+		assert.equal(readReviewConsentLatch(cwd), false);
 		const { native, answers, startRequests, answerRequests } = relayedConsentNative(cwd);
 		const { controller } = runtime(native);
 		const blocked = await blockedConsent(controller, `consent-${answer}`, headlessContext(cwd));
@@ -626,15 +634,40 @@ test("explicit consent follow-up grants or declines exactly once", async (t) => 
 		assert.equal(answerRequests[0]?.consent.targetIdentity, startRequests[0]?.targetIdentity);
 		if (answer === "granted") {
 			const actorBinding = result.actor_binding as { workspace_root: string; candidate_root: string };
-			assert.equal(actorBinding.workspace_root, cwd);
-			assert.notEqual(actorBinding.candidate_root, cwd);
+			assert.equal(actorBinding.workspace_root, canonicalCwd);
+			assert.notEqual(actorBinding.candidate_root, canonicalCwd);
+			assert.equal(readReviewConsentLatch(cwd), true);
 		} else {
 			assert.equal(result.outcome, "consent-declined-this-candidate");
 			assert.equal(result.lineage_created, false);
-			assert.equal(result.actor_binding, undefined);
+			assert.equal("actor_binding" in result, false);
+			assert.equal("result" in result, false);
+			assert.equal(readReviewConsentLatch(cwd), false);
 		}
 		await assert.rejects(() => answerConsent(controller, blocked.consent_binding, answer, headlessContext(cwd)), /unknown, expired, or already consumed/);
 	}
+});
+
+test("granted consent preserves the completed native start when local latch persistence fails", async (t) => {
+	const cwd = repository(t);
+	const { native, answers } = relayedConsentNative(cwd);
+	const notices: Array<{ message: string; type?: string }> = [];
+	let latchWrites = 0;
+	const { controller } = runtime(native, () => {
+		latchWrites += 1;
+		throw new Error("injected consent latch failure");
+	});
+	const blocked = await blockedConsent(controller, "consent-latch-failure", headlessContext(cwd, notices));
+	const result = await answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd, notices));
+
+	assert.deepEqual(answers, ["granted"]);
+	assert.equal(latchWrites, 1);
+	assert.deepEqual(result.result, { lineage_id: "native-lineage", state: "reviewing", risk_tier: "high", selected_lenses: ["review-risk", "review-resilience", "review-readability", "review-reliability"], changed_files: 1, original_changed_lines: 1, correction_budget: 1, action: "created", lenses_required: true });
+	assert.equal((result.actor_binding as { workspace_root: string }).workspace_root, realpathSync(cwd));
+	assert.equal(readReviewConsentLatch(cwd), false);
+	assert.equal(notices.length, 1);
+	assert.equal(notices[0]?.type, "warning");
+	assert.match(notices[0]?.message ?? "", /native review start completed, but Pi could not record the local consent latch/i);
 });
 
 // Issue #247: a local binding mismatch was indistinguishable from a provider
@@ -657,6 +690,7 @@ test("a consent binding mismatch surfaces as an actionable local failure, not an
 	assert.equal(result.mutation_outcome, "none");
 	assert.equal(result.next_action, "resolve-consent-binding");
 	assert.deepEqual(answers, []);
+	assert.equal(readReviewConsentLatch(cwd), false);
 });
 
 test("consent follow-up rejects invalid token, unknown id, changed cwd, and changed target binding", async (t) => {
@@ -682,6 +716,17 @@ test("consent follow-up rejects invalid token, unknown id, changed cwd, and chan
 	(consent.choices[0] as { invocation: string }).invocation = consent.choices[0].invocation.replace("native-lineage", "changed-lineage");
 	await assert.rejects(() => answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd)), /consent envelope binding changed/);
 	assert.deepEqual(answers, []);
+	assert.equal(readReviewConsentLatch(cwd), false);
+});
+
+test("unavailable consent follow-up leaves the clone latch unset", async (t) => {
+	const cwd = repository(t);
+	const { native } = relayedConsentNative(cwd);
+	delete native.answerConsent;
+	const { controller } = runtime(native);
+	const blocked = await blockedConsent(controller, "consent-unavailable", headlessContext(cwd));
+	await assert.rejects(() => answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd)), /consent follow-up is unavailable/);
+	assert.equal(readReviewConsentLatch(cwd), false);
 });
 
 test("ambiguous consent mutation consumes the one-shot binding and requires status instead of blind replay", async (t) => {
@@ -696,6 +741,7 @@ test("ambiguous consent mutation consumes the one-shot binding and requires stat
 	await answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd));
 	assert.equal(statusCalls, 2, "ambiguous consent must reconcile through target status");
 	await assert.rejects(() => answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd)), /unknown, expired, or already consumed/);
+	assert.equal(readReviewConsentLatch(cwd), false);
 });
 
 test("session shutdown clears pending candidate consent bindings and is idempotent", async (t) => {
@@ -738,9 +784,32 @@ test("candidate-scoped decline creates no authority and the next candidate asks 
 		const result = await answerConsent(controller, blocked.consent_binding, "declined", headlessContext(cwd));
 		assert.equal(result.outcome, "consent-declined-this-candidate");
 		assert.equal(result.lineage_created, false);
-		assert.equal(result.actor_binding, undefined);
+		assert.equal("actor_binding" in result, false);
+		assert.equal("result" in result, false);
+		assert.equal(readReviewConsentLatch(cwd), false);
 	}
 	assert.deepEqual(answers, ["declined", "declined"]);
+});
+
+// Upstream gentle-ai.review-integration.consent/v3 consent is per-candidate:
+// the clone-local latch records only that the one-time question was already
+// put to the user, never that any later candidate is pre-approved. A fresh
+// START with the latch already recorded must still relay the complete
+// blocking envelope, and only an explicit ANSWER_CONSENT may resolve it.
+test("a pre-recorded consent latch never suppresses a later candidate's consent envelope or auto-answers it", async (t) => {
+	const cwd = repository(t);
+	recordReviewConsentLatch(cwd);
+	assert.equal(readReviewConsentLatch(cwd), true);
+	const { native, answers, startRequests } = relayedConsentNative(cwd);
+	const { controller } = runtime(native);
+	const blocked = await blockedConsent(controller, "consent-latched-fresh-start", headlessContext(cwd));
+	assert.deepEqual(blocked.consent, candidateConsent(cwd).raw, "the full consent envelope is relayed despite the pre-recorded latch");
+	assert.deepEqual(answers, [], "the latch must never auto-answer a later candidate's consent");
+	assert.equal(blocked.lineage_created, false);
+	assert.equal(startRequests.length, 1);
+	const result = await answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd));
+	assert.deepEqual(answers, ["granted"], "explicit ANSWER_CONSENT is still required to proceed");
+	assert.ok(result.result);
 });
 
 test("low-risk zero-lens START remains silent", async (t) => {

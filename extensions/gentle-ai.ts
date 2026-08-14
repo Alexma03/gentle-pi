@@ -126,6 +126,7 @@ import {
 } from "../lib/native-review-cli.ts";
 import type { ReviewConsentV2, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 import { assertDistinctCorrectionEvidence, resolveCorrectionStep, type CorrectionEvidence, type CorrectionOutcome, type CorrectionStep } from "../lib/review-correction-lifecycle.ts";
+import { recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
 
 const GRAPH_V1_ORDINARY_READ_ONLY = "Graph-v1 ordinary review authority is read-only; use native compact-v2 review operations";
 import {
@@ -5003,6 +5004,7 @@ async function executeReviewControllerOperation(
 	context?: ExtensionContext,
 	correctionEvidenceByLineage: Map<string, CorrectionEvidence> = new Map(),
 	pendingReviewConsents: Map<string, PendingReviewConsent> = new Map(),
+	writeReviewConsentLatch: typeof recordReviewConsentLatch = recordReviewConsentLatch,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewControllerParameters(parametersValue);
 	const defaultCwd = resolveReviewControllerWorkspaceRoot(parameters.workspaceRoot, sessionCwd);
@@ -5182,6 +5184,7 @@ async function executeReviewControllerOperation(
 		// The one-shot binding is consumed before the provider mutation. Any
 		// ambiguous result reconciles through STATUS and can never be replayed.
 		consumePendingReviewConsent(pending, pendingReviewConsents);
+		let completed: Record<string, unknown>;
 		try {
 			const answered = await nativeReviewCli.answerConsent({
 				cwd: pending.authorityCwd,
@@ -5199,7 +5202,7 @@ async function executeReviewControllerOperation(
 					...nativeStartPreAuthorityRejection(),
 				};
 			}
-			return completeNativeStart(parameters.operation, answered.start, pending.repositoryCwd, pending.candidateView, candidateViews);
+			completed = completeNativeStart(parameters.operation, answered.start, pending.repositoryCwd, pending.candidateView, candidateViews);
 		} catch (error) {
 			const value = error as { mutationOutcome?: unknown };
 			if (value.mutationOutcome === "none") candidateViews?.cleanup(pending.candidateView.token);
@@ -5209,6 +5212,16 @@ async function executeReviewControllerOperation(
 				projection: "workspace",
 			});
 		}
+		if (input.answer === "granted") {
+			try {
+				writeReviewConsentLatch(pending.repositoryCwd);
+			} catch (error) {
+				try {
+					context?.ui.notify(`Native review start completed, but Pi could not record the local consent latch: ${error instanceof Error ? error.message : String(error)}`, "warning");
+				} catch { /* Reporting is best effort; native completion remains authoritative. */ }
+			}
+		}
+		return completed;
 	}
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.START) {
 		const rawStart = parseControllerJson(
@@ -6043,6 +6056,7 @@ export const __testing = {
 	resolveStartupControllerSddStatus,
 	repositoryLocationIdentity,
 	runPublicationProbeGit,
+	createGentleAiExtension: createGentleAiExtensionForTesting,
 	publicationProbeErrorCode: PUBLICATION_PROBE_ERROR_CODE,
 };
 
@@ -6099,6 +6113,13 @@ export interface GentleAiRuntimeDependencies {
 }
 
 export function createGentleAiExtension(dependencies: GentleAiRuntimeDependencies = {}): (pi: ExtensionAPI) => void {
+	return createGentleAiExtensionForTesting(dependencies);
+}
+
+function createGentleAiExtensionForTesting(
+	dependencies: GentleAiRuntimeDependencies = {},
+	writeReviewConsentLatch: typeof recordReviewConsentLatch = recordReviewConsentLatch,
+): (pi: ExtensionAPI) => void {
 	const nativeReviewCli = dependencies.nativeReviewCli === undefined ? createNativeReviewCli() : dependencies.nativeReviewCli;
 	const publicationProbe = dependencies.publicationProbe ?? nodePublicationProbe;
 	const publicationProbeTimeoutMs = dependencies.publicationProbeTimeoutMs ?? PUBLICATION_PROBE_TIMEOUT_MS;
@@ -6162,6 +6183,7 @@ export function createGentleAiExtension(dependencies: GentleAiRuntimeDependencie
 				ctx,
 				correctionEvidenceByLineage,
 				pendingReviewConsents,
+				writeReviewConsentLatch,
 			);
 			return {
 				content: [{ type: "text", text: JSON.stringify(details) }],
