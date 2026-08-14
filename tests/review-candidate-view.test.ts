@@ -1409,6 +1409,53 @@ test("candidate view probe does not convert a ref-existence probe timeout into a
 	assert.equal((failure as CandidateViewError).reason, "candidate-view-timeout");
 });
 
+test("candidate view fails closed when the unborn ref probe exits with an unexpected status instead of treating it as unborn", (t) => {
+	const contributorRoot = unbornRepository(t);
+	// Only status 1 means "ref absent" (valid unborn). Any other nonzero status
+	// (128, etc.) signals corruption or an I/O failure and must fail closed,
+	// never masquerade as an unborn empty-tree base.
+	const executor: CandidateGitExecutor = (file, args, options) => {
+		if (args[0] === "rev-parse" && args.includes("--quiet")) throw Object.assign(new Error("fatal: probe failed"), { status: 128 });
+		return execFileSync(file, args, options);
+	};
+	let failure: unknown;
+	try {
+		new CandidateViewRegistry(executor).create({ contributorRoot });
+	} catch (error) {
+		failure = error;
+	}
+	assert.ok(failure instanceof CandidateViewError, "an unexpected unborn probe status must fail closed, not unborn");
+	assert.equal((failure as CandidateViewError).reason, "candidate-view-git-failure");
+});
+
+test("candidate view treats an unborn sha256 repository base as the repository-native sha256 empty tree", (t) => {
+	const contributorRoot = mkdtempSync(join(tmpdir(), "gentle-pi-candidate-view-unborn-sha256-"));
+	t.after(() => rmSync(contributorRoot, { recursive: true, force: true }));
+	try {
+		git(contributorRoot, "init", "--object-format=sha256", "-b", "main");
+	} catch {
+		t.skip("installed git does not support `git init --object-format=sha256`");
+		return;
+	}
+	git(contributorRoot, "config", "user.name", "Candidate Test");
+	git(contributorRoot, "config", "user.email", "candidate@example.invalid");
+	writeFileSync(join(contributorRoot, "staged.txt"), "first staged\n");
+	git(contributorRoot, "add", "staged.txt");
+	const view = createCandidateView({ contributorRoot });
+	try {
+		const emptyTree = emptyTreeOf(contributorRoot);
+		assert.equal(emptyTree.length, 64, "a sha256 repository must derive a 64-hex empty tree, not the hardcoded SHA-1 id");
+		assert.equal(view.baseTree, emptyTree);
+		assert.equal(view.baseCommit, "HEAD");
+		assert.equal(view.committedOnly, false);
+		assert.notEqual(view.candidateTree, emptyTree);
+		assert.deepEqual(view.paths, ["staged.txt"]);
+		assert.deepEqual(view.deletedPaths, []);
+	} finally {
+		view.cleanup();
+	}
+});
+
 test("candidate view unborn worktree falls back when --orphan is unsupported, preserving isolation, no phantom commit, and contributor immutability", (t) => {
 	const contributorRoot = unbornRepository(t);
 	const indexBefore = readFileSync(join(contributorRoot, ".git", "index"));

@@ -647,15 +647,19 @@ function probeCandidateGit(cwd: string, arguments_: readonly string[], env: Node
 
 // An unborn repository's HEAD is a symbolic ref to a branch with no commits.
 // `symbolic-ref --quiet HEAD` exits nonzero for a detached HEAD (not unborn).
-// `rev-parse --verify --quiet <ref>` distinguishes a valid unborn (nonzero, ref
-// absent) from a broken symbolic ref (exit 0, ref OID text exists even when the
-// object is missing). Any unexpected outcome fails closed.
+// `rev-parse --verify --quiet <ref>` distinguishes a valid unborn (status 1,
+// ref absent) from a broken symbolic ref (exit 0, ref OID text exists even
+// when the object is missing). Any other status (128, etc.) signals
+// corruption or an I/O failure, so it fails closed instead of masquerading as
+// an unborn repository.
 function isUnbornSymbolicHead(cwd: string, env: NodeJS.ProcessEnv, executor: CandidateGitExecutor): boolean {
 	const symbolic = probeCandidateGit(cwd, ["symbolic-ref", "--quiet", "HEAD"], env, executor);
 	if (symbolic.status !== 0) return false;
-	const refProbe = probeCandidateGit(cwd, ["rev-parse", "--verify", "--quiet", symbolic.stdout], env, executor);
-	if (refProbe.status !== 0) return true;
-	return false;
+	const refProbeArguments = ["rev-parse", "--verify", "--quiet", symbolic.stdout];
+	const refProbe = probeCandidateGit(cwd, refProbeArguments, env, executor);
+	if (refProbe.status === 1) return true;
+	if (refProbe.status === 0) return false;
+	throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.GIT_FAILURE, refProbeArguments, resolveCandidateGitTimeoutMs(env));
 }
 
 // Derives Git's repository-native empty tree without hardcoding the SHA-1 id,
