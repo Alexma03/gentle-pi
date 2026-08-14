@@ -162,9 +162,14 @@ const DISPOSITION_MAP: DispositionRange[] = [
 	{ lines: [112, 112], target: "core", label: "Delegation Rules heading" },
 	{ lines: [114, 114], target: "core", label: "Delegation Rules core question" },
 	{
-		lines: [116, 132],
+		lines: [116, 126],
+		target: "obsolete",
+		label: "Pre-canon delegation table replaced by the mirrored gentle-ai canon table (#312)",
+	},
+	{
+		lines: [128, 132],
 		target: "delegation",
-		label: "Delegation Rules table + Mandatory Triggers preamble",
+		label: "Mandatory Triggers heading + Pi trigger preamble + 4-file binding",
 	},
 	{
 		lines: [133, 133],
