@@ -107,6 +107,14 @@ The orchestrator MUST carry `actionContext` into any phase launch.
 - `openspec` and `both` (when `openspec/` directory exists): the native status engine resolves artifact state from disk and is authoritative. Phase executors must obey it.
 - `engram`, `none`, and `both` (when `openspec/` directory does NOT exist): the native status engine cannot read Engram artifacts. It returns `nextRecommended: "resolve-via-engram"` and empty `blockedReasons`. This output is **non-authoritative**. The orchestrator must resolve readiness directly from Engram using the Engram memory tools injected by the memory provider on the change topic keys (`sdd/{change-name}/proposal`, `sdd/{change-name}/spec`, etc.) instead of relying on the engine's dependency states. The `artifactStore` field still reflects the real chosen store value (e.g. `"both"`) and must not be rewritten.
 
+## Native Runtime Attempt Authority
+
+The compact SDD runtime attempt authority is separate from artifact dispatch and status. It is artifact-store agnostic: the same acquire/settle discipline applies to `openspec`, `engram`, `both`, and `none` stores. Its payload MUST NOT be embedded in the SDD v1 status schema above; status reports artifact state only, never attempt tokens or attempt counters. No OpenSpec or Engram attempt ledger may be created or mirrored by Pi.
+
+Before every runtime-bearing `sdd-apply`, `sdd-verify`, or remediation launch, the orchestrator MUST acquire a bounded attempt from the provider compact CLI; after the external run completes it MUST settle. The acquire and settle request IDs are distinct; an operation's own request ID is reused only for idempotent replay of that exact operation. Continuation routes only from the provider-returned `proceed|blocked|complete` — launch only on `proceed`, stop on `blocked` or `complete`. `reset` is never automatic and requires an explicit maintainer scope decision.
+
+For the exact compact acquire/settle shapes and the full field semantics, see the `Native Runtime Attempt Authority` section of the lazy-loaded `SDD Orchestrator Workflow` contract. Do not look up `assets/...` paths at runtime; those are package source paths before installation.
+
 ## Status Output
 
 Every command or agent that acts on a change MUST show or consume status before doing phase work:
