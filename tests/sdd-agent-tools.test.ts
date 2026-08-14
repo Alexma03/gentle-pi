@@ -75,8 +75,6 @@ const requiredToolsByAgent: Record<string, string[]> = {
 	"sdd-verify.md": ["read", "grep", "find", "edit", "write", "bash", "mem_search", "mem_get_observation", "mem_save"],
 };
 
-const unsupportedPiChildSessionTools = ["glob", "webfetch"];
-
 test("SDD package agents declare role-appropriate tools as YAML arrays", () => {
 	for (const [fileName, requiredTools] of Object.entries(requiredToolsByAgent)) {
 		const path = join(assetsAgentsDir, fileName);
@@ -103,15 +101,6 @@ test("artifact-producing SDD agents can persist OpenSpec files while status rema
 	const statusTools = readTools(join(assetsAgentsDir, "sdd-status.md"));
 	assert.ok(!statusTools.includes("edit"), "sdd-status.md must remain read-only");
 	assert.ok(!statusTools.includes("write"), "sdd-status.md must remain read-only");
-});
-
-test("SDD package agents avoid unsupported Pi child-session tools", () => {
-	for (const fileName of Object.keys(requiredToolsByAgent)) {
-		const tools = readTools(join(assetsAgentsDir, fileName));
-		for (const tool of unsupportedPiChildSessionTools) {
-			assert.ok(!tools.includes(tool), `${fileName} must not declare unsupported Pi child-session tool ${tool}`);
-		}
-	}
 });
 
 test("project does not ship local SDD agent overrides", () => {

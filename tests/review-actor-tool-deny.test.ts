@@ -88,12 +88,15 @@ test("every read-only review actor leads its tool map with the deny-all rule", (
 });
 
 test("a tool absent from the allowlist resolves to denied under the deny-all rule", () => {
+	// Mirrors the tool names a real Pi child session can resolve. `glob` is
+	// deliberately absent: it is not a Pi builtin, so a lens that declares it
+	// silently loses filesystem discovery instead of failing loudly. Keeping
+	// the fiction here is what let that ship green.
 	const registry = [
 		"read",
 		"grep",
-		"glob",
-		"gentle_review_scope",
 		"find",
+		"gentle_review_scope",
 		"edit",
 		"write",
 		"bash",
@@ -125,7 +128,7 @@ test("a tool absent from the allowlist resolves to denied under the deny-all rul
 	// the other half of the same rule, not an exception to it.
 	for (const lens of ["review-risk", "review-resilience", "review-readability", "review-reliability"]) {
 		const lensActive = resolveActiveTools(readToolEntries(join(ASSETS_AGENTS_DIR, `${lens}.md`)), registry);
-		assert.deepEqual(lensActive, ["read", "grep", "glob", "gentle_review_scope"], `${lens} must expose only candidate readers and the bounded scope reader`);
+		assert.deepEqual(lensActive, ["read", "grep", "find", "gentle_review_scope"], `${lens} must expose only candidate readers and the bounded scope reader`);
 		for (const omitted of ["bash", "edit", "write", "mem_save", "codegraph_explore", "mcp__slack__slack_send_message", "subagent_run"]) {
 			assert.ok(!lensActive.includes(omitted), `${lens} must deny ${omitted}`);
 		}

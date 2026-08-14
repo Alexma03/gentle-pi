@@ -5,7 +5,7 @@ tools:
   - "*": false
   - read
   - grep
-  - glob
+  - find
   - gentle_review_scope
 ---
 
