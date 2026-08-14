@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix, win32 } from "node:path";
 import { promisify } from "node:util";
 import { GENTLE_AI_VERSION, PackageLocalGentleAiBinaryMissingError, resolveGentleAiBinary } from "./gentle-ai-binary.ts";
+import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "./review-relay-contract.ts";
 import {
 	REVIEW_INTEGRATION_CONTRACT,
 	decodeReviewCapabilitiesV2,
@@ -747,10 +748,19 @@ export class NativeReviewCliError extends Error {
 	}
 }
 
+// The one central runner for every gentle-ai CLI invocation the extension
+// makes. It declares the Pi host relay handshake on each spawn: gentle-ai
+// refuses pi admission pre-authority without it (gentle-pi#311 P4), and a
+// single injection point keeps the declaration impossible to forget on any
+// individual operation.
+export function gentleAiProcessEnvironment(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+	return { ...base, [GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV]: GENTLE_PI_REVIEW_RELAY_CONTRACT };
+}
+
 export function createNodeExecFileAdapter(): ExecFileAdapter {
 	return async (request) => {
 		try {
-			const output = await execFileAsync(request.file, [...request.arguments], { cwd: request.cwd, encoding: "utf8", shell: false, windowsHide: true, timeout: request.timeoutMs, maxBuffer: request.maxBufferBytes, signal: request.signal });
+			const output = await execFileAsync(request.file, [...request.arguments], { cwd: request.cwd, encoding: "utf8", shell: false, windowsHide: true, timeout: request.timeoutMs, maxBuffer: request.maxBufferBytes, signal: request.signal, env: gentleAiProcessEnvironment() });
 			return { stdout: output.stdout, stderr: output.stderr, exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 		} catch (error) {
 			const detail = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: string | number; signal?: NodeJS.Signals; killed?: boolean };

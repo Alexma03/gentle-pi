@@ -54,6 +54,16 @@ import { canonicalJsonV1, domainHashV1 } from "../lib/review-canonical.ts";
 import { CompactReviewContractError, deriveNativeRefuterRequest, parseNativeCompactFinalizeInput, toNativeReviewerDocument, toNativeValidatorDocument } from "../lib/review-compact-contract.ts";
 import { toNativeRefuterDocument } from "../lib/review-refuter-adapter.ts";
 import {
+	REVIEW_HOST_RELAY_FAILURE,
+	REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
+	REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
+	ReviewHostRelayError,
+	reviewHostRelaySlots,
+	runReviewHostRelaySlot,
+	type ReviewHostRelayRunner,
+	type ReviewHostRelaySlot,
+} from "../lib/review-host-relay.ts";
+import {
 	inheritedUnsafeGitEnvironmentKeys,
 	publicationProbeGitEnvironment,
 	resolveRepositoryAuthorityV1,
@@ -4992,6 +5002,96 @@ function assertNoTargetedValidation(status: ReviewStatusV3): void {
 	}
 }
 
+// gentle-pi#311 P4 — the thin Pi host relay. The provider decides which
+// capture slots the host satisfies by issuing the --materialize token on a
+// pi-bound `review.capture-result` collect input; nothing is ever inferred.
+// The runner is injectable for tests only; production always uses the real
+// relay in lib/review-host-relay.ts.
+let activeReviewHostRelayRunner: ReviewHostRelayRunner = runReviewHostRelaySlot;
+function setReviewHostRelayRunnerForTesting(runner?: ReviewHostRelayRunner): void {
+	activeReviewHostRelayRunner = runner ?? runReviewHostRelaySlot;
+}
+
+const REVIEW_HOST_RELAY_RETRY_ACTION =
+	"Re-query negotiated STATUS and relaunch only if the exact same bound slot is reoffered; never rerun from transcript inference.";
+
+async function executeReviewHostRelayCollection(
+	operation: ReviewControllerOperation,
+	lineageId: string,
+	slots: readonly ReviewHostRelaySlot[],
+	nativeReviewCli: NativeReviewCli,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+	const captured: Array<Record<string, unknown>> = [];
+	for (const slot of slots) {
+		let result: Awaited<ReturnType<ReviewHostRelayRunner>>;
+		try {
+			// A materialize slot without the provider-owned submission form is
+			// a provider contract mismatch: fail closed before any launch and
+			// never synthesize the completing form.
+			if (slot.submission === undefined) {
+				throw new ReviewHostRelayError(
+					REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH,
+					"binding",
+					REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
+				);
+			}
+			result = await activeReviewHostRelayRunner({
+				captureArgumentTokens: slot.captureArgumentTokens,
+				submission: slot.submission,
+				...(signal === undefined ? {} : { signal }),
+			});
+		} catch (error) {
+			if (!(error instanceof ReviewHostRelayError)) throw error;
+			const base = {
+				operation,
+				status: "blocked",
+				captured_slots: captured,
+				mutation_performed: captured.length > 0,
+				mutation_outcome: error.mutationOutcome === "unknown" ? "unknown" : captured.length > 0 ? "committed" : "none",
+			};
+			if (error.kind === REVIEW_HOST_RELAY_FAILURE.RELAY_UNAVAILABLE) {
+				return {
+					...base,
+					outcome: "pi-host-relay-unavailable",
+					reason: REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
+					next_action: "Install a gentle-ai release with the pi host relay surface; existing behavior stays untouched and there is no Pi-authored review document fallback.",
+				};
+			}
+			if (error.kind === REVIEW_HOST_RELAY_FAILURE.HANDSHAKE_REFUSED) {
+				return {
+					...base,
+					outcome: "pi-host-relay-handshake-refused",
+					reason: error.message,
+					refusal: error.stderr,
+					next_action: REVIEW_HOST_RELAY_RETRY_ACTION,
+				};
+			}
+			return {
+				...base,
+				outcome: "pi-host-relay-transport-failure",
+				failure: { kind: error.kind, stage: error.stage, exit_code: error.exitCode, timed_out: error.timedOut },
+				reason: error.message,
+				next_action: REVIEW_HOST_RELAY_RETRY_ACTION,
+			};
+		}
+		captured.push({
+			...(slot.lens === undefined ? {} : { lens: slot.lens }),
+			...(slot.order === undefined ? {} : { order: slot.order }),
+			...(slot.subjectHash === undefined ? {} : { subject_hash: slot.subjectHash }),
+			prompt_bytes: result.promptByteLength,
+			result_bytes: result.resultByteLength,
+			submission: result.submission,
+		});
+	}
+	const after = await nativeReviewCli.targetStatus!({ cwd, lineageId, ...(signal === undefined ? {} : { signal }) });
+	return {
+		...mapNativeTargetStatus(operation, after, lineageId),
+		host_relay: { transport: "pi_host_relay", captured_slots: captured },
+	};
+}
+
 async function executeReviewControllerOperation(
 	parametersValue: unknown,
 	sessionCwd: string,
@@ -5443,6 +5543,26 @@ async function executeReviewControllerOperation(
 					candidateViews.cleanup(provisionalCandidateView.token);
 					provisionalCandidateView = undefined;
 					candidateView = undefined;
+				}
+				// gentle-pi#311 P4: pi-slot capture inputs route through the host
+				// relay ONLY when the provider issued the --materialize token on
+				// the collect input. Every other slot and lane stays untouched.
+				const hostRelaySlots = negotiatedStatus.nextTransition?.kind === "collect"
+					? reviewHostRelaySlots(negotiatedStatus.nextTransition.collect?.inputs ?? [])
+					: [];
+				if (hostRelaySlots.length > 0 && input.final_evidence === undefined && input.correction_line_forecast === undefined) {
+					if (input.review_result !== undefined) {
+						return {
+							operation: parameters.operation,
+							status: "blocked",
+							outcome: "pi-host-relay-slots-are-host-mediated",
+							reason: "The provider marked these capture slots --materialize: the gentle-pi host relay satisfies them with a fresh locked-down print-mode pi subprocess, so Pi-authored reviewer documents are not admissible for them.",
+							mutation_performed: false,
+							mutation_outcome: "none",
+							next_action: "Re-run finalize without review_result; the host relay captures each provider-issued slot in provider order.",
+						};
+					}
+					return await executeReviewHostRelayCollection(parameters.operation, parameters.lineageId, hostRelaySlots, nativeReviewCli, defaultCwd, signal);
 				}
 				if (candidateViews && !candidateViews.hasProjection(parameters.lineageId)) {
 					const projection = input.review_result === undefined ? negotiatedStatus.projection : providerReviewerProjection(negotiatedStatus);
@@ -6048,6 +6168,7 @@ export const __testing = {
 	gateLifecycleCommand,
 	nativeStatusUnsupported,
 	executeReviewControllerOperation,
+	setReviewHostRelayRunnerForTesting,
 	enforceReviewGateAndCommandSafety,
 	renderSddModelPanel: renderSddModelPanelForTesting,
 	getOrchestratorPrompt,
