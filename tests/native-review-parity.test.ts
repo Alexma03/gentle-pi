@@ -747,7 +747,7 @@ test("ambiguous consent mutation consumes the one-shot binding and requires stat
 
 test("session shutdown clears pending candidate consent bindings and is idempotent", async (t) => {
 	const cwd = repository(t);
-	const { native, answers } = relayedConsentNative(cwd);
+	const { native, answers, startRequests } = relayedConsentNative(cwd);
 	const { controller, events } = runtime(native);
 	const blocked = await blockedConsent(controller, "consent-before-shutdown", headlessContext(cwd));
 	const shutdown = events.get("session_shutdown");
@@ -756,6 +756,18 @@ test("session shutdown clears pending candidate consent bindings and is idempote
 	await shutdown({}, headlessContext(cwd));
 	await assert.rejects(() => answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd)), /unknown, expired, or already consumed/);
 	assert.deepEqual(answers, []);
+	const afterShutdown = await blockedConsent(controller, "consent-after-shutdown", headlessContext(cwd));
+	assert.notEqual(afterShutdown.consent_binding, blocked.consent_binding, "the same candidate gets a fresh binding after shutdown cleanup");
+	assert.equal(startRequests.length, 2, "shutdown loss requires a fresh native START instead of local replay");
+});
+
+test("extension reload gives the same candidate a fresh consent binding instead of replaying lost local state", async (t) => {
+	const cwd = repository(t);
+	const { native, startRequests } = relayedConsentNative(cwd);
+	const beforeReload = await blockedConsent(runtime(native).controller, "consent-before-reload", headlessContext(cwd));
+	const afterReload = await blockedConsent(runtime(native).controller, "consent-after-reload", headlessContext(cwd));
+	assert.notEqual(afterReload.consent_binding, beforeReload.consent_binding);
+	assert.equal(startRequests.length, 2, "reload loss requires a fresh native START instead of local replay");
 });
 
 test("successful explicit disable clears pending candidate consent binding even after re-enable", async (t) => {
@@ -820,6 +832,19 @@ test("an expired unused binding prunes synchronously so a fresh-candidate retry 
 	assert.notEqual(second.consent_binding, firstBinding, "a fresh candidate gets a fresh binding, not the stale one");
 	assert.equal(startRequests.length, 2, "native start was attempted for both candidates");
 	assert.equal(clock.scheduled.length, 2, "the fresh binding queued its own cleanup macrotask");
+});
+
+test("an expired same-candidate consent request creates a fresh binding instead of replaying local state", async (t) => {
+	const cwd = repository(t);
+	const { native, startRequests } = relayedConsentNative(cwd);
+	const clock = fakeConsentClock();
+	const { controller } = runtime(native, recordReviewConsentLatch, { now: clock.now, scheduleTimer: clock.scheduleTimer });
+	const first = await blockedConsent(controller, "same-candidate-expired-1", headlessContext(cwd));
+	clock.advance(REVIEW_CONSENT_TTL_MS);
+	const second = await blockedConsent(controller, "same-candidate-expired-2", headlessContext(cwd));
+	assert.notEqual(second.consent_binding, first.consent_binding);
+	assert.equal(startRequests.length, 2, "expiry requires a fresh native START instead of local replay");
+	assert.equal(clock.scheduled.length, 2, "the fresh binding queues its own cleanup macrotask");
 });
 
 test("a non-expired same-candidate consent request reuses the same binding instead of creating a new one", async (t) => {
