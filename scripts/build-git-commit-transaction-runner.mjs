@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const sources = [
 	"gentle-ai-binary",
+	"review-relay-contract",
 	"review-integration-v2",
 	"native-review-cli",
 	"git-commit-transaction",
