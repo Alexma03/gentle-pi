@@ -809,8 +809,8 @@ test("an expired unused binding prunes synchronously so a fresh-candidate retry 
 	assert.equal(clock.scheduled.length, 1, "the TTL cleanup macrotask is queued for T1");
 	// The candidate changes: a later START on a FRESH candidate must not reuse T1.
 	writeFileSync(join(cwd, "app.ts"), "export const value = 3;\n");
-	// Advance time past the TTL without letting the queued cleanup macrotask fire.
-	clock.advance(REVIEW_CONSENT_TTL_MS + 1);
+	// Advance time to the exact TTL boundary without letting the queued cleanup macrotask fire.
+	clock.advance(REVIEW_CONSENT_TTL_MS);
 	assert.equal(clock.scheduled.length, 1, "the queued cleanup macrotask has not fired");
 	const second = await execStart(controller, "expired-fresh-2", headlessContext(cwd));
 	// The fix: a fresh consent-required binding, not candidate-target-projection-drift.
@@ -840,8 +840,8 @@ test("an expired consent binding is rejected on answer-consent even before the q
 	const clock = fakeConsentClock();
 	const { controller } = runtime(native, recordReviewConsentLatch, { now: clock.now, scheduleTimer: clock.scheduleTimer });
 	const blocked = await blockedConsent(controller, "expired-answer-1", headlessContext(cwd));
-	// Advance past TTL without firing the queued cleanup macrotask.
-	clock.advance(REVIEW_CONSENT_TTL_MS + 1);
+	// Advance to the exact TTL boundary without firing the queued cleanup macrotask.
+	clock.advance(REVIEW_CONSENT_TTL_MS);
 	assert.equal(clock.scheduled.length, 1, "the queued cleanup macrotask has not fired");
 	await assert.rejects(() => answerConsent(controller, blocked.consent_binding, "granted", headlessContext(cwd)), /unknown, expired, or already consumed/);
 	assert.equal(clock.scheduled.length, 1, "rejection was synchronous from the TTL observation, not from a fired macrotask");
