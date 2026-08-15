@@ -13,12 +13,12 @@ const ASSETS = join(ROOT, "assets");
 // Each carries its own effective prompt; none inherits the parent workflow.
 const SDD_PREFIX = "sdd-";
 
-// Strict-output agents that must remain untouched by Key Learnings.
-const STRICT_JSON_AGENTS = [
-	"jd-fix-agent.md", "jd-judge-a.md", "jd-judge-b.md",
-	"review-readability.md", "review-refuter.md", "review-reliability.md",
-	"review-resilience.md", "review-risk.md", "review-validator.md",
-];
+// Strict-output agents that must remain untouched by Key Learnings: the
+// Judgment Day roles (`jd-*`) and the review lens roles (`review-*`). Derived
+// from the agents actually on disk rather than hardcoded, so retiring one
+// (as #320 did to `review-refuter.md` and `review-validator.md`) cannot break
+// this guard with an ENOENT instead of a real assertion.
+const STRICT_JSON_PREFIX = /^(jd-|review-)/;
 
 // Canonical semantics every Key Learnings section must encode.
 const KL_SEMANTICS: Array<[string, RegExp]> = [
@@ -54,6 +54,10 @@ function agentFiles(): string[] {
 
 function sddAgents(): string[] {
 	return agentFiles().filter((f) => f.startsWith(SDD_PREFIX));
+}
+
+function strictJsonAgents(): string[] {
+	return agentFiles().filter((f) => STRICT_JSON_PREFIX.test(f));
 }
 
 test("every SDD phase executor carries an effective `## Key Learnings Closing` section with full semantics", () => {
@@ -192,8 +196,14 @@ test("listCodeFiles recurses nested code, ignores non-code files, and skips syml
 });
 
 test("strict review and Judgment Day agents do not gain Key Learnings or trailing-prose instruction", () => {
+	const strict = strictJsonAgents();
+	// A derived list can go empty and pass vacuously, which would assert
+	// nothing. Require both strict-output role families to still be covered
+	// without pinning an exact count that the next retirement would re-break.
+	assert.ok(strict.some((f) => f.startsWith("jd-")), "Judgment Day agents must be covered by this guard");
+	assert.ok(strict.some((f) => f.startsWith("review-")), "review lens agents must be covered by this guard");
 	const failures: string[] = [];
-	for (const file of STRICT_JSON_AGENTS) {
+	for (const file of strict) {
 		const source = readFileSync(join(AGENTS, file), "utf8");
 		for (const regex of [/Key Learnings/i, /key_learnings/i, /trailing prose/i]) {
 			if (regex.test(source)) failures.push(`${file}: ${regex.source}`);

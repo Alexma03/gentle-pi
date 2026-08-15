@@ -259,7 +259,7 @@ Pre-flight before every SDD/Judgment-Day phase launch:
 3. Resolve matching skill paths once per session from the registry and pass exact `SKILL.md` paths under `## Skills to load before work`.
 4. If a delegated result reports `skill_resolution` as `fallback-registry`, `fallback-path`, or `none`, re-read the registry before subsequent delegations.
 
-**Key Learnings closing (generic delegations):** when delegating to generic agents (`gentle-ai-explore`, `gentle-ai-worker`, `gentle-ai-verify`, scout/worker roles, or the native `Agent` fallback), instruct the sub-agent to close its final message with a `## Key Learnings` section containing 1–5 numbered items, each a standalone factual sentence of ≥4 words and ≥20 characters. This enables passive memory capture of learnings across delegation boundaries when a callable memory package is active. Include the same closing instruction in SDD phase launch prompts; Pi has no separate phase-common surface that injects it automatically.
+**Key Learnings closing (generic delegations):** when delegating to generic agents (`gentle-ai-explore`, `gentle-ai-worker`, `gentle-ai-verify`, scout/worker roles, or the native `Agent` fallback), apply the rule exactly as stated under "Key Learnings closing block" in `assets/orchestrator-delegation.md`. That file is the single statement of the rule; do not restate or paraphrase it here. SDD phase launch prompts need no such injection: every installed SDD phase executor already carries the effective contract in its own prompt (see "Key Learnings closing block (routing)" above).
 
 ## Strict TDD Forwarding
 
