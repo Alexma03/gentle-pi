@@ -11,7 +11,7 @@
 // positive journey after a user-visible forecast.
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, resolveReviewHostRelaySubmission, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 export const DESCRIPTOR_SCHEMA = "gentle-pi.maintainer.provider-relay-descriptor/v1";
 export const CASE_KINDS = Object.freeze(["relay-unavailable", "positive-lens"]);
@@ -109,12 +109,14 @@ export function loadDescriptor(path) {
 	return validateDescriptor(parsed);
 }
 // Resolves a declared executable without a shell: absolute path checked
-// verbatim, bare name searched on PATH. Never re-resolves production.
+// verbatim, bare name searched on PATH. Never re-resolves production. PATH
+// matches are normalized to absolute paths (a relative component like `.`
+// must not yield a relative candidate; the relay launches from scratch).
 export function resolveDeclaredExecutable(executable) {
 	if (isAbsolute(executable)) return existsSync(executable) && statSync(executable).isFile() ? executable : null;
 	for (const directory of (process.env.PATH ?? "").split(delimiter)) {
 		if (!directory) continue;
-		const candidate = join(directory, executable);
+		const candidate = resolve(directory, executable);
 		if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
 	}
 	return null;

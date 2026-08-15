@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, relative } from "node:path";
 import test from "node:test";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 import { ARM_POSITIVE_ENV, CASE_KINDS, DESCRIPTOR_SCHEMA, DescriptorValidationError, POSITIVE_JOURNEY_COMMAND, loadDescriptor, resolveDeclaredExecutable, runMatrix, validateDescriptor } from "../../scripts/maintainer/provider-relay-matrix.mjs";
@@ -269,8 +269,11 @@ test("platform-neutral: runMatrix passes the first resolved concrete Pi path int
 	writeFileSync(secondPi, "second");
 	const gentleAi = join(root, "gentle-ai");
 	writeFileSync(gentleAi, "gentle-ai");
+	// First PATH component is RELATIVE to process.cwd(): a relative component
+	// must still normalize to the same absolute firstPi the precheck resolved.
+	const dirARelative = relative(process.cwd(), dirA);
 	const savedPath = process.env.PATH;
-	process.env.PATH = [dirA, dirB, savedPath].join(delimiter);
+	process.env.PATH = [dirARelative, dirB, savedPath].join(delimiter);
 	t.after(() => { process.env.PATH = savedPath; });
 	let receivedPiExecutable: string | undefined;
 	const [verdict] = await runMatrix(validateDescriptor({
@@ -288,8 +291,8 @@ test("platform-neutral: runMatrix passes the first resolved concrete Pi path int
 			return { promptByteLength: 1, resultByteLength: 1, submission: "{}" };
 		},
 	});
-	// The relay boundary received the EXACT first concrete resolved path —
-	// not the bare "pi" declaration and not the second candidate.
+	// The relay received the EXACT first concrete resolved path — equality to
+	// the absolute fixture proves normalization held under a relative PATH.
 	assert.equal(receivedPiExecutable, firstPi);
 	assert.notEqual(receivedPiExecutable, secondPi);
 	assert.notEqual(receivedPiExecutable, "pi");
