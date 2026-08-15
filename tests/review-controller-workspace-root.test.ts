@@ -366,7 +366,7 @@ test("FINALIZE fails closed when the frozen projection belongs to a different wo
 		},
 	}), candidateViews);
 	await controller.execute("start-finalize-b", { operation: "start", workspaceRoot: worktree, input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(sessionCwd));
-	const input = JSON.stringify({ review_result: { lens_results: [{ lens: "review-reliability", findings: [], evidence: ["reviewed frozen candidate"] }] } });
+	const input = JSON.stringify({});
 	const mismatch = await controller.execute("finalize-wrong-root", { operation: "finalize", lineageId: "finalize-lineage", input }, undefined, undefined, context(sessionCwd));
 	assert.equal((mismatch.details as { outcome?: string }).outcome, "native-operation-failed");
 	assert.equal(finalizes, 0);

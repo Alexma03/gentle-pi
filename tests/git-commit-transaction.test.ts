@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -8,12 +9,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
 	COMMIT_TRANSACTION_STATE,
 	assertNoUnresolvedCommitTransaction,
+	abandonCommitTransaction,
 	inspectCommitTransaction,
 	prepareCommitTransactionInvocation,
 	reconcileCommitTransaction,
 	runGitCommitTransaction,
 	verifyCommitTransactionResult,
 } from "../lib/git-commit-transaction.ts";
+import type { CommitTransactionInvocation } from "../lib/git-commit-transaction.ts";
 import type { NativeReviewCli, NativeValidateResult } from "../lib/native-review-cli.ts";
 
 function git(cwd: string, ...arguments_: string[]): string {
@@ -299,4 +302,229 @@ test("cancellation cannot strand a commit after HEAD advances", async (t) => {
 	assert.notEqual(result.head, before);
 	assert.equal(result.status, "committed");
 	assert.deepEqual(inspectCommitTransaction(cwd), { status: "clean" });
+});
+
+function unbornRepository(t: test.TestContext): string {
+	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-commit-transaction-unborn-"));
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	git(cwd, "init", "-b", "main");
+	git(cwd, "config", "user.name", "Commit Transaction Test");
+	git(cwd, "config", "user.email", "commit-transaction@example.invalid");
+	writeFileSync(join(cwd, "initial.txt"), "first commit\n");
+	git(cwd, "add", "initial.txt");
+	return cwd;
+}
+
+test("an unborn repository creates its first reviewed commit without a prior HEAD", async (t) => {
+	const cwd = unbornRepository(t);
+	const intendedTree = git(cwd, "write-tree");
+	const command = `git commit ${JSON.stringify("-m")} ${JSON.stringify("initial")}`;
+	const invocation = prepareCommitTransactionInvocation({
+		command,
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId: "unborn-first",
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree,
+		},
+	});
+	const result = await runGitCommitTransaction(invocation, { nativeReviewCli: native(cwd, "unborn-first") });
+	assert.equal(result.status, "committed");
+	assert.equal(result.tree, intendedTree);
+	assert.equal(result.head, git(cwd, "rev-parse", "HEAD"));
+	assert.equal(git(cwd, "rev-parse", "HEAD^{tree}"), intendedTree);
+	assert.deepEqual(inspectCommitTransaction(cwd), { status: "clean" });
+	const verified = verifyCommitTransactionResult(cwd, result.transactionId);
+	assert.equal(verified.tree, intendedTree);
+});
+
+test("an unborn repository that fails to commit leaves no HEAD and allows exact retry", async (t) => {
+	const cwd = unbornRepository(t);
+	const intendedTree = git(cwd, "write-tree");
+	const command = `git commit ${JSON.stringify("-m")} ${JSON.stringify("initial")}`;
+	const invocation = prepareCommitTransactionInvocation({
+		command,
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId: "unborn-retry",
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree,
+		},
+	});
+	await assert.rejects(
+		runGitCommitTransaction(invocation, { nativeReviewCli: native(cwd, "unborn-retry", "invalidated") }),
+		/native pre-commit validation denied/,
+	);
+	assert.throws(() => git(cwd, "rev-parse", "--verify", "HEAD"), /fatal|Needed/i);
+	assert.equal(inspectCommitTransaction(cwd).record?.state, COMMIT_TRANSACTION_STATE.VALIDATION_FAILED);
+	// A denied attempt leaves the index intact and HEAD unborn, so the exact
+	// commit command can be retried. The failed transaction requires explicit
+	// recovery: abandon archives it (HEAD never moved, so abandon is allowed),
+	// then a fresh invocation authorizes the same tree and commits successfully.
+	abandonCommitTransaction(cwd);
+	assert.equal(inspectCommitTransaction(cwd).status, "clean");
+	const retry = prepareCommitTransactionInvocation({
+		command,
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId: "unborn-retry",
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree,
+		},
+	});
+	const result = await runGitCommitTransaction(retry, { nativeReviewCli: native(cwd, "unborn-retry") });
+	assert.equal(result.status, "committed");
+	assert.equal(result.tree, intendedTree);
+	assert.equal(result.head, git(cwd, "rev-parse", "HEAD"));
+	assert.equal(git(cwd, "rev-parse", "HEAD^{tree}"), intendedTree);
+	assert.deepEqual(inspectCommitTransaction(cwd), { status: "clean" });
+	const verified = verifyCommitTransactionResult(cwd, result.transactionId);
+	assert.equal(verified.tree, intendedTree);
+});
+
+function unbornInvocation(cwd: string, lineageId: string): CommitTransactionInvocation {
+	return prepareCommitTransactionInvocation({
+		command: "git commit -m initial",
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId,
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree: git(cwd, "write-tree"),
+		},
+	});
+}
+
+// Mirrors lib/git-commit-transaction.ts canonicalJson + sha256 so tests can
+// prove the durable repository identity is byte-for-byte compatible with the
+// previous formula `sha256(canonicalJson({ common_directory: commonDir, roots }))`.
+function canonicalJson(value: unknown): string {
+	if (value === null || typeof value !== "object") return JSON.stringify(value);
+	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+	const object = value as Record<string, unknown>;
+	return `{${Object.keys(object).filter((key) => object[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+}
+function identitySha256(value: string): string {
+	return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+test("a born repository keeps the durable transaction identity formula with sorted root commits across the unborn-handling upgrade", async (t) => {
+	const cwd = repository(t);
+	stage(cwd);
+	installHook(cwd, "pre-commit", "exit 23");
+	const commonDir = realpathSync(git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+	const roots = git(cwd, "rev-list", "--max-parents=0", "HEAD").split(/\r?\n/).filter(Boolean).sort();
+	const expected = identitySha256(canonicalJson({ common_directory: commonDir, roots }));
+	await assert.rejects(
+		runGitCommitTransaction(invocation(cwd, "born-identity"), { nativeReviewCli: native(cwd, "born-identity") }),
+		/pre-commit hook failed/,
+	);
+	const record = inspectCommitTransaction(cwd).record;
+	assert.ok(record, "a failing hook leaves an active transaction record carrying the repository identity");
+	assert.equal(record!.repository_id, expected);
+	assert.equal(record!.common_directory, commonDir);
+	abandonCommitTransaction(cwd);
+	assert.equal(inspectCommitTransaction(cwd).status, "clean");
+});
+
+test("an unborn repository derives a deterministic repository identity without rev-list HEAD and without masking errors", async (t) => {
+	const cwd = unbornRepository(t);
+	const commonDir = realpathSync(git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+	// Unborn has no root commits reachable from HEAD; the identity uses the
+	// empty roots set, which is deterministic and avoids `rev-list HEAD`.
+	const expected = identitySha256(canonicalJson({ common_directory: commonDir, roots: [] }));
+	const intendedTree = git(cwd, "write-tree");
+	const command = `git commit ${JSON.stringify("-m")} ${JSON.stringify("initial")}`;
+	const invocation = prepareCommitTransactionInvocation({
+		command,
+		cwd,
+		arguments: ["-m", "initial"],
+		authorization: {
+			lineageId: "unborn-identity",
+			storeRevision: "sha256:" + "a".repeat(64),
+			fingerprint: "sha256:" + "b".repeat(64),
+			intendedTree,
+		},
+	});
+	await assert.rejects(
+		runGitCommitTransaction(invocation, { nativeReviewCli: native(cwd, "unborn-identity", "invalidated") }),
+		/native pre-commit validation denied/,
+	);
+	const record = inspectCommitTransaction(cwd).record;
+	assert.ok(record, "a denied unborn attempt leaves an active transaction record carrying the repository identity");
+	assert.equal(record!.repository_id, expected);
+	assert.equal(record!.common_directory, commonDir);
+	abandonCommitTransaction(cwd);
+	assert.equal(inspectCommitTransaction(cwd).status, "clean");
+});
+
+// Resolves the canonical absolute git common directory for asserting the
+// absence of the transaction state root without assuming a literal `.git`.
+function transactionStateRoot(cwd: string): string {
+	const commonDir = realpathSync(git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"));
+	return join(commonDir, "gentle-pi", "commit-transactions");
+}
+
+test("preparation fails closed for a corrupt HEAD ref without writing transaction state and reports corruption", (t) => {
+	const cwd = unbornRepository(t);
+	// A garbage ref (not a valid SHA) makes HEAD unresolvable. Resolving root
+	// commits during repository binding rethrows, so preparation must throw,
+	// no transaction state may be written, and inspection reports corruption
+	// (repository identity itself cannot be resolved while HEAD is corrupt).
+	mkdirSync(join(cwd, ".git", "refs", "heads"), { recursive: true });
+	writeFileSync(join(cwd, ".git", "refs", "heads", "main"), "z".repeat(40));
+	assert.throws(() => unbornInvocation(cwd, "corrupt-head"));
+	assert.equal(existsSync(transactionStateRoot(cwd)), false, "no transaction state root is written for a corrupt HEAD");
+	const inspection = inspectCommitTransaction(cwd);
+	assert.equal(inspection.status, "corrupted", "repository corruption makes inspection corrupted even with no transaction state written");
+	assert.ok(typeof inspection.reason === "string" && inspection.reason.length > 0, "inspection reason is present and actionable");
+});
+
+test("preparation fails closed for a symbolic HEAD pointing at a missing object instead of classifying it as unborn", (t) => {
+	const cwd = unbornRepository(t);
+	// A valid-format SHA with no object: rev-parse --verify HEAD succeeds, so
+	// resolveHead returns a commit id rather than classifying HEAD as unborn.
+	// Resolving root commits then fails on the missing object, so preparation
+	// must throw, no transaction state may be written, and inspection reports
+	// corruption. This must never be classified as an unborn empty-roots repo.
+	mkdirSync(join(cwd, ".git", "refs", "heads"), { recursive: true });
+	writeFileSync(join(cwd, ".git", "refs", "heads", "main"), "0123456789abcdef0123456789abcdef01234567\n");
+	assert.throws(() => unbornInvocation(cwd, "missing-object-head"));
+	assert.equal(existsSync(transactionStateRoot(cwd)), false, "no transaction state root is written for a missing-object HEAD");
+	const inspection = inspectCommitTransaction(cwd);
+	assert.equal(inspection.status, "corrupted", "a missing-object HEAD is repository corruption, not a clean or unborn repo");
+	assert.ok(typeof inspection.reason === "string" && inspection.reason.length > 0, "inspection reason is present and actionable");
+});
+
+test("resolveHead propagates a probe timeout instead of masking it as an unborn HEAD", (t) => {
+	const cwd = unbornRepository(t);
+	const wrapperDir = mkdtempSync(join(tmpdir(), "gentle-pi-commit-transaction-timeout-"));
+	t.after(() => rmSync(wrapperDir, { recursive: true, force: true }));
+	const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+	writeFileSync(join(wrapperDir, "git"), `#!/bin/sh\nif [ "$1" = "rev-parse" ] && [ "$2" = "--verify" ] && [ "$3" = "HEAD" ] && [ $# -eq 3 ]; then\nsleep 30\nelse\nexec ${realGit} "$@"\nfi\n`);
+	chmodSync(join(wrapperDir, "git"), 0o755);
+	const originalPath = process.env.PATH;
+	process.env.PATH = `${wrapperDir}:${originalPath}`;
+	try {
+		// The probe wrapper sleeps past GIT_TIMEOUT_MS (10s), so execFileSync
+		// kills the process and resolveHead rethrows the raw timeout error
+		// rather than classifying it as an unborn HEAD. Accept only a failure
+		// that genuinely represents a timeout, not any arbitrary error.
+		assert.throws(
+			() => unbornInvocation(cwd, "timeout-head"),
+			(error: unknown) => error !== null && typeof error === "object"
+				&& ((error as { code?: unknown }).code === "ETIMEDOUT" || (error as { killed?: unknown }).killed === true),
+			"resolveHead must propagate a probe timeout instead of masking it as an unborn HEAD",
+		);
+	} finally {
+		process.env.PATH = originalPath;
+	}
+	assert.equal(inspectCommitTransaction(cwd).status, "clean");
 });

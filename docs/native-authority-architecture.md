@@ -21,7 +21,7 @@ Pi no longer owns an ordinary compact store, compact gate, compatibility facade,
 
 ## Naming note: "compact-v2" is not contract v2
 
-This document and `gentle_review`'s recovery/maintenance commands use "compact-v2" to name Pi's own internal review-authority storage generation (`lib/review-compact.ts`, `lib/review-compact-contract.ts`), predating and unrelated to gentle-ai's negotiated protocol contract `gentle-ai.review-integration/v2`. The two share a digit and nothing else: "compact-v2" is Pi-internal authority-state vocabulary; `review-integration/v2` is gentle-ai's wire contract replacing the Base64 `candidate_diff` transport with immutable `base_tree`/`candidate_tree` and an ordered `changed_path_manifest`. Do not conflate them when reading the maintenance-boundary section below.
+This document and `gentle_review`'s recovery/maintenance commands use "compact-v2" to name Pi's own internal review-authority storage generation (historically `lib/review-compact.ts`, now only the reduced `lib/review-compact-contract.ts` after gentle-pi#311 P5), predating and unrelated to gentle-ai's negotiated protocol contract `gentle-ai.review-integration/v2`. The two share a digit and nothing else: "compact-v2" is Pi-internal authority-state vocabulary; `review-integration/v2` is gentle-ai's wire contract replacing the Base64 `candidate_diff` transport with immutable `base_tree`/`candidate_tree` and an ordered `changed_path_manifest`. Do not conflate them when reading the maintenance-boundary section below.
 
 ## Contract migration status: `review-integration/v1` → `/v2` (complete)
 
@@ -88,7 +88,7 @@ U1-U8 retire nine review modules present on `origin/main`:
 | U1-U4 | `review-bundle`, `review-checkpoint`, `review-graph-reducer`, `review-mirror`, `review-reset` |
 | U5-U8 | `review-authority-supersession`, `review-compact-gate`, `review-compact-store`, `review-facade` |
 
-U8 found no additional zero-consumer code module. Remaining graph, ordinary-policy, compact-contract, runtime-contract, snapshot, trigger, risk, and refuter modules retain production, contract, or semantic-replay consumers.
+U8 found no additional zero-consumer code module at the time. gentle-pi#311 P5 later retired the Pi-owned review semantics that had kept several of those modules alive: `review-compact`, `review-refuter-adapter`, and `review-runtime-contract` are deleted (adversarial roles now execute through Go-owned pi processes via provider-rendered self-contained vectors, and FINALIZE follows the provider's negotiated captured-results transition). The reduced `review-compact-contract` keeps only the negotiated collection answers (correction forecast, targeted validation document, final evidence); graph, ordinary-policy, snapshot, trigger, and risk modules retain production, contract, or semantic-replay consumers.
 
 The packaged `contracts/review-integration/v1/` schemas and fixtures plus `docs/review-integration.md` are byte-identical provider artifacts for negotiated contract `review-integration/v1`, not dead Pi compatibility documentation; the newer `contracts/review-integration/v2/` schemas and fixtures are a second byte-identical mirror, for contract `review-integration/v2`, whose schemas `$ref` into the `/v1` fragments — which is why the `/v1` directory stays packaged even after Pi migrates its active decoder. Package verification proves both directories' hashes.
 
