@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -4824,4 +4824,123 @@ test("successful /gentle:review-mode disable clears pending authorizations even 
 	const result = await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean; reason: string };
 	assert.equal(result.block, true);
 	assert.match(result.reason, /receipt consumption failed closed/, "re-enabled delivery must perform fresh receipt discovery rather than reuse the pre-disable authorization");
+});
+
+function gitStdin(cwd: string, arguments_: readonly string[], input: string): string {
+	return execFileSync("git", [...arguments_], { cwd, encoding: "utf8", input }).trim();
+}
+
+test("large repository end-to-end: tiny candidate diff reaches START, reviewer dispatch, FINALIZE, and the validation delivery gate", async (t) => {
+	// Build a genuinely large synthetic repository (5000 unchanged entries) from a single
+	// blob via `git mktree`, avoiding thousands of per-file filesystem writes/subprocesses.
+	// The candidate diff is exactly one modified entry — the smallest review scope — so the
+	// frozen candidate view materializes the full 5000-entry tree through the production
+	// checkout-index path while the reviewer dispatch carries only the one changed path.
+	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-large-repo-e2e-"));
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	git(cwd, "init", "-b", "main");
+	const baseBlob = gitStdin(cwd, ["hash-object", "-w", "--stdin"], "base\n");
+	const largeCount = 5_000;
+	const baseTreeInput = Array.from({ length: largeCount }, (_, index) =>
+		`100644 blob ${baseBlob}\tunchanged-${String(index).padStart(4, "0")}.txt`,
+	).join("\n");
+	const baseTree = gitStdin(cwd, ["mktree"], baseTreeInput);
+	const candidateBlob = gitStdin(cwd, ["hash-object", "-w", "--stdin"], "candidate\n");
+	const candidateTreeInput = Array.from({ length: largeCount }, (_, index) =>
+		index === 0
+			? `100644 blob ${candidateBlob}\tunchanged-0000.txt`
+			: `100644 blob ${baseBlob}\tunchanged-${String(index).padStart(4, "0")}.txt`,
+	).join("\n");
+	const candidateTree = gitStdin(cwd, ["mktree"], candidateTreeInput);
+	const commitIdentity = ["-c", "user.name=Large Repo E2E", "-c", "user.email=large@example.invalid"];
+	const baseCommit = git(cwd, ...commitIdentity, "commit-tree", baseTree, "-m", "large base");
+	const candidateCommit = git(cwd, ...commitIdentity, "commit-tree", candidateTree, "-p", baseCommit, "-m", "tiny candidate");
+	git(cwd, "update-ref", "refs/heads/main", candidateCommit);
+
+	const candidateViews = new CandidateViewRegistry();
+	const lenses = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
+	const lineageId = "large-repo-e2e";
+	let starts = 0;
+	let finalizes = 0;
+	let validates = 0;
+	let finalizeRoot: string | undefined;
+	const { controller, toolCall } = runtime(fakeNative({
+		start: async () => {
+			starts += 1;
+			return { lineageId, state: "reviewing", riskLevel: "high", selectedLenses: lenses, changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+		finalize: async (request) => {
+			finalizes += 1;
+			finalizeRoot = request.cwd;
+			return { lineageId, state: "approved", action: "approved", storeRevision: "r1" };
+		},
+		validate: async () => {
+			validates += 1;
+			return { allowed: true, result: "allow", action: "continue", reason: "native receipt matches the frozen large-repo candidate", gateContext: nativeGateContext(lineageId, "r1", candidateTree) };
+		},
+		targetStatus: async (request) => {
+			if (request.lineageId === undefined) return candidateStartTargetStatus(request);
+			const statusCandidate = new CandidateViewRegistry().create({ contributorRoot: request.cwd, baseRef: baseCommit });
+			try {
+				return targetStatusFixture({ lineageId, baseTree: statusCandidate.baseTree, currentCandidateTree: statusCandidate.candidateTree, paths: statusCandidate.paths });
+			} finally {
+				statusCandidate.cleanup();
+			}
+		},
+	}), undefined, undefined, undefined, candidateViews);
+
+	// START binds the frozen candidate view for the large repository.
+	const start = await controller.execute("large-repo-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef: baseCommit, committedOnly: true }) }, undefined, undefined, context(cwd));
+	assert.equal(starts, 1);
+	assert.equal((start.details as { result: { lineage_id: string } }).result.lineage_id, lineageId);
+	const frozen = candidateViews.resolveForLens(lineageId, "review-risk");
+	try {
+		// Immutable candidate identity: the frozen view binds the exact synthetic trees.
+		assert.equal(frozen.baseTree, baseTree);
+		assert.equal(frozen.candidateTree, candidateTree);
+		assert.deepEqual(frozen.paths, ["unchanged-0000.txt"]);
+		assert.equal(readdirSync(frozen.root).filter((entry) => entry !== ".git").length, largeCount);
+		assert.equal(readFileSync(join(frozen.root, "unchanged-0000.txt"), "utf8"), "candidate\n");
+		assert.equal(readFileSync(join(frozen.root, "unchanged-4999.txt"), "utf8"), "base\n");
+
+		// Reviewer dispatch injects the controller-owned candidate view carrying only the
+		// tiny changed scope — never the 5000-entry unchanged repository bulk.
+		const dispatch = { agents: [...lenses], task: "Review the tiny candidate diff in a large repository", mode: "task" };
+		assert.equal(await toolCall({ toolName: "subagent_run", input: dispatch }, context(cwd)), undefined);
+		assert.match(dispatch.task, /## Controller-owned candidate view/);
+		assert.match(dispatch.task, new RegExp(`Frozen candidate tree: \`${candidateTree}\``));
+		assert.match(dispatch.task, /unchanged-0000\.txt/);
+		assert.doesNotMatch(dispatch.task, /unchanged-0001\.txt/);
+		assert.doesNotMatch(dispatch.task, /unchanged-0499\.txt/);
+		assert.ok(Buffer.byteLength(dispatch.task, "utf8") <= 4_096 + "Review the tiny candidate diff in a large repository".length);
+
+		// No live-worktree fallback: a rogue untracked file in the contributor working
+		// directory (invisible to the committedOnly candidate view) cannot reach the dispatch.
+		writeFileSync(join(cwd, "rogue-untracked.ts"), "export const rogue = true;\n");
+		const rogueDispatch = { agent: "review-risk", task: "review after rogue", mode: "task" };
+		assert.equal(await toolCall({ toolName: "subagent_run", input: rogueDispatch }, context(cwd)), undefined);
+		assert.doesNotMatch(rogueDispatch.task, /rogue-untracked\.ts/);
+		assert.match(rogueDispatch.task, new RegExp(`Frozen candidate tree: \`${candidateTree}\``));
+
+		// FINALIZE mutates against the frozen candidate root, not the contributor working directory.
+		const finalize = await controller.execute("large-repo-finalize", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
+		assert.equal((finalize.details as { result: { state: string } }).result.state, "approved");
+		assert.equal(finalizes, 1);
+		assert.notEqual(finalizeRoot, cwd);
+		assert.equal(finalizeRoot, frozen.root);
+
+		// Validation delivery gate: stage the frozen candidate tree and authorize delivery.
+		git(cwd, "read-tree", candidateTree);
+		const command = "git commit -m large-repo-delivery";
+		const validated = await controller.execute("large-repo-validate", { operation: "validate", lineageId, idempotencyKey: "large-repo-delivery", command, input: "{}" }, undefined, undefined, context(cwd));
+		assert.ok(validates >= 1);
+		assert.notEqual((validated.details as { authorization?: unknown }).authorization, undefined);
+		assert.equal((validated.details as { result?: { allowed?: boolean } }).result?.allowed, true);
+		// The delivery gate allows the authorized command exactly once; replay is blocked.
+		assert.equal(await toolCall({ toolName: "bash", input: { command } }, interactiveContext(cwd)), undefined);
+		const replay = await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean };
+		assert.equal(replay.block, true);
+	} finally {
+		frozen.cleanup();
+	}
 });
