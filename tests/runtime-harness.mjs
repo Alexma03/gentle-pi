@@ -625,6 +625,76 @@ async function run() {
 		await rm(join(globalConfigHome, "banner.json"), { force: true });
 	}
 
+	// issue-301: cancelling the color picker must be a no-op — no write,
+	// no notify, and the previously saved color must survive byte/semantically
+	// unchanged. Covers both entry points: /gentle:banner-color picker
+	// (cancelled), and /gentle:banner -> Color row -> nested picker (cancelled).
+	// Also covers an invalid non-empty argument, which must still open the
+	// picker and treat its cancellation as a no-op.
+	const cancelPickerCwd = await tempWorkspace();
+	try {
+		const bannerConfigPath = join(globalConfigHome, "banner.json");
+		const seeded = {
+			showRose: false,
+			showTextLogo: false,
+			color: "green",
+		};
+		const seededJson = `${JSON.stringify(seeded, null, 2)}\n`;
+		await writeFile(bannerConfigPath, seededJson, "utf8");
+
+		const cancelCtx = createCtx(cancelPickerCwd, true);
+
+		// (a) /gentle:banner-color picker cancelled: seeded color unchanged, no notify.
+		cancelCtx.ui.notifications.length = 0;
+		cancelCtx.ui.selections.length = 0;
+		cancelCtx.ui.select = async (label, options) => {
+			cancelCtx.ui.selections.push({ label, options });
+			return undefined;
+		};
+		await commands.get("gentle:banner-color").handler("", cancelCtx);
+		let afterCancel = await readFile(bannerConfigPath, "utf8");
+		assert.equal(afterCancel, seededJson, "banner-color cancel must not rewrite banner.json");
+		assert.equal(cancelCtx.ui.selections.length, 1, "banner-color cancel must open the picker once");
+		assert.equal(cancelCtx.ui.notifications.length, 0, "banner-color cancel must not notify");
+
+		// (d) invalid non-empty /gentle:banner-color input still opens picker;
+		//     cancelling it is a no-op.
+		cancelCtx.ui.notifications.length = 0;
+		cancelCtx.ui.selections.length = 0;
+		await commands.get("gentle:banner-color").handler("purple", cancelCtx);
+		afterCancel = await readFile(bannerConfigPath, "utf8");
+		assert.equal(afterCancel, seededJson, "banner-color invalid+cancel must not rewrite banner.json");
+		assert.equal(cancelCtx.ui.selections.length, 1, "invalid banner-color arg must still open the picker");
+		assert.equal(cancelCtx.ui.notifications.length, 0, "banner-color invalid+cancel must not notify");
+
+		// (b) /gentle:banner selects the Color row, then the nested picker is
+		//     cancelled: seeded color unchanged, no notify. The outer select
+		//     returns the Color row; the nested select returns undefined.
+		cancelCtx.ui.notifications.length = 0;
+		cancelCtx.ui.selections.length = 0;
+		let selectCall = 0;
+		cancelCtx.ui.select = async (label, options) => {
+			cancelCtx.ui.selections.push({ label, options });
+			selectCall += 1;
+			// First call: outer "Startup banner" menu -> pick the Color row.
+			// Second call: nested color picker -> cancel (undefined).
+			return selectCall === 1 ? options[options.length - 1] : undefined;
+		};
+		await commands.get("gentle:banner").handler("", cancelCtx);
+		afterCancel = await readFile(bannerConfigPath, "utf8");
+		assert.equal(afterCancel, seededJson, "banner Color-row cancel must not rewrite banner.json");
+		assert.equal(cancelCtx.ui.selections.length, 2, "banner Color-row flow must open outer then nested picker");
+		assert.equal(cancelCtx.ui.notifications.length, 0, "banner Color-row cancel must not notify");
+
+		// Sanity: the seeded config round-trips through normalization unchanged,
+		// proving the byte equality above is semantic, not a test artifact.
+		const reparsed = JSON.parse(await readFile(bannerConfigPath, "utf8"));
+		assert.deepEqual(reparsed, seeded, "seeded non-default color must round-trip semantically");
+	} finally {
+		await rm(cancelPickerCwd, { recursive: true, force: true });
+		await rm(join(globalConfigHome, "banner.json"), { force: true });
+	}
+
 	const noUiCwd = await tempWorkspace();
 	try {
 		for (const handler of hooks.get("session_start")) {
