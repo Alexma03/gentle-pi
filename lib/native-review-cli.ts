@@ -61,6 +61,7 @@ export const NATIVE_REVIEW_OPERATION = {
 	REPAIR: "review/repair",
 	CAPTURE_EVIDENCE: "review/capture-evidence",
 	CAPTURE_RESULT: "review/capture-result",
+	CAPTURE_PROVIDER_ROLE: "review/capture-provider-role",
 } as const;
 export type NativeReviewOperation = (typeof NATIVE_REVIEW_OPERATION)[keyof typeof NATIVE_REVIEW_OPERATION];
 
@@ -136,6 +137,14 @@ export interface NativeReviewCli {
 	// evidence-first correction lifecycle's collection step.
 	repair?(request: NativeReviewRepairRequest): Promise<ReviewRepairV2>;
 	captureEvidence?(request: NativeReviewCaptureEvidenceRequest): Promise<NativeReviewVerificationEvidenceV2>;
+	// gentle-pi#311 P4-roles: executes one provider-rendered self-contained
+	// role capture vector exactly as rendered (verbatim tokens, foreground).
+	captureProviderRole?(request: NativeReviewProviderRoleCaptureRequest): Promise<NativeReviewProviderRoleCaptureArtifact>;
+	// gentle-pi#311 P5: executes one provider-rendered `review.finalize`
+	// transition exactly as rendered (e.g. `--lineage=<id>
+	// --captured-results=true`); the host never assembles reviewer, refuter,
+	// or validator documents for it.
+	finalizeTransition?(request: NativeReviewFinalizeTransitionRequest): Promise<NativeFinalizeResult>;
 	// Dark until a negotiated version reports the `mode` capability true
 	// (Design Decision #7, organic-rdd-parity). Plain versioned CLI operation,
 	// outside the negotiated review-integration protocol — same shape as
@@ -363,6 +372,33 @@ export interface NativeReviewAdmittedResultManifest {
 	readonly reference?: string;
 }
 
+// gentle-pi#311 P4-roles: one Go-owned non-lens provider role capture. The
+// provider renders a SELF-CONTAINED authority-advancing vector
+// (`review.capture-refuter` / `review.capture-validation` with binding tokens
+// plus `--agent=pi --execute=true`, no submission descriptor); Pi executes the
+// exact rendered invocation verbatim, in the foreground, and Go materializes
+// the role prompt, spawns its own locked-down pi subprocess, and admits the
+// raw verdict. Nothing here authors, parses, or transports role output.
+export const NATIVE_REVIEW_PROVIDER_ROLE_CAPTURE_SCHEMA = "gentle-ai.review-provider-role-capture/v1";
+
+export interface NativeReviewProviderRoleCaptureRequest {
+	/** The provider-named capture operation, e.g. `review.capture-refuter`. */
+	readonly captureOperation: string;
+	/** Every provider-issued argument token, verbatim, in provider order. */
+	readonly argumentTokens: readonly string[];
+	/** Process working directory only; never rendered into the invocation. */
+	readonly cwd: string;
+	readonly signal?: AbortSignal;
+}
+
+export interface NativeReviewProviderRoleCaptureArtifact {
+	readonly schema: typeof NATIVE_REVIEW_PROVIDER_ROLE_CAPTURE_SCHEMA;
+	readonly lineageId: string;
+	readonly targetIdentity: string;
+	readonly role: string;
+	readonly captured: true;
+}
+
 export interface NativeReviewCaptureEvidenceRequest {
 	cwd: string;
 	lineageId: string;
@@ -421,6 +457,16 @@ export interface NativeFinalizeRequest extends NativeReviewFinalizeCapturedResul
 	failed?: boolean;
 	signal?: AbortSignal;
 }
+// gentle-pi#311 P5: the provider-driven FINALIZE. `argumentTokens` are the
+// exact rendered tokens of one provider-returned `review.finalize` execute
+// transition (e.g. `--lineage=<id> --captured-results=true`), passed through
+// verbatim and never synthesized or reordered by the host.
+export interface NativeReviewFinalizeTransitionRequest {
+	readonly cwd: string;
+	readonly argumentTokens: readonly string[];
+	readonly signal?: AbortSignal;
+}
+
 export interface NativeValidateRequest { cwd: string; gate: string; lineageId?: string; flags?: readonly string[]; signal?: AbortSignal; }
 export interface NativeBindSddRequest { cwd: string; change: string; lineage: string; expectedBindingRevision: string; signal?: AbortSignal; }
 export interface NativeSddStatusRequest { cwd: string; change: string; signal?: AbortSignal; }
@@ -1912,6 +1958,33 @@ function decodeNativeAdmittedResultManifest(value: unknown): NativeReviewAdmitte
 	});
 }
 
+// gentle-pi#311 P4-roles: the strict acknowledgement for one executed
+// provider role vector. The immutable verdict bytes live in the Go-owned
+// compact store slot; this envelope only names the binding the capture
+// proved, so anything beyond that exact shape is refused.
+function decodeNativeProviderRoleCaptureArtifact(value: unknown): NativeReviewProviderRoleCaptureArtifact {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("native provider role capture artifact must be an object");
+	const body = value as Record<string, unknown>;
+	const allowed = new Set(["schema", "lineage_id", "target_identity", "role", "captured"]);
+	for (const key of Object.keys(body)) if (!allowed.has(key)) throw new TypeError(`native provider role capture artifact carries unexpected key ${key}`);
+	const text = (key: string): string => {
+		const found = body[key];
+		if (typeof found !== "string" || found.trim() !== found || found.length === 0) throw new TypeError(`native provider role capture artifact ${key} must be a non-empty trimmed string`);
+		return found;
+	};
+	if (text("schema") !== NATIVE_REVIEW_PROVIDER_ROLE_CAPTURE_SCHEMA) throw new TypeError(`native provider role capture artifact schema must be ${NATIVE_REVIEW_PROVIDER_ROLE_CAPTURE_SCHEMA}`);
+	const role = text("role");
+	if (role !== "refuter" && role !== "targeted-validator") throw new TypeError(`native provider role capture artifact role must be refuter or targeted-validator, received ${role}`);
+	if (body.captured !== true) throw new TypeError("native provider role capture artifact must report captured: true");
+	return Object.freeze({
+		schema: NATIVE_REVIEW_PROVIDER_ROLE_CAPTURE_SCHEMA,
+		lineageId: text("lineage_id"),
+		targetIdentity: text("target_identity"),
+		role,
+		captured: true,
+	});
+}
+
 export class NativeReviewCliV216 implements NativeReviewCli {
 	private readonly legacy: NativeReviewCliV214;
 	private readonly adapter: ExecFileAdapter;
@@ -2317,6 +2390,75 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		} finally {
 			await this.cleanupDirectory(directory).catch(() => undefined);
 		}
+	}
+
+	// gentle-pi#311 P4-roles: executes one provider-rendered self-contained
+	// role capture vector exactly as rendered — one CLI invocation, verbatim
+	// tokens in provider order, in the foreground. Go materializes the role
+	// prompt, spawns its own locked-down pi subprocess, and admits the raw
+	// verdict; Pi never adds, removes, or reorders a single token (not even
+	// --cwd: the vector's --repository-context is authoritative and mutually
+	// exclusive with a path). The central adapter injects the relay handshake
+	// environment on this spawn like on every other gentle-ai invocation.
+	async captureProviderRole(request: NativeReviewProviderRoleCaptureRequest): Promise<NativeReviewProviderRoleCaptureArtifact> {
+		const verb = request.captureOperation.startsWith("review.") ? request.captureOperation.slice("review.".length) : "";
+		if (verb !== "capture-refuter" && verb !== "capture-validation") throw new TypeError(`Native CAPTURE_PROVIDER_ROLE supports only review.capture-refuter and review.capture-validation, received ${JSON.stringify(request.captureOperation)}`);
+		if (request.argumentTokens.length === 0) throw new TypeError("Native CAPTURE_PROVIDER_ROLE requires the provider-rendered argument tokens");
+		if (request.argumentTokens.some((token) => typeof token !== "string" || token.length === 0)) throw new TypeError("Native CAPTURE_PROVIDER_ROLE argument tokens must all be non-empty strings");
+		const executable = this.verifiedExecutable(NATIVE_REVIEW_OPERATION.CAPTURE_PROVIDER_ROLE, true);
+		const execution = await this.invoke(NATIVE_REVIEW_OPERATION.CAPTURE_PROVIDER_ROLE, request.cwd, [
+			"review", verb,
+			...request.argumentTokens,
+		], true, request.signal, executable.path);
+		return decode(NATIVE_REVIEW_OPERATION.CAPTURE_PROVIDER_ROLE, true, () => decodeNativeProviderRoleCaptureArtifact(execution.body));
+	}
+
+	// gentle-pi#311 P5: executes one provider-rendered `review.finalize`
+	// execute transition exactly as rendered. The tokens come verbatim from
+	// the negotiated next_transition (e.g. `--lineage=<id>
+	// --captured-results=true`); Pi assembles no reviewer, refuter, or
+	// validator documents for this lane — the provider discovers its own
+	// admitted role and lens slots.
+	async finalizeTransition(request: NativeReviewFinalizeTransitionRequest): Promise<NativeFinalizeResult> {
+		if (request.argumentTokens.length === 0) throw new TypeError("Native FINALIZE transition requires the provider-rendered argument tokens");
+		if (request.argumentTokens.some((token) => typeof token !== "string" || token.length === 0)) throw new TypeError("Native FINALIZE transition argument tokens must all be non-empty strings");
+		const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.FINALIZE, request.cwd, [
+			"review", "finalize",
+			...request.argumentTokens,
+		], true, request.signal);
+		return decode(NATIVE_REVIEW_OPERATION.FINALIZE, true, () => {
+			const body = object(execution.body);
+			// A transition rendered with `--contract` answers with the negotiated
+			// operation envelope; one rendered without (the pi runtime form)
+			// answers with the plain `review/finalize` shape. Both are decoded
+			// strictly; nothing else is accepted.
+			if (typeof body.schema === "string") {
+				const envelope = decodeReviewOperationV2(body);
+				if (envelope.operation !== "review.finalize") throw new Error("wrong finalize operation envelope");
+				const result = envelope.result;
+				return {
+					lineageId: requiredString(result.lineage_id),
+					state: requiredString(result.state),
+					action: requiredString(result.action),
+					storeRevision: requiredString(result.store_revision),
+					...(result.validation_request === undefined ? {} : { validationRequest: result.validation_request as Readonly<Record<string, unknown>> }),
+					...(result.escalation === undefined ? {} : { escalation: requiredString(result.escalation) }),
+				};
+			}
+			const plain = exactObject(body, ["operation", "lineage_id", "state", "action", "store_revision"], ["receipt_path", "validation_request", "escalation"]);
+			if (plain.operation !== "review/finalize") throw new Error("wrong finalize discriminator");
+			const state = requiredString(plain.state);
+			if (!(NATIVE_FINALIZE_STATE as readonly string[]).includes(state)) throw new Error("unknown finalize state");
+			return {
+				lineageId: requiredString(plain.lineage_id),
+				state,
+				action: requiredString(plain.action),
+				storeRevision: requiredString(plain.store_revision),
+				...(plain.receipt_path === undefined ? {} : { receiptPath: requiredString(plain.receipt_path) }),
+				...(plain.validation_request === undefined ? {} : { validationRequest: plain.validation_request as Readonly<Record<string, unknown>> }),
+				...(plain.escalation === undefined ? {} : { escalation: requiredString(plain.escalation) }),
+			};
+		});
 	}
 
 	async captureEvidence(request: NativeReviewCaptureEvidenceRequest): Promise<NativeReviewVerificationEvidenceV2> {

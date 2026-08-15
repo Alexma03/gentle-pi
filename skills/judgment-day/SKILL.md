@@ -4,12 +4,14 @@ description: "Trigger: judgment day, judgement day, dual review, adversarial rev
 license: Apache-2.0
 metadata:
   author: gentleman-programming
-  version: "1.4"
+  version: "1.7"
 ---
 
 ## Activation Contract
 
 Load this skill only when the user explicitly requests Judgment Day, Judgement Day, dual/adversarial review, or an equivalent trigger. Resolve one exact target before starting.
+
+Judgment Day is a standalone developer tool: judges run whenever asked, on any runtime, and need no review transaction, runtime identity, or delivery-receipt machinery to start. It replaces ordinary 4R as the adversarial method for that target; never run both.
 
 Judgment Day starts only when explicitly requested and replaces ordinary review for that lineage.
 
@@ -24,6 +26,8 @@ Findings surviving round two escalate; no third-round transition exists.
 Initial discovery and scoped re-judgment are separate modes.
 
 During initial discovery, run exactly once against the supplied `initial_review_tree` and return candidate rows only.
+
+Judges hold a sweep budget: one exhaustive read-only sweep per judge is the standard budget, and at most two sweeps for a full-4R-scale target (hot auth/update/security/payments paths, or more than 400 changed lines). There is no loop-until-dry mechanism; the sweep budget is the entire discovery pass.
 
 During initial discovery, do not persist state, mutate claims, launch actors, request fixes, validate fixes, or deliver anything.
 
@@ -58,6 +62,8 @@ Do not add findings, alter frozen claims, authorize transitions, deliver, publis
 Each scoped fix returns candidate-tree and fix-diff evidence. It cannot mint authority or start re-judgment itself.
 
 ## Lifecycle Boundary
+
+A judgment issues no receipt and carries no delivery authority: it satisfies no commit, push, PR, or release gate. When the caller explicitly wants delivery authority for the same target, run the ordinary negotiated review lifecycle as its own step; a runtime that cannot uphold receipt guarantees loses the receipt, not the judgment.
 
 Pre-commit, pre-push, and PR gates validate approved receipts and exact typed targets with zero actors.
 Release from protected `main` may bypass receipt validation only when the tag targets the current immutable `origin/main` SHA, required CI for that exact SHA is successful, the remote head is rechecked before tag push, and no fresh risk evidence exists; otherwise release fails closed through native receipt validation.

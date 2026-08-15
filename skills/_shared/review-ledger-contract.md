@@ -22,7 +22,7 @@ Generated files matching `testdata/golden/**` remain in snapshot identity but do
 
 Before status/START, consult effective review mode. `off` creates no authority or authorization and yields organic `disabled/unmanaged`, never approval. Ordinary START declares `--consent relay`; low risk stays silent. A medium/high `consent/v2` result always returns the complete raw provider envelope plus an opaque in-memory candidate binding to the parent, then stops without UI or provider follow-up. The parent localizes and presents it losslessly while preserving tokens, commands, target IDs, and invocations. One explicit `answer-consent` call accepts only that binding and `granted|declined`, consumes it before provider mutation, and rechecks repository/target/projection/lineage/answer binding. Ambiguity reconciles through STATUS, never replay. Grant is exact-candidate-only. Decline creates no lineage, authority, actor/candidate binding, latch, or pending authorization; the next candidate asks again. Old Pi clone latch files are inert.
 
-`finalize` canonicalizes selected-lens results, assigns missing lens/finding IDs, and performs only the legal transition from the current compact state. The five states are `reviewing`, `correction_required`, `validating`, `approved`, and `escalated`.
+Reviewer, refuter, and validator verdicts are admitted natively, never Pi-authored. `finalize` follows the provider's negotiated `next_transition` and supplies only the negotiated collection answers: a lens `review.capture-result` collect input rendered with `--agent=pi --materialize=true` is satisfied by the gentle-pi host relay, which prints the exact Go-materialized opaque prompt, launches a fresh locked-down print-mode `pi` subprocess in an empty scratch directory with every discovery surface disabled, and submits the untouched raw output bytes through the provider-owned submission form. The adversarial roles do not go through that relay: `review.capture-refuter` and `review.capture-validation` collect inputs render as self-contained authority-advancing vectors (binding tokens plus `--agent=pi --execute=true`, no submission descriptor); executing the exact rendered invocation makes Go materialize the role prompt, spawn its own locked-down `pi` process, and admit the raw verdict. Native Go owns validation, canonicalization, missing lens/finding ID assignment, persistence, and hashing, and performs only the legal transition from the current compact state. The five states are `reviewing`, `correction_required`, `validating`, `approved`, and `escalated`.
 
 `validate` loads the terminal receipt and authority, derives the named live Git gate, and runs with zero actors. It never mutates compact authority.
 
@@ -37,9 +37,7 @@ Every finding supplies `evidence_class`, `causal_disposition`, and concrete proo
 | `causal_disposition` | `introduced` \| `behavior-activated` \| `worsened` \| `pre-existing` \| `base-only` \| `unknown` |
 | `proof_refs` | Prefixed concrete proof references |
 
-Only severe `introduced`, `behavior-activated`, or `worsened` findings with valid proof can enter `correction_ids`. Deterministic candidate-caused blockers need no refuter. All inferential candidate-caused blockers use exactly one complete read-only refuter batch.
-
-If native IDs are assigned to inferential findings, FINALIZE first returns canonical rows plus a content-derived request hash without mutation; completion requires identical lens input, that hash, and one complete refuter batch.
+Only severe `introduced`, `behavior-activated`, or `worsened` findings with valid proof can enter `correction_ids`. Deterministic candidate-caused blockers need no refuter. All inferential candidate-caused blockers share exactly one complete read-only refuter batch, executed through the provider-rendered self-contained `review.capture-refuter` vector: Go materializes the refuter prompt, runs its own locked-down `pi` process, and admits the raw verdict. Pi never authors, edits, batches, or re-scores a refuter row.
 
 Refuter rows may cite independent concrete proof and do not need to repeat reviewer `proof_refs`. `pre-existing` and `base-only` findings become non-blocking follow-ups. `unknown`, insufficient evidence, malformed severe claims, empty/malformed proof, missing/duplicate/extra refuter rows, and inconclusive severe outcomes escalate. `WARNING` and `SUGGESTION` remain informational.
 
@@ -53,7 +51,7 @@ Before editing, `finalize` requires a positive correction-line forecast. A forec
 
 Initial lenses never rerun. The correction preserves frozen findings and genesis scope: the original candidate tree, paths, untracked set, and correction IDs. It cannot add scope.
 
-The targeted validator checks only the original criteria and one correction regression for the exact correction IDs. It cannot add findings, request another correction, launch actors, persist authority, or request another attempt. Failure escalates. Later observations are inert follow-ups.
+The targeted validator runs through the provider-rendered self-contained `review.capture-validation` vector — Go materializes its prompt, runs its own locked-down `pi` process, and admits the raw verdict — and checks only the original criteria and one correction regression for the exact correction IDs. It cannot add findings, request another correction, launch actors, persist authority, or request another attempt. Failure escalates. Later observations are inert follow-ups.
 
 Final verification evidence is supplied and hashed only during finalization. Failure escalates and never reopens review.
 

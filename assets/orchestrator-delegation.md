@@ -86,9 +86,9 @@ These are parent-orchestrator routing boundaries. Use the smallest useful topolo
 5. **Per-action rule**: tests, builds, installs, and native review actors may use fresh workers without changing the implementation route or creating SDD state.
 6. **Optional SDD rule**: propose SDD only when durable proposal/spec/design/tasks materially reduce substantial ambiguity. Select SDD only after an explicit request or accepted proposal; risk alone never forces SDD.
 
-##### Pi Trigger Runtime Bindings
-
 <!-- pi-binding:start — Pi runtime routing for the triggers above -->
+
+##### Pi Trigger Runtime Bindings
 
 These are parent-orchestrator stop rules. Once any trigger fires, the parent MUST delegate through the best available subagent runtime. Prefer `subagent_run` when present; otherwise use Pi's native `Agent` or another available delegation mechanism. Do not replace a required delegation with inline execution. Do not inject these as child-agent permission to spawn subagents; children receive concrete role work and must not orchestrate.
 
@@ -162,8 +162,8 @@ Run each exact `review.capture-result` collection input once per provider-return
 
 Claude Code, OpenCode, Codex, and Pi advertise immutable reviewer execution through one shared Go provider contract because each active host launches a fresh constrained reviewer before lifecycle work: Claude's generated reviewer has no live tools and receives prompt-carried native evidence; OpenCode relays one host Task through one live Go transport process, which materializes the bound prompt and captures the matching raw output; Codex launches a provider-bound `codex exec` process in an empty scratch directory; and Pi's gentle-pi-owned host relay forwards the Go-issued opaque prompt to a brand-new print-mode `pi` subprocess in an empty scratch directory with every discovery surface disabled, returning raw final bytes through the exact capture operation. Prompt prose alone never proves these boundaries; native admission does. Kilo remains dormant because it has no equivalent native path. The compiled capability is authoritative before repository, target, authority, collection, or process work; normal SDD and ordinary agent support remain available, and model, provider, and profile selection remain user-owned.
 
-<!-- pi-binding:start — Pi host relay (gentle-ai#3249, gentle-pi.review-relay/v1) -->
-Pi is a registered host-mediated runtime identity (gentle-ai#3249). The gentle-pi launcher declares `GENTLE_PI_REVIEW_RELAY_CONTRACT=gentle-pi.review-relay/v1` on every `gentle-ai` invocation it relays; without that declaration, admission fails closed before any repository, target, or authority work. Because the identity is host-mediated, collect inputs for `pi` render WITHOUT `--agent`: the host itself satisfies each exact capture operation by launching a fresh locked-down print-mode `pi` subprocess (`--print --mode text --no-session --no-tools --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve`, prompt delivered via stdin, empty scratch cwd) and returns the untouched raw output bytes through `--result-artifact-file`.
+<!-- pi-binding:start — Pi host relay (gentle-ai#3249/#3264, gentle-pi.review-relay/v1) -->
+Pi is a registered host-mediated runtime identity (gentle-ai#3249). The gentle-pi launcher declares `GENTLE_PI_REVIEW_RELAY_CONTRACT=gentle-pi.review-relay/v1` on every `gentle-ai` invocation it relays; without that declaration, admission fails closed before any repository, target, or authority work. Lens capture keeps the relay + submission form: a `review.capture-result` collect input rendered with `--agent=pi --materialize=true` is satisfied by the host, which prints the exact Go-materialized opaque prompt, launches a fresh locked-down print-mode `pi` subprocess (`--print --mode text --no-session --no-tools --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-approve`, prompt delivered via stdin, empty scratch cwd), and submits the untouched raw output bytes through the provider-owned submission form. The adversarial roles do NOT go through that relay: `review.capture-refuter` and `review.capture-validation` collect inputs render as SELF-CONTAINED authority-advancing vectors (binding tokens plus `--agent=pi --execute=true`, no submission descriptor), and executing the exact rendered invocation makes Go materialize the role prompt, spawn its own locked-down pi process, and admit the raw verdict — the host runs one CLI invocation verbatim, then re-queries negotiated STATUS; on failure it surfaces the typed error and never relaunches from transcript inference.
 <!-- pi-binding:end -->
 
 Never hand candidate bytes through `/tmp`, another external file, a repository scratch file, or `GENTLE_AI_FROZEN_CANDIDATE_CONTEXT`.
@@ -252,10 +252,20 @@ Use the configured subagent runtime when available. Prefer the `subagent_*` tool
 
 The generic role precedence below is the explicit exception to this general runtime preference.
 
-Choose subagent mode by orchestration dependency, not by task length:
+<!-- gentle-pi:background-subagents -->
+#### Background Subagent Policy
 
-- Use `mode: "task"` when the parent must consume the result and continue the workflow, including SDD phases, implementation batches, verification, controller-selected review actors, and any delegated work whose output determines the next action. Lifecycle gates themselves launch zero actors.
-- Use `mode: "background"` only for independent work where automatic parent continuation is not required. Background completion may notify the user and preserve history, but it is not a guarantee that the parent model will resume orchestration.
+Background execution is policy-gated: the always-on orchestrator prompt renders one status line, `Background subagent policy: on|off (capability: ready|absent)`. If the policy is off OR the `subagent_run` tool is unavailable, run every delegation in the foreground — `mode: "task"` when `subagent_*` tools exist, otherwise the native `Agent` fallback — always.
+
+When the policy is on and `subagent_run` is available:
+
+- Use `subagent_run` `mode: "background"` ONLY for independent, read-only exploration, audit, or review work where the parent can continue non-overlapping work.
+- At the parent level, allow no more than 2 concurrent background tasks.
+- Completion notifications only: do not poll, sleep, run status checks, or proactively read for completion.
+- Use foreground `mode: "task"` when the result is needed before the next action, and always for user decisions, SDD apply or other writers, dependent verify evidence, archive, formal RDD/4R lenses, refuters, fix validators, Judgment Day actors, dependent phases, and any delegated work whose output determines the next action. Lifecycle gates themselves launch zero actors.
+- Do not duplicate launches or work, and do not overlap files or topics. Never run parallel writers in one worktree.
+- Background jobs are process-local and non-durable. A restart loses them; make no recovery claim.
+<!-- /gentle-pi:background-subagents -->
 
 For generic non-SDD exploration and mapping, first attempt the installed package-owned `gentle-ai-explore`. If that individual role is missing or unusable, fall back to Pi's native `Agent` with the same read-only mapping constraints and report the fallback.
 
@@ -327,7 +337,7 @@ stop writes → parent captures git status → diagnose affected repos/worktrees
 
 ### Review Actor Materialization
 
-Native RAR owns lens selection (canon Native Checking Contract above): the orchestrator never chooses which lenses run. This binding is materialization only. When a native transition or bound route names review actors, the parent launches exactly the named subagent definitions — `review-risk`, `review-resilience`, `review-readability`, `review-reliability` — with the provided scope and nothing more. `reviewer` remains an intent, never an installed subagent name; never launch a generic `reviewer` and never substitute, add, or drop a lens.
+Native RAR owns lens selection (canon Native Checking Contract above): the orchestrator never chooses which lenses run. On the provider host-relay path, lens capture never loads a Pi subagent definition at all: the host relay materializes the Go-issued opaque prompt into a fresh locked-down print-mode `pi` subprocess and submits the raw output bytes, and the adversarial roles execute through provider-rendered self-contained vectors. The packaged lens definitions — `review-risk`, `review-resilience`, `review-readability`, `review-reliability` — remain only for the manual/compat lane; when that lane's bound route names review actors, the parent launches exactly those named definitions with the provided scope and nothing more. `reviewer` remains an intent, never an installed subagent name; never launch a generic `reviewer` and never substitute, add, or drop a lens.
 
 ## Bounded Review Transaction Contract
 

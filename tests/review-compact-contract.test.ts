@@ -3,50 +3,44 @@ import test from "node:test";
 import {
 	CompactReviewContractError,
 	parseNativeCompactFinalizeInput,
+	toNativeValidatorDocument,
 } from "../lib/review-compact-contract.ts";
 
-const POLICY_HASH = "a".repeat(64);
+const REQUEST_HASH = "a".repeat(64);
 
-test("compact finalize parser rejects malformed nested findings and incomplete final evidence pairing", () => {
-	const valid = {
-		cwd: "/repo",
-		review_result: {
-			lens_results: [{
-				lens: "review-risk",
-				findings: [{
-					id: "RISK-001",
-					lens: "review-risk",
-					location: "lib/a.ts:1",
-					severity: "CRITICAL",
-					claim: "Concrete claim",
-					evidence_class: "deterministic",
-					causal_disposition: "introduced",
-					proof_refs: ["changed-hunk:lib/a.ts:1"],
-				}],
-				evidence: ["reviewed"],
-			}],
-		},
-	};
-	assert.equal(parseNativeCompactFinalizeInput(valid).review_result?.lens_results[0]?.findings[0]?.id, "RISK-001");
-	assert.throws(
-		() => parseNativeCompactFinalizeInput({ ...valid, review_result: { lens_results: [{ ...valid.review_result.lens_results[0], findings: [{ ...valid.review_result.lens_results[0].findings[0], extra: true }] }] } }),
-		(error: unknown) => error instanceof CompactReviewContractError && error.area === "review/finalize.review_result.lens_results[0].findings[0]" && error.code === "unknown-key",
-	);
+// gentle-pi#311 P5: the FINALIZE input contract carries only the negotiated
+// collection answers. Pi-authored reviewer, refuter, and validator-proof
+// payloads are retired — lens results are admitted natively, and the
+// adversarial roles execute through Go-owned pi processes via
+// provider-rendered self-contained vectors.
+test("compact finalize parser rejects the retired Pi-authored payload fields", () => {
+	for (const retired of [
+		{ review_result: { lens_results: [] } },
+		{ refuter_batch: { schema: "gentle-ai.refuter-result-batch/v1", request_hash: REQUEST_HASH, results: [] } },
+		{ validation_proof: { original_criteria: { passed: true, evidence: ["ok"] }, correction_regression: { passed: true, evidence: ["ok"] } } },
+	]) {
+		assert.throws(
+			() => parseNativeCompactFinalizeInput({ cwd: "/repo", ...retired }),
+			(error: unknown) => error instanceof CompactReviewContractError && error.code === "unknown-key",
+		);
+	}
+});
+
+test("compact finalize parser enforces the final evidence pairing and forecast range", () => {
 	assert.throws(
 		() => parseNativeCompactFinalizeInput({ cwd: "/repo", final_evidence: "passed" }),
 		(error: unknown) => error instanceof CompactReviewContractError && error.code === "field-pair",
 	);
-	for (const review_result of [
-		{ lens_results: [{ findings: [], evidence: [] }] },
-		{ lens_results: [{ findings: [{ ...valid.review_result.lens_results[0].findings[0], proof_refs: [] }], evidence: ["reviewed"] }] },
-		{ lens_results: [{ findings: [{ ...valid.review_result.lens_results[0].findings[0], severity: "UNKNOWN" }], evidence: ["reviewed"] }] },
-		{ lens_results: [{ findings: [{ ...valid.review_result.lens_results[0].findings[0], evidence_class: "info" }], evidence: ["reviewed"] }] },
-	]) assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", review_result }), CompactReviewContractError);
-	assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", validation_proof: { original_criteria: { passed: true, evidence: [] }, correction_regression: { passed: true, evidence: ["passed"] } } }), CompactReviewContractError);
-	assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", refuter_batch: { schema: "gentle-ai.refuter-result-batch/v1", request_hash: POLICY_HASH, results: [{ finding_id: "RISK-001", outcome: "unknown", proof_refs: ["proof"] }] } }), CompactReviewContractError);
+	assert.throws(
+		() => parseNativeCompactFinalizeInput({ cwd: "/repo", final_verification_passed: true }),
+		(error: unknown) => error instanceof CompactReviewContractError && error.code === "field-pair",
+	);
+	assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", correction_line_forecast: 0 }), CompactReviewContractError);
+	assert.equal(parseNativeCompactFinalizeInput({ cwd: "/repo", correction_line_forecast: 3 }).correction_line_forecast, 3);
+	assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", lineageId: "bad lineage!" }), CompactReviewContractError);
 });
 
-test("native finalize preserves arbitrary non-empty evidence text and binds refuter batches", () => {
+test("native finalize preserves arbitrary non-empty evidence text byte-for-byte", () => {
 	const evidence = " \tleading evidence\nterminal newlines\n\n";
 	assert.equal(parseNativeCompactFinalizeInput({ cwd: "/repo", final_evidence: evidence, final_verification_passed: true }).final_evidence, evidence);
 	for (const outcome of ["passed", "verification_failed", "procedural_tooling_failed"] as const) {
@@ -55,22 +49,33 @@ test("native finalize preserves arbitrary non-empty evidence text and binds refu
 	assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", final_evidence: evidence, final_verification_outcome: "failed" }), CompactReviewContractError);
 	assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", final_evidence: evidence, final_verification_passed: true, final_verification_outcome: "passed" }), CompactReviewContractError);
 	assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", final_evidence: "", final_verification_passed: true }), CompactReviewContractError);
+});
 
-	const proof = "differential-test:candidate still fails";
-	const review_result = {
-		lens_results: [{
-			lens: "review-risk",
-			findings: [{ id: "RISK-001", lens: "review-risk", location: "lib/a.ts:1", severity: "CRITICAL", claim: "Candidate fails", evidence_class: "inferential", causal_disposition: "introduced", proof_refs: [proof] }],
-			evidence: ["reviewed"],
-		}],
-		refuter_request_hash: POLICY_HASH,
+test("targeted validation document keeps its strict provider-bound shape", () => {
+	const validation = {
+		request_hash: REQUEST_HASH,
+		correction_ids: ["RISK-001"],
+		original_criteria: { passed: true, evidence: ["acceptance passes"] },
+		correction_regression: { passed: true, evidence: ["regression suite passes"] },
+		fix_caused_findings: [],
+		follow_ups: [{ finding_id: "RISK-001", location: "lib/a.ts:1", summary: "Track the remaining cleanup", proof_refs: ["differential-test:covered"] }],
 	};
-	const batch = { schema: "gentle-ai.refuter-result-batch/v1", request_hash: POLICY_HASH, results: [{ finding_id: "RISK-001", outcome: "corroborated", proof_refs: [proof] }] };
-	assert.deepEqual(parseNativeCompactFinalizeInput({ cwd: "/repo", review_result, refuter_batch: batch }).refuter_batch, batch);
-	assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", review_result, refuter_batch: { ...batch, request_hash: "b".repeat(64) } }), CompactReviewContractError);
-	const independent = { ...batch, results: [{ ...batch.results[0], proof_refs: ["differential-test:independent reproduction fails"] }] };
-	assert.deepEqual(parseNativeCompactFinalizeInput({ cwd: "/repo", review_result, refuter_batch: independent }).refuter_batch, independent);
-	for (const proof_refs of [[], [""], [" malformed"]]) {
-		assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", review_result, refuter_batch: { ...batch, results: [{ ...batch.results[0], proof_refs }] } }), CompactReviewContractError);
+	const parsed = parseNativeCompactFinalizeInput({ cwd: "/repo", validation, final_evidence: "full suite passed", final_verification_passed: true });
+	assert.deepEqual(parsed.validation, validation);
+	assert.deepEqual(toNativeValidatorDocument(parsed.validation!), {
+		original_criteria: validation.original_criteria,
+		correction_regression: validation.correction_regression,
+		follow_ups: [{ observation: "Track the remaining cleanup", proof_refs: ["differential-test:covered"] }],
+	});
+
+	for (const invalid of [
+		{ ...validation, request_hash: "not-a-digest" },
+		{ ...validation, fix_caused_findings: [{ id: "FIX-001" }] },
+		{ ...validation, original_criteria: { passed: true, evidence: [] } },
+		{ ...validation, correction_regression: { passed: "yes", evidence: ["ok"] } },
+		{ ...validation, follow_ups: [{ ...validation.follow_ups[0], proof_refs: [] }] },
+		{ ...validation, extra_field: true },
+	]) {
+		assert.throws(() => parseNativeCompactFinalizeInput({ cwd: "/repo", validation: invalid, final_evidence: "evidence", final_verification_passed: true }), CompactReviewContractError);
 	}
 });

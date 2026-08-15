@@ -51,24 +51,24 @@ import {
 } from "../lib/sdd-status.ts";
 import type { TriggerEvent } from "../lib/review-triggers.ts";
 import { canonicalJsonV1, domainHashV1 } from "../lib/review-canonical.ts";
-import { CompactReviewContractError, deriveNativeRefuterRequest, parseNativeCompactFinalizeInput, toNativeReviewerDocument, toNativeValidatorDocument } from "../lib/review-compact-contract.ts";
-import { toNativeRefuterDocument } from "../lib/review-refuter-adapter.ts";
+import { parseNativeCompactFinalizeInput, toNativeValidatorDocument } from "../lib/review-compact-contract.ts";
 import {
 	REVIEW_HOST_RELAY_FAILURE,
 	REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
 	REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
 	ReviewHostRelayError,
 	reviewHostRelaySlots,
+	reviewProviderRoleVectorSlots,
 	runReviewHostRelaySlot,
 	type ReviewHostRelayRunner,
 	type ReviewHostRelaySlot,
+	type ReviewProviderRoleVectorSlot,
 } from "../lib/review-host-relay.ts";
 import {
 	inheritedUnsafeGitEnvironmentKeys,
 	publicationProbeGitEnvironment,
 	resolveRepositoryAuthorityV1,
 } from "../lib/review-repository.ts";
-import { captureLiveReviewCandidateBinding } from "../lib/review-snapshot.ts";
 import {
 	EXTERNAL_RELEASE_EVIDENCE,
 	GATE_RESULT,
@@ -106,7 +106,7 @@ import {
 	type ReviewProjectionV1,
 } from "../lib/review-snapshot.ts";
 import { sanitizeTerminalText, stripAnsi } from "../lib/terminal-theme.ts";
-import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView, type NativeCandidateProjectionDescriptor } from "../lib/review-candidate-view.ts";
+import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
 import {
 	createNativeReviewCli,
 	isCanonicalProcessString,
@@ -226,15 +226,133 @@ function sddLocalAgentOverrideCount(cwd: string): number {
 	return count;
 }
 
-let orchestratorPromptCache: string | null = null;
-function getOrchestratorPrompt(): string {
-	if (orchestratorPromptCache === null) {
-		orchestratorPromptCache = renderOrchestratorPrompt(ASSETS_DIR);
-	}
-	return orchestratorPromptCache;
+// ---------------------------------------------------------------------------
+// Background subagents policy — project > global > env > default off
+// ---------------------------------------------------------------------------
+
+type BackgroundSubagentsPolicy = "on" | "off";
+type BackgroundSubagentsCapability = "ready" | "absent";
+
+interface BackgroundSubagentsRendering {
+	policy: BackgroundSubagentsPolicy;
+	capability: BackgroundSubagentsCapability;
 }
 
-function renderOrchestratorPrompt(assetsDir: string): string {
+interface LoadBackgroundSubagentsOptions {
+	/** Override the config home directory (used in tests to avoid touching ~/.pi). */
+	gentlePiConfigHome?: string;
+	/** Override the environment lookup (used in tests). */
+	env?: Record<string, string | undefined>;
+}
+
+const BACKGROUND_SUBAGENTS_SCHEMA = "gentle-pi.background-subagents/v1";
+const BACKGROUND_SUBAGENTS_FILE = "background-subagents.json";
+
+const DEFAULT_BACKGROUND_SUBAGENTS_RENDERING: BackgroundSubagentsRendering = {
+	policy: "off",
+	capability: "absent",
+};
+
+/**
+ * Strict decode of {"schema":"gentle-pi.background-subagents/v1","policy":"on"|"off"}.
+ * Any malformed shape (bad JSON, wrong schema, unknown keys, invalid policy)
+ * returns undefined so the caller fails closed to "off".
+ */
+function parseBackgroundSubagentsPolicyFile(
+	raw: string,
+): BackgroundSubagentsPolicy | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(parsed)) return undefined;
+	if (parsed.schema !== BACKGROUND_SUBAGENTS_SCHEMA) return undefined;
+	if (parsed.policy !== "on" && parsed.policy !== "off") return undefined;
+	if (Object.keys(parsed).length !== 2) return undefined;
+	return parsed.policy;
+}
+
+/**
+ * Load the background-subagents policy.
+ *
+ * Resolution order (first hit wins, mirroring loadRuntimeGuardrailsConfig):
+ *   1. Project file `${cwd}/.pi/gentle-ai/background-subagents.json`
+ *   2. Global file `${configHome}/background-subagents.json`
+ *      (configHome honors GENTLE_PI_CONFIG_HOME, default ~/.pi/gentle-ai)
+ *   3. Env var GENTLE_PI_BACKGROUND_SUBAGENTS ("on" | "off")
+ *   4. Default "off"
+ *
+ * A present-but-malformed file fails closed to "off" instead of falling
+ * through to a lower-priority source.
+ */
+function loadBackgroundSubagentsPolicy(
+	cwd: string,
+	options: LoadBackgroundSubagentsOptions = {},
+): BackgroundSubagentsPolicy {
+	try {
+		const env = options.env ?? process.env;
+		const configHome = options.gentlePiConfigHome ?? gentleAiConfigHome();
+		for (const path of [
+			join(cwd, ".pi", "gentle-ai", BACKGROUND_SUBAGENTS_FILE),
+			join(configHome, BACKGROUND_SUBAGENTS_FILE),
+		]) {
+			if (!existsSync(path)) continue;
+			return parseBackgroundSubagentsPolicyFile(readFileSync(path, "utf8")) ?? "off";
+		}
+		const fromEnv = env.GENTLE_PI_BACKGROUND_SUBAGENTS;
+		if (fromEnv === "on" || fromEnv === "off") return fromEnv;
+		return "off";
+	} catch {
+		return "off";
+	}
+}
+
+/**
+ * `subagent_run` availability probe. The extension has no synchronous runtime
+ * tool registry at prompt-render time, so capability is derived from the
+ * pi-subagents package presence via the builtinAgentDirs() probe.
+ */
+function resolveBackgroundSubagentsCapability(
+	cwd: string,
+): BackgroundSubagentsCapability {
+	try {
+		return builtinAgentDirs(cwd).some((dir) => existsSync(dir))
+			? "ready"
+			: "absent";
+	} catch {
+		return "absent";
+	}
+}
+
+function renderBackgroundSubagentsStatusLine(
+	background: BackgroundSubagentsRendering,
+): string {
+	return `Background subagent policy: ${background.policy} (capability: ${background.capability})`;
+}
+
+// Rendered prompts are memoized per background policy/capability key for the
+// process lifetime; the assets bytes themselves are read once per key.
+const orchestratorPromptCache = new Map<string, string>();
+function getOrchestratorPrompt(cwd: string = process.cwd()): string {
+	const background: BackgroundSubagentsRendering = {
+		policy: loadBackgroundSubagentsPolicy(cwd),
+		capability: resolveBackgroundSubagentsCapability(cwd),
+	};
+	const cacheKey = `${background.policy}:${background.capability}`;
+	let prompt = orchestratorPromptCache.get(cacheKey);
+	if (prompt === undefined) {
+		prompt = renderOrchestratorPrompt(ASSETS_DIR, background);
+		orchestratorPromptCache.set(cacheKey, prompt);
+	}
+	return prompt;
+}
+
+function renderOrchestratorPrompt(
+	assetsDir: string,
+	background: BackgroundSubagentsRendering = DEFAULT_BACKGROUND_SUBAGENTS_RENDERING,
+): string {
 	return readFileSync(join(assetsDir, "orchestrator.md"), "utf8")
 		.replaceAll(
 			"{{GENTLE_PI_SDD_WORKFLOW_PATH}}",
@@ -251,6 +369,10 @@ function renderOrchestratorPrompt(assetsDir: string): string {
 		.replaceAll(
 			"{{GENTLE_PI_SKILLS_PATH}}",
 			join(assetsDir, "orchestrator-skills.md"),
+		)
+		.replaceAll(
+			"{{GENTLE_PI_BACKGROUND_POLICY}}",
+			renderBackgroundSubagentsStatusLine(background),
 		)
 		.trim();
 }
@@ -287,7 +409,7 @@ const NEUTRAL_PERSONA_PROMPT = `Persona:
 - Push back when the user asks for code without enough context or understanding.
 - Correct errors directly, explain why, and show the better path.`;
 
-function buildGentlePrompt(persona: PersonaMode): string {
+function buildGentlePrompt(persona: PersonaMode, cwd: string = process.cwd()): string {
 	const personaPrompt =
 		persona === "neutral" ? NEUTRAL_PERSONA_PROMPT : GENTLEMAN_PERSONA_PROMPT;
 	const languageBoundary =
@@ -321,7 +443,7 @@ Harness principles:
 - Protect the human reviewer: avoid oversized changes, surface review workload risk, and ask before turning one task into a large multi-area change.
 - Never claim persistent memory is available because of this package. Memory is provided by separate packages or MCP tools when installed and callable.
 
-${getOrchestratorPrompt()}`;
+${getOrchestratorPrompt(cwd)}`;
 }
 
 // Matches `git [global-flags] push` — tolerates flags like -C /repo or --work-tree=/tmp
@@ -2176,7 +2298,7 @@ const REVIEW_CONTROLLER_PARAMETERS = {
 		},
 		input: {
 			type: "string",
-			description: "A JSON-serialized object string, not a nested object. New native ordinary START uses {\"mode\":\"ordinary\"}; answer-consent uses exactly {\"consentBinding\":\"<opaque id>\",\"answer\":\"granted|declined\"}. An explicit baseRef requires committedOnly: true and requests a committed range, while repository-local policyPath remains optional. Legacy compact START retains policyHash. FINALIZE supplies reviewer results, correction forecast, targeted validation, final evidence, and an explicit final_verification_passed boolean. Judgment Day retains graph-v1 input.",
+			description: "A JSON-serialized object string, not a nested object. New native ordinary START uses {\"mode\":\"ordinary\"}; answer-consent uses exactly {\"consentBinding\":\"<opaque id>\",\"answer\":\"granted|declined\"}. An explicit baseRef requires committedOnly: true and requests a committed range, while repository-local policyPath remains optional. Legacy compact START retains policyHash. FINALIZE supplies only the negotiated collection answers: correction forecast, targeted validation, final evidence, and an explicit final_verification_passed boolean; reviewer, refuter, and validator verdicts are admitted natively and never Pi-authored. Judgment Day retains graph-v1 input.",
 		},
 		outputPath: { type: "string", description: "Retired with legacy bundle export; ignored. Export returns legacy-operation-retired." },
 		inputPath: { type: "string", description: "Repository-local JSON input file for finalize/advance (alternative to input). Legacy bundle import is retired." },
@@ -4895,82 +5017,22 @@ function resolveReviewControllerWorkspaceRoot(requested: string | undefined, ses
 	return resolved;
 }
 
-function providerArgumentValue(name: string, input: NonNullable<NonNullable<ReviewStatusV3["nextTransition"]>["collect"]>["inputs"][number]): string {
-	const matches = input.arguments.filter((argument) => argument.name === name);
-	if (matches.length !== 1 || !isCanonicalProcessString(matches[0]?.value)) {
-		throw new CandidateViewError(`provider reviewer collect input requires exactly one canonical ${name} argument`, "manifest-input-divergence");
-	}
-	return matches[0]!.value;
-}
-
-function providerReviewerProjection(status: ReviewStatusV3): NativeCandidateProjectionDescriptor {
-	const authority = status.authority;
-	const inputs = status.nextTransition?.kind === "collect"
-		? status.nextTransition.collect?.inputs.filter((input) => input.captureOperation === "review.capture-result") ?? []
-		: [];
-	if (authority === undefined || inputs.length === 0) {
-		throw new CandidateViewError("provider status did not supply reviewer collect inputs for the frozen candidate", "manifest-input-divergence");
-	}
-	const first = inputs[0]!;
-	if (first.artifactSubject === undefined || first.baseTree === undefined || first.candidateTree === undefined || first.changedPathManifest === undefined) {
-		throw new CandidateViewError("provider reviewer collect input omitted its frozen artifact subject or manifest", "manifest-input-divergence");
-	}
-	const manifestBytes = JSON.stringify(first.changedPathManifest);
-	const manifestHash = first.artifactSubject.changedPathManifestSha256;
-	const seenLenses = new Set<string>();
-	const seenOrders = new Set<number>();
-	const seenSubjects = new Set<string>();
-	for (const input of inputs) {
-		const subject = input.artifactSubject;
-		if (
-			subject === undefined || input.baseTree === undefined || input.candidateTree === undefined || input.changedPathManifest === undefined ||
-			input.baseTree !== status.projection.baseTree || input.candidateTree !== status.projection.currentCandidateTree ||
-			subject.baseTree !== input.baseTree || subject.candidateTree !== input.candidateTree ||
-			subject.lineageId !== authority.lineageId || subject.authorityRevision !== authority.revision || subject.targetIdentity !== status.targetIdentity ||
-			subject.changedPathManifestSha256 !== manifestHash || JSON.stringify(input.changedPathManifest) !== manifestBytes ||
-			providerArgumentValue("lineage", input) !== subject.lineageId ||
-			providerArgumentValue("expected-revision", input) !== subject.authorityRevision ||
-			providerArgumentValue("target", input) !== subject.targetIdentity ||
-			providerArgumentValue("lens", input) !== subject.lens ||
-			providerArgumentValue("order", input) !== String(subject.selectedOrder) ||
-			providerArgumentValue("subject-hash", input) !== subject.subjectHash ||
-			seenLenses.has(subject.lens) || seenOrders.has(subject.selectedOrder) || seenSubjects.has(subject.subjectHash)
-		) {
-			throw new CandidateViewError("provider reviewer collect inputs disagree on their frozen manifest binding", "manifest-input-divergence");
-		}
-		seenLenses.add(subject.lens);
-		seenOrders.add(subject.selectedOrder);
-		seenSubjects.add(subject.subjectHash);
-	}
-	const intendedUntracked = first.changedPathManifest.filter((entry) => entry.intendedUntracked).map((entry) => entry.path).sort();
-	if (JSON.stringify(intendedUntracked) !== JSON.stringify([...status.projection.intendedUntracked].sort())) {
-		throw new CandidateViewError("provider manifest intended-untracked fields disagree with its projection", "manifest-intended-untracked-not-subset");
-	}
-	return {
-		...status.projection,
-		manifest: first.changedPathManifest.map((entry) => ({
-			path: entry.path,
-			status: entry.status,
-			oldMode: entry.oldMode,
-			newMode: entry.newMode,
-			deleted: entry.deleted,
-			typeChanged: entry.typeChanged,
-			modeOnly: entry.modeOnly,
-		})),
-		manifestSha256: manifestHash,
-		providerManifestHashVerified: true,
-	};
-}
-
 function correctionOutcome(input: ReturnType<typeof parseNativeCompactFinalizeInput>): CorrectionOutcome | undefined {
 	if (input.final_verification_outcome !== undefined) return input.final_verification_outcome;
 	if (input.final_verification_passed === undefined) return undefined;
 	return input.final_verification_passed ? "passed" : "verification_failed";
 }
 
+// Both targeted-validation collection forms count as "validation offered":
+// the host-run `external.run_targeted_validation` input and the Go-owned
+// `review.capture-validation` vector (gentle-pi#311 P4-roles).
+function isTargetedValidationCollectInput(input: { captureOperation: string }): boolean {
+	return input.captureOperation === "external.run_targeted_validation" || input.captureOperation === "review.capture-validation";
+}
+
 function requireEvidenceCollection(status: ReviewStatusV3): void {
 	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
-	if (status.validationRequest !== undefined || inputs.some((input) => input.captureOperation === "external.run_targeted_validation")) {
+	if (status.validationRequest !== undefined || inputs.some(isTargetedValidationCollectInput)) {
 		throw new CandidateViewError("targeted validation was offered before correction evidence was captured", "evidence-first-ordering");
 	}
 	if (inputs.filter((input) => input.captureOperation === "review.capture-evidence").length !== 1) {
@@ -4980,7 +5042,7 @@ function requireEvidenceCollection(status: ReviewStatusV3): void {
 
 function requireTargetedValidationAfterEvidence(status: ReviewStatusV3): NonNullable<ReviewStatusV3["validationRequest"]> {
 	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
-	const targeted = inputs.filter((input) => input.captureOperation === "external.run_targeted_validation");
+	const targeted = inputs.filter(isTargetedValidationCollectInput);
 	const request = status.validationRequest;
 	if (
 		status.authority?.state !== "validating" || targeted.length !== 1 || targeted[0]?.validationRequest === undefined || request === undefined ||
@@ -4997,7 +5059,7 @@ function requireTargetedValidationAfterEvidence(status: ReviewStatusV3): NonNull
 
 function assertNoTargetedValidation(status: ReviewStatusV3): void {
 	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
-	if (status.validationRequest !== undefined || inputs.some((input) => input.captureOperation === "external.run_targeted_validation")) {
+	if (status.validationRequest !== undefined || inputs.some(isTargetedValidationCollectInput)) {
 		throw new CandidateViewError("non-passing evidence unexpectedly unlocked targeted validation", "evidence-first-ordering");
 	}
 }
@@ -5089,6 +5151,70 @@ async function executeReviewHostRelayCollection(
 	return {
 		...mapNativeTargetStatus(operation, after, lineageId),
 		host_relay: { transport: "pi_host_relay", captured_slots: captured },
+	};
+}
+
+// gentle-pi#311 P4-roles — the Go-owned adversarial role route. The provider
+// renders each non-lens role slot (`review.capture-refuter` /
+// `review.capture-validation`) as a SELF-CONTAINED authority-advancing
+// vector: binding tokens plus `--agent=pi --execute=true` and no submission
+// descriptor. Pi executes each exact vector once, verbatim and in the
+// foreground; Go materializes the role prompt, spawns its own locked-down pi
+// subprocess, and admits the raw verdict. On any failure the typed error is
+// surfaced and nothing is relaunched — the caller re-queries negotiated
+// STATUS and executes only a vector it reoffers.
+const REVIEW_PROVIDER_ROLE_RETRY_ACTION =
+	"Re-query negotiated STATUS and execute only the exact role vector it reoffers; never relaunch from transcript inference.";
+
+async function executeProviderRoleVectorCollection(
+	operation: ReviewControllerOperation,
+	lineageId: string,
+	slots: readonly ReviewProviderRoleVectorSlot[],
+	nativeReviewCli: NativeReviewCli,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+	if (nativeReviewCli.captureProviderRole === undefined) {
+		return {
+			operation,
+			status: "blocked",
+			outcome: "provider-role-capture-unsupported",
+			reason: "The provider issued self-contained role capture vectors, but this runtime has no native provider-role capture surface.",
+			mutation_performed: false,
+			mutation_outcome: "none",
+			next_action: "Install a gentle-pi release with the provider-role capture surface; the vectors stay reoffered by negotiated STATUS.",
+		};
+	}
+	const executed: Array<Record<string, unknown>> = [];
+	for (const slot of slots) {
+		let artifact: Awaited<ReturnType<NonNullable<NativeReviewCli["captureProviderRole"]>>>;
+		try {
+			artifact = await nativeReviewCli.captureProviderRole({
+				captureOperation: slot.captureOperation,
+				argumentTokens: slot.argumentTokens,
+				cwd,
+				...(signal === undefined ? {} : { signal }),
+			});
+		} catch (error) {
+			return {
+				...nativeOperationFailure(operation, error),
+				outcome: "provider-role-vector-failed",
+				provider_roles: { transport: "go_owned_pi_process", executed_slots: executed },
+				retry_discipline: REVIEW_PROVIDER_ROLE_RETRY_ACTION,
+			};
+		}
+		executed.push({
+			capture_operation: slot.captureOperation,
+			role: artifact.role,
+			lineage_id: artifact.lineageId,
+			target_identity: artifact.targetIdentity,
+			captured: artifact.captured,
+		});
+	}
+	const after = await nativeReviewCli.targetStatus!({ cwd, lineageId, ...(signal === undefined ? {} : { signal }) });
+	return {
+		...mapNativeTargetStatus(operation, after, lineageId),
+		provider_roles: { transport: "go_owned_pi_process", executed_slots: executed },
 	};
 }
 
@@ -5516,8 +5642,8 @@ async function executeReviewControllerOperation(
 			let correctionStep: CorrectionStep | undefined;
 			try {
 				if (parameters.lineageId === undefined) throw new CandidateViewError("Native FINALIZE requires an explicit lineage");
-				correctionCompletion = input.review_result === undefined && (input.validation !== undefined || input.validation_proof !== undefined) && input.final_evidence !== undefined;
-				const validationAttempt = input.review_result === undefined && input.correction_line_forecast === undefined && input.final_evidence !== undefined;
+				correctionCompletion = input.validation !== undefined && input.final_evidence !== undefined;
+				const validationAttempt = input.correction_line_forecast === undefined && input.final_evidence !== undefined;
 				const replayKey = JSON.stringify({ cwd: defaultCwd, lineageId: parameters.lineageId ?? null, input: parameters.input ?? null, inputPath: parameters.inputPath ?? null });
 				if (candidateViews?.hasProjection(parameters.lineageId)) {
 					candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
@@ -5551,21 +5677,20 @@ async function executeReviewControllerOperation(
 					? reviewHostRelaySlots(negotiatedStatus.nextTransition.collect?.inputs ?? [])
 					: [];
 				if (hostRelaySlots.length > 0 && input.final_evidence === undefined && input.correction_line_forecast === undefined) {
-					if (input.review_result !== undefined) {
-						return {
-							operation: parameters.operation,
-							status: "blocked",
-							outcome: "pi-host-relay-slots-are-host-mediated",
-							reason: "The provider marked these capture slots --materialize: the gentle-pi host relay satisfies them with a fresh locked-down print-mode pi subprocess, so Pi-authored reviewer documents are not admissible for them.",
-							mutation_performed: false,
-							mutation_outcome: "none",
-							next_action: "Re-run finalize without review_result; the host relay captures each provider-issued slot in provider order.",
-						};
-					}
 					return await executeReviewHostRelayCollection(parameters.operation, parameters.lineageId, hostRelaySlots, nativeReviewCli, defaultCwd, signal);
 				}
+				// gentle-pi#311 P4-roles: the provider renders the non-lens
+				// adversarial roles as self-contained --execute vectors; each is
+				// run exactly as rendered and STATUS is re-queried. Nothing here
+				// authors, parses, or transports role output.
+				const roleVectorSlots = negotiatedStatus.nextTransition?.kind === "collect"
+					? reviewProviderRoleVectorSlots(negotiatedStatus.nextTransition.collect?.inputs ?? [])
+					: [];
+				if (roleVectorSlots.length > 0 && input.final_evidence === undefined && input.correction_line_forecast === undefined && input.validation === undefined) {
+					return await executeProviderRoleVectorCollection(parameters.operation, parameters.lineageId, roleVectorSlots, nativeReviewCli, defaultCwd, signal);
+				}
 				if (candidateViews && !candidateViews.hasProjection(parameters.lineageId)) {
-					const projection = input.review_result === undefined ? negotiatedStatus.projection : providerReviewerProjection(negotiatedStatus);
+					const projection = negotiatedStatus.projection;
 					candidateView = validationAttempt
 						? (candidateViews.restoreProjectionFromNative(parameters.lineageId, defaultCwd, projection), undefined)
 						: candidateViews.restoreForFinalizeFromNative(parameters.lineageId, defaultCwd, projection);
@@ -5639,48 +5764,78 @@ async function executeReviewControllerOperation(
 					const validationRequest = requireTargetedValidationAfterEvidence(afterEvidence);
 					correctionEvidenceByLineage.delete(parameters.lineageId);
 					negotiatedStatus = afterEvidence;
+					// gentle-pi#311 P4-roles: when the provider offers targeted
+					// validation as a self-contained capture-validation vector, the
+					// verdict is Go-owned — a Pi-authored validation document is not
+					// admissible for it, and the next FINALIZE call executes the
+					// vector exactly as rendered.
+					const validationVectors = afterEvidence.nextTransition?.kind === "collect"
+						? reviewProviderRoleVectorSlots(afterEvidence.nextTransition.collect?.inputs ?? [])
+						: [];
+					if (validationVectors.length > 0) {
+						candidateViews.cleanup(candidateView.token);
+						if (input.validation !== undefined) {
+							return {
+								operation: parameters.operation,
+								status: "blocked",
+								outcome: "targeted-validation-is-provider-owned",
+								reason: "The provider rendered targeted validation as a self-contained review.capture-validation vector: Go materializes the validator prompt and runs its own locked-down pi process, so a Pi-authored validation document is not admissible.",
+								correction_step: correctionStep,
+								mutation_performed: true,
+								mutation_outcome: "committed",
+								next_action: "Re-run finalize without validation; the provider-rendered vector executes verbatim and STATUS is re-queried.",
+							};
+						}
+						return { ...mapNativeTargetStatus(parameters.operation, afterEvidence, parameters.lineageId), correction_step: correctionStep };
+					}
 					if (input.validation === undefined) {
 						candidateViews.cleanup(candidateView.token);
 						return { ...mapNativeTargetStatus(parameters.operation, afterEvidence, parameters.lineageId), correction_step: correctionStep };
 					}
-					if (input.validation_proof !== undefined) throw new Error("Negotiated FINALIZE requires the native targeted validation document");
 					if (input.validation.request_hash !== validationRequest.requestHash.replace(/^sha256:/, "") || JSON.stringify([...input.validation.correction_ids].sort()) !== JSON.stringify([...validationRequest.fixFindingIds].sort())) {
 						throw new CandidateViewError("targeted validation document does not match the provider request", "targeted-validation-binding-drift");
 					}
 				}
-				if (input.review_result !== undefined) {
-					if (parameters.lineageId === undefined) throw new CandidateViewError("Native FINALIZE requires an explicit lineage for refuter derivation");
-					let request;
-					try {
-						request = deriveNativeRefuterRequest({ lineageId: parameters.lineageId, ...(candidateView === undefined ? {} : { candidateTree: candidateView.candidateTree }), reviewResult: input.review_result });
-					} catch (error) {
-						if (!(error instanceof CompactReviewContractError) || error.code !== "candidate-tree") throw error;
-						const candidateTree = captureLiveReviewCandidateBinding({
-							cwd: candidateView?.root ?? defaultCwd,
-							repositoryId: resolveRepositoryAuthorityV1(candidateView?.root ?? defaultCwd).repository_id,
-						}).initial_review_tree;
-						request = deriveNativeRefuterRequest({ lineageId: parameters.lineageId, candidateTree, reviewResult: input.review_result });
+				// gentle-pi#311 P5: when the provider's negotiated transition IS a
+				// review.finalize execution (captured_results_ready), run it exactly
+				// as rendered — the provider discovers its own admitted lens and
+				// role slots. Pi never assembles reviewer, refuter, or validator
+				// documents for this lane; the remaining document lanes below
+				// (correction forecast, targeted validation, final evidence) are the
+				// negotiated collection answers the pinned v2.2.3 provider still
+				// consumes through --correction-lines/--validation/--evidence.
+				const finalizeTransition = negotiatedStatus.nextTransition?.kind === "execute" && negotiatedStatus.nextTransition.execute?.operation === "review.finalize"
+					? negotiatedStatus.nextTransition.execute
+					: undefined;
+				if (
+					finalizeTransition !== undefined && nativeReviewCli.finalizeTransition !== undefined &&
+					input.validation === undefined && input.final_evidence === undefined && input.correction_line_forecast === undefined
+				) {
+					if (finalizeTransition.binding.lineageId !== undefined && finalizeTransition.binding.lineageId !== parameters.lineageId) {
+						throw new CandidateViewError("provider finalize transition is bound to a different lineage", "finalize-transition-binding-drift");
 					}
-					if (request !== undefined && input.refuter_batch === undefined) {
-						return { operation: parameters.operation, status: "blocked", outcome: "refuter-required", lineage_created: false, mutation_performed: false, mutation_outcome: "none", refuter_request: request };
+					nativeResult = await nativeReviewCli.finalizeTransition({
+						cwd: candidateView?.root ?? defaultCwd,
+						// The exact rendered tokens, verbatim and in provider order.
+						// The provider tokenizes each argument itself; the hyphenated
+						// fallback mirrors its published rendering rule for older
+						// payloads that omit the token field.
+						argumentTokens: finalizeTransition.arguments.map((argument) => argument.token ?? `--${argument.name.replaceAll("_", "-")}=${argument.value}`),
+						...(signal === undefined ? {} : { signal }),
+					});
+					if (parameters.lineageId !== undefined && nativeResult.lineageId !== parameters.lineageId) {
+						throw new CandidateViewError("provider finalize transition answered for a different lineage", "finalize-transition-binding-drift");
 					}
-					if (request !== undefined && input.review_result.refuter_request_hash !== request.request_hash) {
-						throw new Error("Native FINALIZE refuter_request_hash must exactly match the controller-derived request");
-					}
-					if (request === undefined && (input.review_result.refuter_request_hash !== undefined || input.refuter_batch !== undefined)) {
-						throw new Error("Native FINALIZE refuter material is invalid without inferential candidate-caused severe findings");
-					}
+				} else {
+					nativeResult = await nativeReviewCli.finalize({
+						cwd: candidateView?.root ?? defaultCwd,
+						...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
+						...(input.correction_line_forecast === undefined ? {} : { correctionLines: input.correction_line_forecast }),
+						...(input.validation === undefined ? {} : { validationDocument: toNativeValidatorDocument(input.validation) }),
+						...(input.final_evidence === undefined ? {} : { evidenceDocument: input.final_evidence, failed: input.final_verification_passed === false }),
+						...(signal === undefined ? {} : { signal }),
+					});
 				}
-				nativeResult = await nativeReviewCli.finalize({
-					cwd: candidateView?.root ?? defaultCwd,
-					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
-					...(input.review_result === undefined ? {} : { lensResults: input.review_result.lens_results.map((document, index) => ({ lens: document.lens ?? `lens-${index}`, document: toNativeReviewerDocument(document) })) }),
-					...(input.refuter_batch === undefined ? {} : { refuterDocument: toNativeRefuterDocument(input.refuter_batch) }),
-					...(input.correction_line_forecast === undefined ? {} : { correctionLines: input.correction_line_forecast }),
-					...(input.validation === undefined && input.validation_proof === undefined ? {} : { validationDocument: toNativeValidatorDocument(input.validation ?? input.validation_proof!) }),
-					...(input.final_evidence === undefined ? {} : { evidenceDocument: input.final_evidence, failed: input.final_verification_passed === false }),
-					...(signal === undefined ? {} : { signal }),
-				});
 			} catch (error) {
 				if (provisionalCandidateView && candidateViews) {
 					candidateViews.cleanup(provisionalCandidateView.token);
@@ -6173,6 +6328,10 @@ export const __testing = {
 	renderSddModelPanel: renderSddModelPanelForTesting,
 	getOrchestratorPrompt,
 	renderOrchestratorPrompt,
+	loadBackgroundSubagentsPolicy,
+	parseBackgroundSubagentsPolicyFile,
+	resolveBackgroundSubagentsCapability,
+	renderBackgroundSubagentsStatusLine,
 	resolveControllerSddStatus,
 	resolveStartupControllerSddStatus,
 	repositoryLocationIdentity,
@@ -6276,13 +6435,13 @@ function createGentleAiExtensionForTesting(
 		name: "gentle_review",
 		label: "Gentle Review Controller",
 		description:
-			"Inspect and recover review authority, run new native ordinary review through start/finalize/validate, preserve legacy compact compatibility reads and graph-v1 Judgment Day, and authorize one exact lifecycle command. FINALIZE input is a JSON string: review_result.lens_results[] entries contain lens, findings, and non-empty evidence exactly once for every lens selected by START; final_evidence is paired with either the legacy final_verification_passed boolean or one closed final_verification_outcome. This is the Pi wrapper contract, distinct from native CLI --result, --refuter, --validation, and --evidence files. RESET/RECOVER remain destructive and are executed by the audited native CLI: RESET and RECOVER_LOCK map to `gentle-ai review reclaim` and RECOVER maps to `gentle-ai review recover` with the provider-selected disposition. Published v2.1.11 repair-legacy-alias derives its fixed repository binding from fresh native inventory before fresh UI approval; dispose-result remains unsupported pending design. Legacy bundle transport is retired: export/import return a legacy-operation-retired envelope pointing at the native gentle-ai review CLI and the Git common-directory store.",
+			"Inspect and recover review authority, run new native ordinary review through start/finalize/validate, preserve legacy compact compatibility reads and graph-v1 Judgment Day, and authorize one exact lifecycle command. Reviewer, refuter, and validator verdicts are never Pi-authored: lens results are admitted natively (the pi host relay satisfies provider --materialize slots), adversarial roles execute through Go-owned pi processes via provider-rendered self-contained vectors, and FINALIZE follows the provider's negotiated next_transition (captured-results discovery). FINALIZE input is a JSON string carrying only the negotiated collection answers: correction_line_forecast, validation (the targeted validation document when the exact collection input requests it), and final_evidence paired with either the legacy final_verification_passed boolean or one closed final_verification_outcome. RESET/RECOVER remain destructive and are executed by the audited native CLI: RESET and RECOVER_LOCK map to `gentle-ai review reclaim` and RECOVER maps to `gentle-ai review recover` with the provider-selected disposition. Published v2.1.11 repair-legacy-alias derives its fixed repository binding from fresh native inventory before fresh UI approval; dispose-result remains unsupported pending design. Legacy bundle transport is retired: export/import return a legacy-operation-retired envelope pointing at the native gentle-ai review CLI and the Git common-directory store.",
 		promptSnippet: "Inspect authority, then use native start/finalize/validate for a new ordinary review; use graph-v1 only for explicit Judgment Day",
 		promptGuidelines: [
 			'Call {"operation":"inspect"} before START. New native ordinary START uses a JSON string such as "{\\"mode\\":\\"ordinary\\"}"; an explicit baseRef must be paired with committedOnly: true to request a committed range, while policyPath remains repository-local. policyHash is legacy compact-only. The controller derives lineage, Git/untracked scope, tier, lenses, authored lines, and budget.',
 			"Use RECONCILE_AUTHORITY only to quarantine one invalid native recovery successor. Supply exact predecessorLineage, expectedPredecessorRevision, successorLineage, expectedSuccessorRevision, actor, and reason values; Pi derives and displays the seven-line native authorization binding for fresh UI approval. The predecessor stays untouched, native returns the durable audit record, and Pi never falls back to RESET or RECOVER.",
 			"Use ABANDON or QUARANTINE_LEGACY only after an explicit user decision and with exact native inputs. ABANDON needs lineage, expectedRevision, snapshotIdentity, actor, and reason; QUARANTINE_LEGACY accepts only the published malformed freeze-findings diagnostic/disposition. A dual reconciliation may supply only anomalies `unchanged_target,malformed_recovery_authorization` in that exact order. Use REPAIR_LEGACY_ALIAS only with lineage, actor, and reason: Pi freshly reads native inventory and derives repository, revision, diagnostic, disposition, and the exact eight-line binding before interactive approval. `review dispose-result` is unsupported pending design.",
-			"Run selected lenses once, then call FINALIZE with a JSON string containing review_result.lens_results entries for every START-selected lens. Each entry has lens, findings, and non-empty evidence; clean lenses use findings: []. Pair final_evidence with exactly one of final_verification_passed or final_verification_outcome (passed, verification_failed, procedural_tooling_failed). Correction evidence is captured natively before STATUS can expose targeted validation. This Pi wrapper shape differs from native CLI --result, --refuter, --validation, and --evidence files. Use ADVANCE only for explicit graph-v1 Judgment Day.",
+			"Lens, refuter, and validator verdicts are admitted natively, never Pi-authored: FINALIZE routes provider --materialize lens slots through the host relay, executes provider-rendered self-contained role vectors verbatim, and runs the provider's own review.finalize transition (captured-results discovery). Call FINALIZE with a JSON string carrying only the negotiated collection answers: correction_line_forecast for the pre-edit forecast, validation for the targeted validation document the exact collection input requests, and final_evidence paired with exactly one of final_verification_passed or final_verification_outcome (passed, verification_failed, procedural_tooling_failed). Correction evidence is captured natively before STATUS can expose targeted validation. Use ADVANCE only for explicit graph-v1 Judgment Day.",
 			"For blocked-legacy or blocked-mixed, do not call START repeatedly. Explain invalidation, request explicit user authorization for the exact reset_request challenge, then call RESET or RECOVER only after authorization. RESET and RECOVER_LOCK route to audited native `gentle-ai review reclaim` and RECOVER routes to native `gentle-ai review recover`; negotiated target status supplies the sole accepted recovery disposition, and a caller-supplied substitute is rejected. Treat a native-input-required envelope as a request for exact values, never as permission to invent them. After a committed native recovery record, INSPECT before any fresh ordinary START.",
 			"A consent-required START returns the complete provider envelope and an opaque consent_binding, then stops. The parent presents and localizes that envelope without changing machine tokens, commands, target IDs, or invocations. After one explicit human answer, call answer-consent exactly once with a JSON string containing only consentBinding and answer (`granted` or `declined`). A reported lineage_created false or pre-authority validation error proves no lineage was created. After ambiguous START, answer-consent, or FINALIZE output, the controller calls target-scoped native status first and returns only its declared action. Never infer or prescribe replay unless native explicitly reports exact_replay_safe for the same canonical request and required lineage.",
 			"Use gentle_review for bounded review transaction operations and exact lifecycle validation; never fabricate bash tool metadata or a separate gate target.",
@@ -6400,7 +6559,7 @@ function createGentleAiExtensionForTesting(
 			: "";
 		const gentlePrompt = isNamedAgent || isSddAgent
 			? ""
-			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd))}`;
+			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd), ctx.cwd)}`;
 		return {
 			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}${nativeStatusPrompt}`,
 		};

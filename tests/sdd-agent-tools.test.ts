@@ -5,7 +5,6 @@ import test from "node:test";
 
 const repoRoot = process.cwd();
 const assetsAgentsDir = join(repoRoot, "assets", "agents");
-const REVIEW_REFUTER_TOOLS = ["read", "grep", "find"];
 const GENERIC_ROLE_TOOLS: Record<string, string[]> = {
 	"gentle-ai-explore.md": ["read", "grep", "find", "codegraph"],
 	"gentle-ai-worker.md": ["read", "grep", "find", "edit", "write", "bash", "mem_save"],
@@ -123,25 +122,11 @@ test("generic non-SDD agents declare exact role tool allowlists", () => {
 	}
 });
 
-test("review-refuter exposes only complete-list inspection tools", () => {
-	const path = join(assetsAgentsDir, "review-refuter.md");
-	assert.ok(existsSync(path), "review-refuter.md must exist");
-	const entries = readTools(path);
-	assert.equal(entries[0], '"*": false', "review-refuter must lead with the deny-all rule");
-	assert.deepEqual(entries.slice(1), REVIEW_REFUTER_TOOLS);
-
-	const frontmatter = readFrontmatter(path);
-	assert.match(frontmatter, /^name:\s*review-refuter$/m);
-	for (const forbidden of [
-		"bash",
-		"edit",
-		"write",
-		"task",
-		"subagent",
-		"subagent_run",
-		"mem_save",
-		"mem_update",
-	]) {
-		assert.doesNotMatch(frontmatter, new RegExp(`^  - ${forbidden}$`, "m"));
+test("the retired Pi adversarial role agents are not packaged", () => {
+	// gentle-pi#311 P5: the refuter and targeted validator verdicts execute
+	// through Go-owned pi processes via provider-rendered self-contained
+	// vectors; no Pi agent definition may reintroduce a Pi-authored verdict.
+	for (const retired of ["review-refuter.md", "review-validator.md"]) {
+		assert.ok(!existsSync(join(assetsAgentsDir, retired)), `${retired} must stay deleted`);
 	}
 });

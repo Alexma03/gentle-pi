@@ -12,13 +12,15 @@ const ROOT = join(import.meta.dirname, "..");
 const ASSETS_AGENTS_DIR = join(ROOT, "assets", "agents");
 const DENY_ALL_RULE = '"*": false';
 
+// gentle-pi#311 P5: review-refuter.md and review-validator.md are retired —
+// the adversarial roles execute through Go-owned pi processes via
+// provider-rendered self-contained vectors, so no Pi agent definition exists
+// for them to deny tools on.
 const READ_ONLY_REVIEW_ACTORS = [
 	"review-risk.md",
 	"review-reliability.md",
 	"review-resilience.md",
 	"review-readability.md",
-	"review-refuter.md",
-	"review-validator.md",
 	"jd-judge-a.md",
 	"jd-judge-b.md",
 ] as const;
@@ -105,13 +107,6 @@ test("a tool absent from the allowlist resolves to denied under the deny-all rul
 		"mcp__slack__slack_send_message",
 		"subagent_run",
 	] as const;
-
-	const refuterEntries = readToolEntries(join(ASSETS_AGENTS_DIR, "review-refuter.md"));
-	const refuterActive = resolveActiveTools(refuterEntries, registry);
-	assert.deepEqual(refuterActive, ["read", "grep", "find"]);
-	for (const omitted of ["edit", "write", "bash", "mem_save", "codegraph_explore", "mcp__slack__slack_send_message", "subagent_run"]) {
-		assert.ok(!refuterActive.includes(omitted), `review-refuter must deny omitted tool ${omitted}`);
-	}
 
 	// The four lenses deny bash and add only the bounded scope reader required
 	// to consume controller-owned compact manifests. Contract v2 is explicit: a

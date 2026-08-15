@@ -57,6 +57,8 @@ Mandatory Delegation Triggers — stop rules; once fired, delegate through the b
 6. **Long-session rule** — ~20 tool calls, 5 exploratory reads, or 2 non-mechanical edits without delegation → pause and delegate.
 7. **Review actor rule** — review lenses run only when selected by ordinary transaction start; explicit Judgment Day uses its two named judges. Lifecycle and SDD boundaries launch zero review actors.
 
+{{GENTLE_PI_BACKGROUND_POLICY}}; rules: the background-subagents block in the delegation contract.
+
 Full table, Work Routing Ladder examples/model-routing detail, Cost and Context Balance, Canonical Workflows, Review Actor Materialization, and the mirrored gentle-ai canon (blocking-prompt relays + defect handoff, language, delegation, native checking, review execution + stop table): `{{GENTLE_PI_DELEGATION_PATH}}`.
 
 ## SDD Workflow (lazy-loaded)

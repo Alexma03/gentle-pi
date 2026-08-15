@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -394,6 +394,57 @@ function copyDirectoryFiles(
 	return { copied, skipped };
 }
 
+// Assets retired by gentle-pi#311 P5: the Pi-owned adversarial review actors.
+// The refuter and validator verdicts now execute through Go-owned pi
+// processes via provider-rendered self-contained vectors, so these agent
+// definitions have no runtime consumer. The migration manifests under
+// assets/migrations are append-only legacy-hash HISTORY (adoption evidence
+// for force-installs) with no removal semantics, so history stays untouched
+// and retirement happens here: an installed copy is deleted only when its
+// content hash proves package ownership (current manifest or legacy
+// history); user-modified copies are left in place and only lose managed
+// ownership.
+const RETIRED_MANAGED_ASSETS = Object.freeze([
+	"agents/review-refuter.md",
+	"agents/review-validator.md",
+]);
+
+function removeRetiredManagedAssets(
+	agentHome: string,
+	manifest: ManagedAssetsManifest,
+): void {
+	let legacyHashes: Record<string, readonly string[]> | undefined;
+	for (const ownershipKey of RETIRED_MANAGED_ASSETS) {
+		const installedPath = join(agentHome, ...ownershipKey.split("/"));
+		if (!existsSync(installedPath)) {
+			delete manifest.assets[ownershipKey];
+			continue;
+		}
+		let installedContent: string | undefined;
+		try {
+			installedContent = readFileSync(installedPath, "utf8");
+		} catch {
+			installedContent = undefined;
+		}
+		if (installedContent === undefined) continue;
+		const installedHash = managedAssetHash(installedContent);
+		const managed = manifest.assets[ownershipKey] === installedHash;
+		const legacy = (legacyHashes ??= readLegacyManagedAssetHashes())[ownershipKey]?.includes(
+			managedAssetHash(legacyComparableAssetContent(ownershipKey, installedContent)),
+		) === true;
+		if (managed || legacy) {
+			try {
+				rmSync(installedPath);
+			} catch {
+				continue;
+			}
+		}
+		// Managed copies are gone; user-modified copies stay but stop being
+		// package-managed either way.
+		delete manifest.assets[ownershipKey];
+	}
+}
+
 export function installSddAssets(
 	_cwd: string,
 	force: boolean,
@@ -407,6 +458,7 @@ export function installSddAssets(
 			(cachedLegacyAssetHashes ??= readLegacyManagedAssetHashes());
 	}
 	const manifest = readManagedAssetsManifest(manifestPath);
+	removeRetiredManagedAssets(agentHome, manifest);
 	const agents = copyDirectoryFiles(
 		join(ASSETS_DIR, "agents"),
 		join(agentHome, "agents"),
