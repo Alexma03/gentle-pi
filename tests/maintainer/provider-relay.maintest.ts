@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, relative } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import test from "node:test";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 import { ARM_POSITIVE_ENV, CASE_KINDS, DESCRIPTOR_SCHEMA, DescriptorValidationError, POSITIVE_JOURNEY_COMMAND, loadDescriptor, resolveDeclaredExecutable, runMatrix, validateDescriptor } from "../../scripts/maintainer/provider-relay-matrix.mjs";
@@ -252,7 +252,9 @@ test("a bare Pi declaration is resolved once: the relay never falls through to a
 // shebang/chmod/.cmd execution is involved. No real model or network.
 // ---------------------------------------------------------------------------
 test("platform-neutral: runMatrix passes the first resolved concrete Pi path into the relay boundary (no second resolution)", async (t) => {
-	const root = mkdtempSync(join(tmpdir(), "gentle-pi-maintainer-portable-"));
+	// Keep the fixture on the same Windows volume as process.cwd() so the
+	// first PATH component genuinely exercises relative-path normalization.
+	const root = mkdtempSync(join(process.cwd(), ".gentle-pi-maintainer-portable-"));
 	chmodSync(root, 0o700);
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const dirA = join(root, "path-a");
@@ -272,6 +274,7 @@ test("platform-neutral: runMatrix passes the first resolved concrete Pi path int
 	// First PATH component is RELATIVE to process.cwd(): a relative component
 	// must still normalize to the same absolute firstPi the precheck resolved.
 	const dirARelative = relative(process.cwd(), dirA);
+	assert.equal(isAbsolute(dirARelative), false, "fixture must keep the first PATH component relative");
 	const savedPath = process.env.PATH;
 	process.env.PATH = [dirARelative, dirB, savedPath].join(delimiter);
 	t.after(() => { process.env.PATH = savedPath; });
