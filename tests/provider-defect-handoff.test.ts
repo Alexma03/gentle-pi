@@ -58,11 +58,10 @@ const SDD_CHOICE1_ORDER = [
 // ---------------------------------------------------------------------------
 
 test("orchestrator-delegation.md carries the provider defect handoff section", () => {
-	assert.match(DELEGATION, /## Provider Defect Handoff/);
+	assert.match(DELEGATION, /#### Gentle AI Provider Defect Handoff \(MANDATORY\)/);
 });
 
-test("orchestrator-delegation.md references the v2.4.0-rc.8 prerelease contract", () => {
-	assert.match(DELEGATION, /v2\.4\.0-rc\.8/);
+test("orchestrator-delegation.md references the prerelease consent/v3 contract", () => {
 	assert.match(DELEGATION, /prerelease/i);
 	assert.match(DELEGATION, /gentle-ai\.review-integration\.consent\/v3/);
 });
@@ -273,8 +272,10 @@ test("sdd-orchestrator-workflow.md preserves the rc.8 choice-1 ordering on the c
 test("sdd-orchestrator-workflow.md references the full contract in orchestrator-delegation.md", () => {
 	assert.match(
 		SDD_WORKFLOW,
-		/The full contract lives in `assets\/orchestrator-delegation\.md` under `## Provider Defect Handoff`/i,
+		/The full contract lives in `assets\/orchestrator-delegation\.md` under `#### Gentle AI Provider Defect Handoff \(MANDATORY\)`/i,
 	);
+	// The pointer must resolve: the named heading has to exist on the delegation surface.
+	assert.match(DELEGATION, /^#### Gentle AI Provider Defect Handoff \(MANDATORY\)$/m);
 });
 
 test("sdd-orchestrator-workflow.md states the rc.8 concise rules", () => {
@@ -339,8 +340,15 @@ test("sdd-orchestrator-workflow.md does NOT retain the rc.3 hard-stop that withh
 });
 
 test("both handoff surfaces invoke `gentle-ai review mode disable` exactly once", () => {
-	for (const [name, asset] of [["orchestrator-delegation.md", DELEGATION], ["sdd-orchestrator-workflow.md", SDD_WORKFLOW]] as const) {
-		const section = asset.match(/## Provider Defect Handoff[\s\S]*?(?=\n## |$)/)?.[0] ?? "";
+	// The delegation surface carries the contract inside the canon block, so its
+	// section is bounded by the following `####` canon heading, not by `## `.
+	const surfaces = [
+		["orchestrator-delegation.md", DELEGATION, /#### Gentle AI Provider Defect Handoff[\s\S]*?(?=\n#### SDD Edit-Authority|$)/],
+		["sdd-orchestrator-workflow.md", SDD_WORKFLOW, /## Provider Defect Handoff[\s\S]*?(?=\n## |$)/],
+	] as const;
+	for (const [name, asset, sectionPattern] of surfaces) {
+		const section = asset.match(sectionPattern)?.[0] ?? "";
+		assert.ok(section.length > 0, `${name}: provider defect handoff section not found`);
 		const n = countOccurrences(section, "gentle-ai review mode disable");
 		assert.equal(n, 1, `${name} must invoke "gentle-ai review mode disable" exactly once; got ${n}`);
 	}

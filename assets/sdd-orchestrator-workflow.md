@@ -300,7 +300,7 @@ Automatic mode does not override reviewer burnout protection.
 
 ## Provider Defect Handoff
 
-This section applies when an SDD phase or review lifecycle operation appears blocked by a Gentle AI provider defect. The full contract lives in `assets/orchestrator-delegation.md` under `## Provider Defect Handoff`; it ports Gentle AI's v2.4.0-rc.8 handoff consent contract (the `gentle-ai.review-integration.consent/v3` envelope; canonical source `internal/assets/generic/sdd-orchestrator.md` at tag `v2.4.0-rc.8`, a prerelease not present in v2.3.0 stable). Pi review commands use `gentle_review`.
+This section applies when an SDD phase or review lifecycle operation appears blocked by a Gentle AI provider defect. The full contract lives in `assets/orchestrator-delegation.md` under `#### Gentle AI Provider Defect Handoff (MANDATORY)`; it ports Gentle AI's v2.4.0-rc.8 handoff consent contract (the `gentle-ai.review-integration.consent/v3` envelope; canonical source `internal/assets/generic/sdd-orchestrator.md` at tag `v2.4.0-rc.8`, a prerelease not present in v2.3.0 stable). Pi review commands use `gentle_review`.
 
 Concise rules:
 
