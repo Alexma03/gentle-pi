@@ -175,7 +175,10 @@ test("materialize-marked pi slots route through the host relay in provider order
 	assert.equal(result.status, "in-progress");
 });
 
-test("Pi-authored review documents are inadmissible for host-mediated materialize slots", async (t) => {
+test("Pi-authored review documents are rejected at the FINALIZE input boundary", async (t) => {
+	// gentle-pi#311 P5: `review_result` is no longer a legal FINALIZE input at
+	// all — the parse fails closed before any relay launch or native call, so
+	// a Pi-authored reviewer document can never race a host-mediated slot.
 	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
 	const cwd = repository(t);
 	const lineageId = "relay-lineage";
@@ -186,12 +189,10 @@ test("Pi-authored review documents are inadmissible for host-mediated materializ
 		return { promptByteLength: 1, resultByteLength: 1, submission: "{}" };
 	});
 
-	const result = await runFinalize(cwd, harness, lineageId, { review_result: { lens_results: [{ findings: [], evidence: ["reviewed"] }] } });
-
-	assert.equal(result.status, "blocked");
-	assert.equal(result.outcome, "pi-host-relay-slots-are-host-mediated");
-	assert.equal(result.mutation_performed, false);
-	assert.equal(result.mutation_outcome, "none");
+	await assert.rejects(
+		() => runFinalize(cwd, harness, lineageId, { review_result: { lens_results: [{ findings: [], evidence: ["reviewed"] }] } }),
+		/unknown field review_result/,
+	);
 	assert.equal(relayCalls, 0);
 	assert.equal(harness.finalizeCalls, 0);
 });

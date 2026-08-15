@@ -641,22 +641,22 @@ async function run() {
 			"session_start must not install project-local SDD chains",
 		);
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
+		// gentle-pi#311 P5: the Pi-authored adversarial role agents are retired;
+		// installation must not (re)create them.
 		const installedRefuterPath = join(globalAgentHome, "agents", "review-refuter.md");
-		assert.equal(existsSync(installedRefuterPath), true);
+		assert.equal(existsSync(installedRefuterPath), false, "the retired review-refuter agent must not be installed");
+		assert.equal(
+			existsSync(join(globalAgentHome, "agents", "review-validator.md")),
+			false,
+			"the retired review-validator agent must not be installed",
+		);
+		const installedExplorePath = join(globalAgentHome, "agents", "gentle-ai-explore.md");
+		assert.equal(existsSync(installedExplorePath), true);
 		assert.deepEqual(
-			readAgentDefinition(await readFile(installedRefuterPath, "utf8")),
-			{ name: "review-refuter", tools: ["read", "grep", "find"] },
-			"isolated package installation must activate only the refuter inspection tools",
+			readAgentDefinition(await readFile(installedExplorePath, "utf8")),
+			{ name: "gentle-ai-explore", tools: ["read", "grep", "find", "codegraph"] },
+			"isolated package installation must activate only the explorer inspection tools",
 		);
-		const installedRefuterSource = await readFile(installedRefuterPath, "utf8");
-		assert.match(
-			installedRefuterSource,
-			/^tools:\n {2}- "\*": false$/m,
-			"installed refuter must lead its tool map with the deny-all rule",
-		);
-		assert.match(installedRefuterSource, /complete inferential-severe frozen-row list once/);
-		assert.match(installedRefuterSource, /refuted \| corroborated \| inconclusive/);
-		assert.doesNotMatch(installedRefuterSource, /general, correctness, impact\/exploitability, or reproducibility/);
 		const installedRiskSource = await readFile(
 			join(globalAgentHome, "agents", "review-risk.md"),
 			"utf8",
@@ -686,6 +686,13 @@ async function run() {
 		].join("\n");
 		await writeFile(installedRefuterPath, samePathUserRefuter);
 		delete managedAssetsManifest.assets["agents/review-refuter.md"];
+		// Retirement sweep: a hash-proven package-managed copy of a retired
+		// asset is deleted on refresh; the user-authored same-path refuter
+		// above must survive because its hash proves nothing.
+		const retiredManagedValidatorPath = join(globalAgentHome, "agents", "review-validator.md");
+		const retiredManagedValidator = "stale managed validator\n";
+		await writeFile(retiredManagedValidatorPath, retiredManagedValidator);
+		managedAssetsManifest.assets["agents/review-validator.md"] = sha256(retiredManagedValidator);
 		await mkdir(join(globalAgentHome, "subagents"), { recursive: true });
 		const userRefuterOverride = join(globalAgentHome, "subagents", "review-refuter.md");
 		await writeFile(userRefuterOverride, "user refuter override must stay\n");
@@ -738,6 +745,24 @@ async function run() {
 			await readFile(userRefuterOverride, "utf8"),
 			"user refuter override must stay\n",
 			"package refresh must not rewrite or certify an explicit user refuter",
+		);
+		assert.equal(
+			existsSync(retiredManagedValidatorPath),
+			false,
+			"session refresh must delete a hash-proven package-managed copy of a retired asset",
+		);
+		const refreshedManagedAssets = JSON.parse(
+			await readFile(managedAssetsManifestPath, "utf8"),
+		);
+		assert.equal(
+			refreshedManagedAssets.assets["agents/review-validator.md"],
+			undefined,
+			"a retired asset must lose package-managed ownership",
+		);
+		assert.equal(
+			refreshedManagedAssets.assets["agents/review-refuter.md"],
+			undefined,
+			"a user-authored same-path retired asset must stay unowned",
 		);
 	} finally {
 		await rm(noUiCwd, { recursive: true, force: true });

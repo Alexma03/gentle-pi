@@ -35,8 +35,6 @@ const requiredPaths = [
   "assets/agents/sdd-sync.md",
   "assets/agents/sdd-tasks.md",
   "assets/agents/sdd-verify.md",
-  "assets/agents/review-refuter.md",
-  "assets/agents/review-validator.md",
   "assets/chains/4r-review.chain.md",
   "assets/chains/sdd-full.chain.md",
   "assets/chains/sdd-plan.chain.md",

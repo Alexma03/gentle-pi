@@ -329,6 +329,18 @@ export interface ReviewCaptureSubmissionV1 {
 	values: readonly ReviewCaptureSubmissionValueV1[];
 }
 
+// The two Go-owned non-lens provider role capture operations (gentle-pi#311
+// P4-roles; provider side gentle-ai#3264). Their collect inputs are
+// self-contained authority-advancing vectors: binding tokens plus
+// `--agent=pi --execute=true`, with NO submission descriptor. The known set
+// is closed — an unknown role capture operation is never executed.
+export const REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION = {
+	CAPTURE_REFUTER: "review.capture-refuter",
+	CAPTURE_VALIDATION: "review.capture-validation",
+} as const;
+export type ReviewProviderRoleCaptureOperation = (typeof REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION)[keyof typeof REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION];
+export const REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS = Object.freeze(Object.values(REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION));
+
 export interface ReviewCollectInputV3 {
 	name: string;
 	schema: string;
@@ -1090,8 +1102,27 @@ function decodeCollectInput(value: unknown, label: string): ReviewCollectInputV3
 	if (captureOperation === "external.run_targeted_validation") {
 		if (input.validation_request === undefined) throw new TypeError(`${label}.validation_request is required`);
 		if (schema !== "gentle-ai.review-targeted-validation-request/v1") throw new TypeError(`${label}.schema must be gentle-ai.review-targeted-validation-request/v1`);
+	} else if (captureOperation === REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_VALIDATION) {
+		if (input.validation_request === undefined) throw new TypeError(`${label}.validation_request is required`);
 	} else if (input.validation_request !== undefined) {
-		throw new TypeError(`${label}.validation_request is only valid for external.run_targeted_validation`);
+		throw new TypeError(`${label}.validation_request is only valid for external.run_targeted_validation or review.capture-validation`);
+	}
+
+	// gentle-pi#311 P4-roles: the two Go-owned non-lens provider role capture
+	// operations render SELF-CONTAINED authority-advancing vectors. Executing
+	// the exact rendered tokens makes Go materialize the role prompt, run its
+	// own locked-down pi subprocess, and admit the raw verdict — so a
+	// submission descriptor (the host-mediated completing form) on one of
+	// these inputs would hand the caller a way to author the verdict and is
+	// rejected as a provider contract violation.
+	if (captureOperation === REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_REFUTER && schema !== "https://gentle-ai.dev/schema/review/refuter/v1") {
+		throw new TypeError(`${label}.schema must be https://gentle-ai.dev/schema/review/refuter/v1`);
+	}
+	if (captureOperation === REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_VALIDATION && schema !== "https://gentle-ai.dev/schema/review/validator/v1") {
+		throw new TypeError(`${label}.schema must be https://gentle-ai.dev/schema/review/validator/v1`);
+	}
+	if (input.submission !== undefined && (REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS as readonly string[]).includes(captureOperation)) {
+		throw new TypeError(`${label}.submission is not allowed on the self-contained ${captureOperation} vector`);
 	}
 
 	if (captureOperation === "review.capture-result") {

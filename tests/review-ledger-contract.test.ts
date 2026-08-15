@@ -14,8 +14,6 @@ const REVIEW_LENSES = [
 	"assets/agents/review-reliability.md",
 ] as const;
 const JUDGES = ["assets/agents/jd-judge-a.md", "assets/agents/jd-judge-b.md"] as const;
-const REFUTER = "assets/agents/review-refuter.md";
-const VALIDATOR = "assets/agents/review-validator.md";
 const FIX_AGENT = "assets/agents/jd-fix-agent.md";
 const JD_SKILL = "skills/judgment-day/SKILL.md";
 const JD_PROMPTS = "skills/judgment-day/references/prompts-and-formats.md";
@@ -196,29 +194,15 @@ test("risk lens distinguishes trusted orchestration from concrete boundary bypas
 	assert.match(content, /untrusted repository content.*malformed inputs.*stale authority.*path drift.*external callers/i);
 });
 
-test("ordinary refuter is one complete read-only inferential batch with concrete proof", () => {
-	const content = read(REFUTER);
-	assertMatches(REFUTER, content, [
-		/Receive the complete inferential-severe frozen-row list once/,
-		/`gentle-ai\.refuter-result-batch\/v1`/,
-		/`request_hash`[\s\S]*`finding_id`/,
-		/`proof_refs`[\s\S]*`changed-hunk:`[\s\S]*`candidate-created-path:`[\s\S]*`differential-test:`[\s\S]*`before-after:`/,
-		/independent concrete refuter proof is valid and need not repeat reviewer `proof_refs`/,
-		/Use `inconclusive` when the supplied evidence supports neither `refuted` nor `corroborated`/,
-		/Do not create findings, alter frozen claims, request fixes, launch actors, persist authority, or repeat/,
-	]);
-});
-
-test("targeted validator checks only original criteria and correction regression without expanding scope", () => {
-	const content = read(VALIDATOR);
-	assertMatches(VALIDATOR, content, [
-		/original-criteria proof/,
-		/correction-regression proof/,
-		/Validate the original criteria and correction regression only/,
-		/Never expand paths, IDs, untracked scope, acceptance criteria, or correction purpose/,
-		/empty `fix_caused_findings` array/,
-		/Do not request another fix or attempt, launch actors, persist authority, or repeat yourself/,
-	]);
+test("the Pi-owned adversarial role agents are retired: roles execute through Go-owned pi processes", () => {
+	// gentle-pi#311 P5: the refuter and targeted validator are no longer
+	// Pi-authored actors. The provider renders self-contained
+	// review.capture-refuter / review.capture-validation vectors; executing
+	// them makes Go materialize the role prompt, spawn its own locked-down pi
+	// subprocess, and admit the raw verdict.
+	for (const retired of ["assets/agents/review-refuter.md", "assets/agents/review-validator.md"]) {
+		assert.throws(() => read(retired), `${retired} must be deleted`);
+	}
 });
 
 for (const path of JUDGES) {

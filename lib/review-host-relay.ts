@@ -30,7 +30,7 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { resolveGentleAiBinary } from "./gentle-ai-binary.ts";
-import type { ReviewCaptureSubmissionV1, ReviewCollectInputV3 } from "./review-integration-v2.ts";
+import { REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION, REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS, type ReviewCaptureSubmissionV1, type ReviewCollectInputV3 } from "./review-integration-v2.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "./review-relay-contract.ts";
 
 // The complete pinned lockdown argv for the reviewer `pi` subprocess: print
@@ -163,6 +163,40 @@ export function reviewHostRelaySlots(inputs: readonly ReviewCollectInputV3[]): r
 		...(argumentValue(input, "lens") === undefined ? {} : { lens: argumentValue(input, "lens") }),
 		...(argumentValue(input, "order") === undefined ? {} : { order: argumentValue(input, "order") }),
 		...(input.artifactSubject === undefined ? {} : { subjectHash: input.artifactSubject.subjectHash }),
+	}));
+}
+
+// ---------------------------------------------------------------------------
+// Provider role vectors (gentle-pi#311 P4-roles) — the two Go-owned non-lens
+// adversarial role capture operations. Unlike the lens materialize slots
+// above, these vectors are SELF-CONTAINED: the provider renders binding
+// tokens plus `--agent=pi --execute=true`, and executing the exact rendered
+// invocation makes Go materialize the role prompt, spawn its own locked-down
+// pi subprocess, and admit the raw verdict into the compact slot. The host
+// never materializes, launches pi, or submits anything for these slots — it
+// runs one CLI invocation verbatim and re-queries negotiated STATUS.
+// ---------------------------------------------------------------------------
+
+export interface ReviewProviderRoleVectorSlot {
+	/** The provider-named capture operation, e.g. `review.capture-refuter`. */
+	readonly captureOperation: (typeof REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION)[keyof typeof REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION];
+	/** Every provider-issued argument token, verbatim, in provider order. */
+	readonly argumentTokens: readonly string[];
+	/** The provider-declared input name, e.g. `provider_refuter`. */
+	readonly name: string;
+}
+
+export function isReviewProviderRoleVectorInput(input: ReviewCollectInputV3): boolean {
+	return (REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS as readonly string[]).includes(input.captureOperation)
+		&& argumentValue(input, "execute") === "true"
+		&& argumentValue(input, "agent") === "pi";
+}
+
+export function reviewProviderRoleVectorSlots(inputs: readonly ReviewCollectInputV3[]): readonly ReviewProviderRoleVectorSlot[] {
+	return inputs.filter((input) => isReviewProviderRoleVectorInput(input)).map((input) => ({
+		captureOperation: input.captureOperation as ReviewProviderRoleVectorSlot["captureOperation"],
+		argumentTokens: input.arguments.map((argument) => renderToken(argument)),
+		name: input.name,
 	}));
 }
 
