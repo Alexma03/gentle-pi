@@ -108,7 +108,15 @@ import {
 import { sanitizeTerminalText, stripAnsi } from "../lib/terminal-theme.ts";
 import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
 import {
+	GentleAiDevBinaryOverrideError,
+	registerGentleAiDevBinary,
+	resolveGentleAiDevBinaryOverride,
+	unregisterGentleAiDevBinary,
+	type GentleAiDevBinaryOverride,
+} from "../lib/gentle-ai-binary.ts";
+import {
 	createNativeReviewCli,
+	createNodeExecFileAdapter,
 	isCanonicalProcessString,
 	nativeReviewAbandonAuthorization,
 	nativeReviewLegacyAliasRepairAuthorization,
@@ -6513,6 +6521,15 @@ function createGentleAiExtensionForTesting(
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		// Loud, every session: an active dev-binary override means this session
+		// runs an unpinned gentle-ai. Announce which one before anything else.
+		try {
+			const devBinary = await describeDevBinaryOverride();
+			if (ctx.hasUI && devBinary.state === "active") ctx.ui.notify(devBinary.line, "warning");
+			if (ctx.hasUI && devBinary.state === "invalid") ctx.ui.notify(devBinary.line, "error");
+		} catch (error) {
+			if (ctx.hasUI) ctx.ui.notify(`Gentle AI dev binary override check failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
 		try {
 			const transactionRecovery = reconcileCommitTransaction(ctx.cwd);
 			if (ctx.hasUI && transactionRecovery.status !== "clean") {
@@ -6825,6 +6842,66 @@ function createGentleAiExtensionForTesting(
 		},
 	});
 
+	// Dev-binary override surfacing (unpinned field-test mode). While the
+	// override is active every diagnostic surface names the exact binary, its
+	// live version, and its fresh content digest, so the maintainer always
+	// knows which gentle-ai actually answered. An invalid override surfaces as
+	// a failure — it is never silently ignored, because the native resolver
+	// refuses to fall back to the pin while an override is declared.
+	const describeDevBinaryOverride = async (): Promise<
+		| { state: "inactive" }
+		| { state: "active"; line: string; override: GentleAiDevBinaryOverride }
+		| { state: "invalid"; line: string }
+	> => {
+		let override: GentleAiDevBinaryOverride | undefined;
+		try {
+			override = resolveGentleAiDevBinaryOverride();
+		} catch (error) {
+			if (error instanceof GentleAiDevBinaryOverrideError) return { state: "invalid", line: `Gentle AI dev binary override invalid — ${error.message}` };
+			throw error;
+		}
+		if (override === undefined) return { state: "inactive" };
+		let version = "version unavailable";
+		try {
+			const adapter = createNodeExecFileAdapter();
+			const result = await adapter({ file: override.path, arguments: ["version"], cwd: dirname(override.path), timeoutMs: 10_000, maxBufferBytes: 1024 * 1024 });
+			const banner = result.stdout.trim();
+			if (result.exitCode === 0 && banner.startsWith("gentle-ai ")) version = banner.slice("gentle-ai ".length);
+		} catch {
+			// The doctor line still names the binary; the version stays unavailable.
+		}
+		return {
+			state: "active",
+			override,
+			line: `Gentle AI dev binary override active (unpinned, field-test only): ${override.path} ${version} sha256:${override.sha256.slice(0, 16)}`,
+		};
+	};
+
+	pi.registerCommand("gentle:dev-binary", {
+		description: "Register, inspect, or clear the persistent Gentle AI dev-binary override (status | <absolute path> | off). Unpinned, field-test only.",
+		handler: async (args, ctx) => {
+			const argument = args.trim();
+			try {
+				if (argument === "off") {
+					const removed = unregisterGentleAiDevBinary();
+					ctx.ui.notify(removed ? "Gentle AI dev binary registration removed; the pinned binary is active again." : "No dev binary registration to remove.", "info");
+					return;
+				}
+				if (argument === "" || argument === "status") {
+					const described = await describeDevBinaryOverride();
+					if (described.state === "inactive") ctx.ui.notify("No dev binary override; the pinned Gentle AI binary is active.", "info");
+					else ctx.ui.notify(described.line, described.state === "active" ? "warning" : "error");
+					return;
+				}
+				registerGentleAiDevBinary(argument);
+				const described = await describeDevBinaryOverride();
+				ctx.ui.notify(described.state === "inactive" ? "Dev binary registration written." : described.line, "warning");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
 	pi.registerCommand("gentle:doctor", {
 		description: "Run read-only Gentle AI diagnostics for this Pi workspace.",
 		handler: async (_args, ctx) => {
@@ -6844,6 +6921,7 @@ function createGentleAiExtensionForTesting(
 			const localSddAgentOverrides = sddLocalAgentOverrideCount(ctx.cwd);
 			const modelConfig = await readSavedModelConfigAsync(ctx.cwd);
 			const engramActive = hasWritableEngramTool(pi);
+			const devBinary = await describeDevBinaryOverride();
 			const lines = [
 				"el Gentleman doctor",
 				`${agentsInstalled ? "pass" : "fail"}: Global SDD agents ${agentsInstalled ? "installed" : "missing"}`,
@@ -6855,6 +6933,8 @@ function createGentleAiExtensionForTesting(
 				`${modelConfig.status === "invalid" ? "fail" : "pass"}: Global model config ${modelConfig.status}`,
 				"pass: Sensitive-path guard active for read/write/edit tools",
 				`${engramActive ? "pass" : "warn"}: Engram memory tools ${engramActive ? "active" : "not active in this session"}`,
+				...(devBinary.state === "active" ? [`warn: ${devBinary.line}`] : []),
+				...(devBinary.state === "invalid" ? [`fail: ${devBinary.line}`, "remedy: fix the dev binary override or clear it with /gentle:dev-binary off (or unset GENTLE_PI_GENTLE_AI_DEV_BINARY)"] : []),
 			];
 			if (!agentsInstalled || !chainsInstalled) {
 				lines.push("remedy: run /gentle:install-sdd --force to refresh global SDD assets intentionally");
@@ -6931,9 +7011,11 @@ function createGentleAiExtensionForTesting(
 			const staleSddAssets = sddGlobalAssetDriftCount();
 			const localSddAgentOverrides = sddLocalAgentOverrideCount(ctx.cwd);
 			const modelConfig = await readModelConfigAsync(ctx.cwd);
+			const devBinary = await describeDevBinaryOverride();
 			ctx.ui.notify(
 				[
 					"el Gentleman package is active.",
+					...(devBinary.state === "inactive" ? [] : [devBinary.line]),
 					`Persona: ${readPersonaMode(ctx.cwd)}`,
 					`Global SDD agents: ${agentsInstalled ? "installed" : "not installed"}`,
 					`Global SDD chains: ${chainsInstalled ? "installed" : "not installed"}`,
@@ -6951,7 +7033,7 @@ function createGentleAiExtensionForTesting(
 					`Global model config: ${existsSync(modelConfigPath(ctx.cwd)) ? "present" : "missing"}`,
 					...describeModelConfig(ctx.cwd, modelConfig),
 				].join("\n"),
-				staleSddAssets > 0 || localSddAgentOverrides > 0 ? "warning" : "info",
+				staleSddAssets > 0 || localSddAgentOverrides > 0 || devBinary.state !== "inactive" ? "warning" : "info",
 			);
 		},
 	});
