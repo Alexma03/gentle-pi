@@ -959,3 +959,89 @@ test("negotiated finalize never emits the retired --result flag", async (t) => {
 	assert.ok(argv.some((token) => token === "--captured-results" || token.startsWith("--captured-results=")), "finalize must tell the provider to discover the captured results");
 	assert.ok(argv.includes("--contract"), "finalize IS negotiated, unlike capture-result");
 });
+
+// gentle-pi#311 P4-roles: the provider-rendered self-contained role vectors
+// execute EXACTLY as rendered — one CLI invocation, verbatim tokens in
+// provider order, no --cwd, no --contract, no --input. Go materializes the
+// role prompt, runs its own locked-down pi process, and admits the verdict.
+test("captureProviderRole executes the exact rendered vector and decodes only the strict artifact", async () => {
+	const artifact = {
+		schema: "gentle-ai.review-provider-role-capture/v1",
+		lineage_id: "review-1d5aadacc600e167",
+		target_identity: `sha256:${"9".repeat(64)}`,
+		role: "refuter",
+		captured: true,
+	};
+	const calls: Array<{ arguments: readonly string[] }> = [];
+	const cli = new NativeReviewCliV216(async (request) => {
+		calls.push({ arguments: request.arguments });
+		return { stdout: JSON.stringify(artifact), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+	}, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
+	const tokens = [
+		"--lineage=review-1d5aadacc600e167",
+		`--expected-revision=sha256:${"a".repeat(64)}`,
+		`--target=sha256:${"9".repeat(64)}`,
+		`--repository-context=rctx1_${"c".repeat(64)}`,
+		"--agent=pi",
+		"--execute=true",
+	];
+	const captured = await cli.captureProviderRole({ captureOperation: "review.capture-refuter", argumentTokens: tokens, cwd: "/repo" });
+	assert.equal(captured.role, "refuter");
+	assert.equal(captured.lineageId, "review-1d5aadacc600e167");
+	assert.deepEqual(calls[0]!.arguments, ["review", "capture-refuter", ...tokens], "the vector runs verbatim: nothing added, removed, or reordered");
+
+	await assert.rejects(
+		cli.captureProviderRole({ captureOperation: "review.capture-result", argumentTokens: tokens, cwd: "/repo" }),
+		/supports only review\.capture-refuter and review\.capture-validation/,
+	);
+	assert.equal(calls.length, 1, "an unknown role operation must fail before any native launch");
+});
+
+test("captureProviderRole refuses an uncaptured or malformed role artifact", async () => {
+	const base = {
+		schema: "gentle-ai.review-provider-role-capture/v1",
+		lineage_id: "review-1d5aadacc600e167",
+		target_identity: `sha256:${"9".repeat(64)}`,
+		role: "targeted-validator",
+		captured: true,
+	};
+	for (const body of [
+		{ ...base, captured: false },
+		{ ...base, role: "reviewer" },
+		{ ...base, schema: "gentle-ai.review-result-artifact/v2" },
+		{ ...base, extra: true },
+	]) {
+		const cli = new NativeReviewCliV216(async () => ({ stdout: JSON.stringify(body), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false }), "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
+		await assert.rejects(cli.captureProviderRole({ captureOperation: "review.capture-validation", argumentTokens: ["--agent=pi", "--execute=true"], cwd: "/repo" }));
+	}
+});
+
+// gentle-pi#311 P5: the provider-driven FINALIZE executes the rendered
+// transition tokens verbatim and decodes both answer shapes (the negotiated
+// operation envelope and the plain review/finalize shape a contract-less
+// transition produces).
+test("finalizeTransition runs the provider-rendered tokens verbatim and decodes both answer shapes", async (t) => {
+	t.after(() => clearNativeReviewCapabilitiesCacheForTesting());
+	const capabilities = v2Fixture<Record<string, unknown>>("capabilities.fixture.json");
+	const capabilitiesBody = { ...capabilities, package: { ...(capabilities.package as Record<string, unknown>), version: GENTLE_AI_VERSION } };
+	const plainBody = { operation: "review/finalize", lineage_id: "review-1d5aadacc600e167", state: "approved", action: "validate delivery", store_revision: `sha256:${"f".repeat(64)}` };
+	const envelopeBody = {
+		schema: "gentle-ai.review-integration.operation/v2",
+		contract: "gentle-ai.review-integration/v2",
+		operation: "review.finalize",
+		result: { operation: "review/finalize", lineage_id: "review-1d5aadacc600e167", state: "approved", action: "validate delivery", store_revision: `sha256:${"f".repeat(64)}` },
+	};
+	const { adapter, calls } = queuedAdapter([
+		{ stdout: JSON.stringify(capabilitiesBody) },
+		{ stdout: JSON.stringify(plainBody) },
+		{ stdout: JSON.stringify(envelopeBody) },
+	]);
+	const cli = new NativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
+	const tokens = ["--lineage=review-1d5aadacc600e167", "--captured-results=true"];
+	const plain = await cli.finalizeTransition({ cwd: "/repo", argumentTokens: tokens });
+	assert.equal(plain.state, "approved");
+	assert.deepEqual(calls[1]!.arguments, ["review", "finalize", ...tokens], "no --contract, --cwd, or document flag is invented for a rendered transition");
+	const negotiated = await cli.finalizeTransition({ cwd: "/repo", argumentTokens: tokens });
+	assert.equal(negotiated.storeRevision, `sha256:${"f".repeat(64)}`);
+	await assert.rejects(cli.finalizeTransition({ cwd: "/repo", argumentTokens: [] }), /requires the provider-rendered argument tokens/);
+});

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -311,6 +311,27 @@ function commitFileAfterBase(cwd: string): void {
 	writeFileSync(join(cwd, "committed-after-base.txt"), "committed after base\n");
 	git(cwd, "add", "committed-after-base.txt");
 	git(cwd, "-c", "user.name=Candidate Test", "-c", "user.email=candidate@example.invalid", "commit", "-m", "committed after base");
+}
+
+// An unborn repository has a symbolic HEAD pointing at a branch with no
+// commits yet; its review base is Git's repository-native empty tree, not a
+// missing or malformed commit. `mktree` with empty input derives that empty
+// tree object-format-aware (sha1 or sha256) without hardcoding the SHA-1 id.
+function emptyTreeOf(cwd: string): string {
+	return execFileSync("git", ["-C", cwd, "mktree"], { encoding: "utf8", input: "" }).trim();
+}
+
+function unbornRepository(t: test.TestContext, stage = true): string {
+	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-candidate-view-unborn-"));
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	git(cwd, "init", "-b", "main");
+	git(cwd, "config", "user.name", "Candidate Test");
+	git(cwd, "config", "user.email", "candidate@example.invalid");
+	if (stage) {
+		writeFileSync(join(cwd, "staged.txt"), "first staged\n");
+		git(cwd, "add", "staged.txt");
+	}
+	return cwd;
 }
 
 test("candidate view materializes exact tracked and initially-untracked content while contributor diverges", (t) => {
@@ -1287,4 +1308,214 @@ test("a projection labeled workspace but derived as a genuinely committed range 
 		}),
 		(error: unknown) => error instanceof CandidateViewError && error.reason === "projection-kind-drift",
 	);
+});
+
+test("candidate view treats an unborn staged repository base as Git's empty tree without needing HEAD^{commit}", (t) => {
+	const contributorRoot = unbornRepository(t);
+	const view = createCandidateView({ contributorRoot });
+	try {
+		const emptyTree = emptyTreeOf(contributorRoot);
+		assert.equal(view.baseTree, emptyTree);
+		assert.equal(view.baseCommit, "HEAD");
+		assert.equal(view.committedOnly, false);
+		assert.notEqual(view.candidateTree, emptyTree);
+		assert.deepEqual(view.paths, ["staged.txt"]);
+		assert.deepEqual(view.deletedPaths, []);
+	} finally {
+		view.cleanup();
+	}
+});
+
+test("candidate view of an unborn repository with no content yields an empty candidate scope instead of a misleading base-ref failure", (t) => {
+	const contributorRoot = unbornRepository(t, false);
+	const view = createCandidateView({ contributorRoot });
+	try {
+		const emptyTree = emptyTreeOf(contributorRoot);
+		assert.equal(view.baseTree, emptyTree);
+		assert.equal(view.candidateTree, emptyTree);
+		assert.equal(view.baseCommit, "HEAD");
+		assert.deepEqual(view.paths, []);
+		assert.deepEqual(view.deletedPaths, []);
+	} finally {
+		view.cleanup();
+	}
+});
+
+test("candidate view materializes an unborn staged repository without mutating the contributor index or creating a phantom commit", (t) => {
+	const contributorRoot = unbornRepository(t);
+	const indexBefore = readFileSync(join(contributorRoot, ".git", "index"));
+	const view = createCandidateView({ contributorRoot });
+	try {
+		// No phantom commit: HEAD stays unborn and no refs exist.
+		assert.throws(() => git(contributorRoot, "rev-parse", "--verify", "HEAD"), /fatal/i);
+		assert.equal(git(contributorRoot, "rev-list", "--all").length, 0);
+		// Contributor's real index is untouched; materialization uses a private index file.
+		assert.deepEqual(readFileSync(join(contributorRoot, ".git", "index")), indexBefore);
+		// The materialized candidate carries the staged content, isolated from the contributor tree.
+		assert.equal(readFileSync(join(view.root, "staged.txt"), "utf8"), "first staged\n");
+		assert.deepEqual(view.paths, ["staged.txt"]);
+	} finally {
+		view.cleanup();
+	}
+	// Cleanup removed the orphan worktree; no worktree lingers and no commit appeared.
+	assert.equal(git(contributorRoot, "worktree", "list").split("\n").filter((line) => line.includes("gentle-ai-candidate")).length, 0);
+	assert.equal(git(contributorRoot, "rev-list", "--all").length, 0);
+});
+
+test("candidate view fails closed for a detached HEAD pointing at a missing commit, not an unborn empty tree", (t) => {
+	const contributorRoot = unbornRepository(t);
+	// Detach HEAD to a non-existent object id. This is a corrupt/missing-object
+	// existing HEAD state, not a valid unborn symbolic HEAD, so it must fail
+	// closed rather than producing an empty-tree unborn candidate.
+	writeFileSync(join(contributorRoot, ".git", "HEAD"), "0".repeat(40));
+	let failure: unknown;
+	try {
+		createCandidateView({ contributorRoot });
+	} catch (error) {
+		failure = error;
+	}
+	assert.ok(failure instanceof CandidateViewError, "a detached missing HEAD must fail closed");
+	assert.notEqual((failure as CandidateViewError).reason, undefined);
+	assert.ok((failure as CandidateViewError).reason !== "base-ref-moved");
+});
+
+test("candidate view fails closed when symbolic HEAD target ref exists but points to a missing object, not unborn", (t) => {
+	const contributorRoot = repository(t);
+	// Break the main ref: it exists (show-ref --exists returns 0) but points to
+	// a missing object. This is a broken symbolic HEAD, not a valid unborn repo.
+	writeFileSync(join(contributorRoot, ".git", "refs", "heads", "main"), `${"0".repeat(40)}\n`);
+	let failure: unknown;
+	try {
+		createCandidateView({ contributorRoot });
+	} catch (error) {
+		failure = error;
+	}
+	assert.ok(failure instanceof CandidateViewError, "a broken symbolic HEAD must fail closed, not unborn");
+});
+
+test("candidate view probe does not convert a ref-existence probe timeout into an unborn empty-tree base", (t) => {
+	const contributorRoot = unbornRepository(t);
+	const executor: CandidateGitExecutor = (file, args, options) => {
+		if (args[0] === "rev-parse" && args.includes("--quiet")) throw Object.assign(new Error("timed out"), { code: "ETIMEDOUT", killed: true });
+		return execFileSync(file, args, options);
+	};
+	let failure: unknown;
+	try {
+		new CandidateViewRegistry(executor).create({ contributorRoot });
+	} catch (error) {
+		failure = error;
+	}
+	assert.ok(failure instanceof CandidateViewError, "ref-existence probe timeout must fail closed");
+	assert.equal((failure as CandidateViewError).reason, "candidate-view-timeout");
+});
+
+test("candidate view fails closed when the unborn ref probe exits with an unexpected status instead of treating it as unborn", (t) => {
+	const contributorRoot = unbornRepository(t);
+	// Only status 1 means "ref absent" (valid unborn). Any other nonzero status
+	// (128, etc.) signals corruption or an I/O failure and must fail closed,
+	// never masquerade as an unborn empty-tree base.
+	const executor: CandidateGitExecutor = (file, args, options) => {
+		if (args[0] === "rev-parse" && args.includes("--quiet")) throw Object.assign(new Error("fatal: probe failed"), { status: 128 });
+		return execFileSync(file, args, options);
+	};
+	let failure: unknown;
+	try {
+		new CandidateViewRegistry(executor).create({ contributorRoot });
+	} catch (error) {
+		failure = error;
+	}
+	assert.ok(failure instanceof CandidateViewError, "an unexpected unborn probe status must fail closed, not unborn");
+	assert.equal((failure as CandidateViewError).reason, "candidate-view-git-failure");
+});
+
+test("candidate view treats an unborn sha256 repository base as the repository-native sha256 empty tree", (t) => {
+	const contributorRoot = mkdtempSync(join(tmpdir(), "gentle-pi-candidate-view-unborn-sha256-"));
+	t.after(() => rmSync(contributorRoot, { recursive: true, force: true }));
+	try {
+		git(contributorRoot, "init", "--object-format=sha256", "-b", "main");
+	} catch {
+		t.skip("installed git does not support `git init --object-format=sha256`");
+		return;
+	}
+	git(contributorRoot, "config", "user.name", "Candidate Test");
+	git(contributorRoot, "config", "user.email", "candidate@example.invalid");
+	writeFileSync(join(contributorRoot, "staged.txt"), "first staged\n");
+	git(contributorRoot, "add", "staged.txt");
+	const view = createCandidateView({ contributorRoot });
+	try {
+		const emptyTree = emptyTreeOf(contributorRoot);
+		assert.equal(emptyTree.length, 64, "a sha256 repository must derive a 64-hex empty tree, not the hardcoded SHA-1 id");
+		assert.equal(view.baseTree, emptyTree);
+		assert.equal(view.baseCommit, "HEAD");
+		assert.equal(view.committedOnly, false);
+		assert.notEqual(view.candidateTree, emptyTree);
+		assert.deepEqual(view.paths, ["staged.txt"]);
+		assert.deepEqual(view.deletedPaths, []);
+	} finally {
+		view.cleanup();
+	}
+});
+
+test("candidate view unborn worktree falls back when --orphan is unsupported, preserving isolation, no phantom commit, and contributor immutability", (t) => {
+	const contributorRoot = unbornRepository(t);
+	const indexBefore = readFileSync(join(contributorRoot, ".git", "index"));
+	// Intercept --orphan with status 129 (Git < 2.42 unknown option).
+	const executor: CandidateGitExecutor = (file, args, options) => {
+		if (args[0] === "worktree" && args[1] === "add" && args.includes("--orphan")) throw Object.assign(new Error("unknown option"), { status: 129 });
+		return execFileSync(file, args, options);
+	};
+	const view = new CandidateViewRegistry(executor).create({ contributorRoot });
+	try {
+		assert.equal(readFileSync(join(view.root, "staged.txt"), "utf8"), "first staged\n");
+		assert.deepEqual(view.paths, ["staged.txt"]);
+		assert.equal(view.baseTree, emptyTreeOf(contributorRoot));
+		// No phantom commit; contributor index untouched.
+		assert.throws(() => git(contributorRoot, "rev-parse", "--verify", "HEAD"), /fatal/i);
+		assert.equal(git(contributorRoot, "rev-list", "--all").length, 0);
+		assert.deepEqual(readFileSync(join(contributorRoot, ".git", "index")), indexBefore);
+	} finally {
+		view.cleanup();
+	}
+	assert.equal(git(contributorRoot, "worktree", "list").split("\n").filter((line) => line.includes("gentle-ai-candidate")).length, 0);
+	assert.equal(git(contributorRoot, "rev-list", "--all").length, 0);
+});
+
+test("candidate view unborn worktree propagates a non-usage --orphan failure instead of falling back", (t) => {
+	const contributorRoot = unbornRepository(t);
+	// A non-129 status must not trigger the fallback.
+	const calls: string[][] = [];
+	const executor: CandidateGitExecutor = (file, args, options) => {
+		calls.push([...args]);
+		if (args[0] === "worktree" && args[1] === "add" && args.includes("--orphan")) throw Object.assign(new Error("genuine failure"), { status: 128 });
+		return execFileSync(file, args, options);
+	};
+	let failure: unknown;
+	try { new CandidateViewRegistry(executor).create({ contributorRoot }); } catch (error) { failure = error; }
+	assert.ok(failure instanceof CandidateViewError, "a non-usage --orphan failure must propagate");
+	assert.equal((failure as CandidateViewError).reason, "candidate-view-git-failure");
+	assert.ok(!calls.some((args) => args[0] === "commit-tree"), "the fallback must not create a temporary commit");
+	assert.ok(!calls.some((args) => args[0] === "worktree" && args.includes("--detach")), "the fallback must not add a detached worktree");
+});
+
+test("candidate view cleans up a partially registered unborn fallback worktree when a later step fails", (t) => {
+	const contributorRoot = unbornRepository(t);
+	// Force the --orphan path to take the pre-2.42 fallback, then fail the
+	// symbolic-ref rewrite that follows `worktree add --no-checkout --detach`.
+	// The worktree is already registered with Git at that point; the cleanup
+	// boundary must remove both the registered worktree and its directory.
+	const executor: CandidateGitExecutor = (file, args, options) => {
+		if (args[0] === "worktree" && args[1] === "add" && args.includes("--orphan")) throw Object.assign(new Error("unknown option"), { status: 129 });
+		if (args[0] === "symbolic-ref") throw Object.assign(new Error("symbolic-ref failed"), { status: 1 });
+		return execFileSync(file, args, options);
+	};
+	let failure: unknown;
+	try { new CandidateViewRegistry(executor).create({ contributorRoot }); } catch (error) { failure = error; }
+	assert.ok(failure instanceof CandidateViewError, "the symbolic-ref failure must propagate");
+	assert.equal((failure as CandidateViewError).reason, "candidate-view-git-failure");
+	// No registered/admin worktree remains.
+	assert.equal(git(contributorRoot, "worktree", "list").split("\n").filter((line) => line.includes("gentle-ai-candidate")).length, 0);
+	// No candidate directory remains under the candidate-view parent.
+	const parent = join(realpathSync(git(contributorRoot, "rev-parse", "--path-format=absolute", "--git-common-dir")), "gentle-ai", "candidate-views");
+	const leftover = existsSync(parent) ? readdirSync(parent).filter((entry) => lstatSync(join(parent, entry)).isDirectory()) : [];
+	assert.deepEqual(leftover, [], "no candidate directory remains after a partial unborn fallback failure");
 });
