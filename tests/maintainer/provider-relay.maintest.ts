@@ -9,9 +9,9 @@
 // them via env. The baseline is described generically; external evidence
 // establishes whether it is the immutable RC8 runtime.
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 import { ARM_POSITIVE_ENV, CASE_KINDS, DESCRIPTOR_SCHEMA, DescriptorValidationError, POSITIVE_JOURNEY_COMMAND, loadDescriptor, resolveDeclaredExecutable, runMatrix, validateDescriptor } from "../../scripts/maintainer/provider-relay-matrix.mjs";
@@ -187,6 +187,119 @@ test("a relay-unavailable case against a CAPABLE binary fails closed at pi: zero
 	// read-only (mutationOutcome stays "none" before submit).
 	assert.equal(existsSync(stub.materializeLog), true);
 });
+// ---------------------------------------------------------------------------
+// Resolve-once (POSIX subprocess proof) — a bare Pi declaration is resolved
+// exactly once at the precheck and never re-resolved between precheck and
+// launch. Deterministic local stub scenario: the first PATH candidate is
+// resolved at precheck, a capable gentle-ai removes it during materialization,
+// and a second same-name PATH candidate remains. The fixed code must attempt
+// only the first concrete path (now gone) and fail closed — never fall through
+// to launch the second. This is a POSIX shebang/executable fixture: it spawns
+// real subprocesses with `shell:false`, which cannot execute `.bat`/`.cmd`
+// launchers on Windows. Windows native launcher execution is #311 P8 evidence,
+// not silently claimed here.
+// ---------------------------------------------------------------------------
+test("a bare Pi declaration is resolved once: the relay never falls through to a second PATH candidate after materialization removes the first", { skip: process.platform === "win32" && "POSIX shebang/executable subprocess fixture; Windows .cmd launcher execution (shell:false) is #311 P8 evidence, not claimed here" }, async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-maintainer-resolve-once-"));
+	chmodSync(root, 0o700);
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const dirA = join(root, "path-a");
+	const dirB = join(root, "path-b");
+	mkdirSync(dirA, { recursive: true });
+	mkdirSync(dirB, { recursive: true });
+	chmodSync(dirA, 0o700);
+	chmodSync(dirB, 0o700);
+	const firstPiLog = join(root, "pi-first-launched");
+	const secondPiLog = join(root, "pi-second-launched");
+	const firstPi = join(dirA, "pi");
+	const secondPi = join(dirB, "pi");
+	// First PATH candidate: the one the precheck resolves.
+	writeFileSync(firstPi, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(firstPiLog)}, "launched");\nprocess.exit(0);\n`);
+	chmodSync(firstPi, 0o755);
+	// Second PATH candidate: must NEVER launch under the fix.
+	writeFileSync(secondPi, `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(secondPiLog)}, "launched");\nprocess.exit(0);\n`);
+	chmodSync(secondPi, 0o755);
+	// A capable gentle-ai that removes the FIRST pi candidate during
+	// materialization, simulating a provider that cleans up its own runtime
+	// while a same-name second candidate remains on PATH.
+	const gentleAi = join(root, "gentle-ai");
+	writeFileSync(gentleAi, `#!/usr/bin/env node\nconst fs = require("node:fs");\nconst argv = process.argv.slice(2);\nif (argv.includes("--materialize=true")) {\n\ttry { fs.rmSync(${JSON.stringify(firstPi)}, { force: true }); } catch {}\n\tprocess.stdout.write("prompt-bytes");\n\tprocess.exit(0);\n}\nprocess.stdout.write(JSON.stringify({ schema: "gentle-ai.review-result-artifact/v2", admission_decision: "completed" }));\nprocess.exit(0);\n`);
+	chmodSync(gentleAi, 0o755);
+	const savedPath = process.env.PATH;
+	process.env.PATH = [dirA, dirB, savedPath].join(delimiter);
+	t.after(() => { process.env.PATH = savedPath; });
+	const [verdict] = await runMatrix(validateDescriptor({
+		...descriptor(),
+		gentleAiExecutable: gentleAi,
+		piExecutable: "pi",
+		cases: [{ name: "resolve-once", kind: "positive-lens", captureArgumentTokens: [...CAPTURE_TOKENS], submission: structuredClone(SUBMISSION) }],
+	}), { armPositive: true });
+	// The first pi was removed during materialization, so the relay must
+	// fail closed at pi-launch — never fall through to the second candidate.
+	assert.equal(verdict!.verdict, "fail");
+	assert.match(verdict!.reason, /pi-launch-failed/);
+	// The load-bearing assertion: the second PATH candidate never launched.
+	assert.equal(existsSync(secondPiLog), false, "the relay must never fall through to a second PATH candidate; the bare declaration is resolved once at precheck");
+	assert.equal(existsSync(firstPiLog), false, "the first candidate was removed during materialization and must not launch");
+});
+// ---------------------------------------------------------------------------
+// Resolve-once (platform-neutral boundary proof) — runs on Windows AND POSIX.
+// Proves runMatrix passes the first resolved concrete Pi path into the relay
+// boundary, not the bare declaration and not a second PATH candidate. Uses the
+// smallest dependency-injection seam in the existing options object: an
+// optional `relay` function defaulting to the real relay. The injected fake
+// records request.piExecutable and never executes a real subprocess, so no
+// shebang/chmod/.cmd execution is involved. No real model or network.
+// ---------------------------------------------------------------------------
+test("platform-neutral: runMatrix passes the first resolved concrete Pi path into the relay boundary (no second resolution)", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-maintainer-portable-"));
+	chmodSync(root, 0o700);
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const dirA = join(root, "path-a");
+	const dirB = join(root, "path-b");
+	mkdirSync(dirA, { recursive: true });
+	mkdirSync(dirB, { recursive: true });
+	chmodSync(dirA, 0o700);
+	chmodSync(dirB, 0o700);
+	const firstPi = join(dirA, "pi");
+	const secondPi = join(dirB, "pi");
+	// Ordinary files (no shebang/chmod needed): the injected relay never
+	// executes them. Only the precheck's existsSync/statSync touches them.
+	writeFileSync(firstPi, "first");
+	writeFileSync(secondPi, "second");
+	const gentleAi = join(root, "gentle-ai");
+	writeFileSync(gentleAi, "gentle-ai");
+	const savedPath = process.env.PATH;
+	process.env.PATH = [dirA, dirB, savedPath].join(delimiter);
+	t.after(() => { process.env.PATH = savedPath; });
+	let receivedPiExecutable: string | undefined;
+	const [verdict] = await runMatrix(validateDescriptor({
+		...descriptor(),
+		gentleAiExecutable: gentleAi,
+		piExecutable: "pi",
+		cases: [{ name: "portable-resolve-once", kind: "positive-lens", captureArgumentTokens: [...CAPTURE_TOKENS], submission: structuredClone(SUBMISSION) }],
+	}), {
+		armPositive: true,
+		relay: async (request) => {
+			receivedPiExecutable = request.piExecutable;
+			// Simulate materialization removing the first candidate; the
+			// path was captured at precheck and must not be re-resolved.
+			rmSync(firstPi, { force: true });
+			return { promptByteLength: 1, resultByteLength: 1, submission: "{}" };
+		},
+	});
+	// The relay boundary received the EXACT first concrete resolved path —
+	// not the bare "pi" declaration and not the second candidate.
+	assert.equal(receivedPiExecutable, firstPi);
+	assert.notEqual(receivedPiExecutable, secondPi);
+	assert.notEqual(receivedPiExecutable, "pi");
+	assert.equal(verdict!.verdict, "pass");
+	// The first candidate was removed during the relay call; the second is
+	// untouched, proving no fallthrough resolution occurred.
+	assert.equal(existsSync(firstPi), false);
+	assert.equal(existsSync(secondPi), true);
+});
+
 // ---------------------------------------------------------------------------
 // Negative control — a baseline runtime without --materialize fails closed as
 // relay-unavailable with zero Pi launch and zero submission. The baseline is
