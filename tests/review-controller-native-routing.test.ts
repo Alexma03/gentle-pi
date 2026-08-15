@@ -4923,7 +4923,7 @@ test("large repository end-to-end: tiny candidate diff reaches START, reviewer d
 		assert.match(rogueDispatch.task, new RegExp(`Frozen candidate tree: \`${candidateTree}\``));
 
 		// FINALIZE mutates against the frozen candidate root, not the contributor working directory.
-		const finalize = await controller.execute("large-repo-finalize", { operation: "finalize", lineageId, input: JSON.stringify({ review_result: { lens_results: [{ findings: [], evidence: ["large repository candidate reviewed"] }] } }) }, undefined, undefined, context(cwd));
+		const finalize = await controller.execute("large-repo-finalize", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
 		assert.equal((finalize.details as { result: { state: string } }).result.state, "approved");
 		assert.equal(finalizes, 1);
 		assert.notEqual(finalizeRoot, cwd);
