@@ -107,7 +107,7 @@ pi
 /gentle:status          Check package, SDD assets, OpenSpec, and global model config.
 /gentle:doctor          Run read-only diagnostics for SDD assets, config, tools, and guards.
 /gentle:sdd-preflight   Run or reuse the session SDD preflight explicitly.
-/sdd-init                  Create or refresh openspec/config.yaml.
+/sdd-init                  Create or refresh openspec/config.yaml (openspec/both stores only).
 /gentle:models             Assign global model/effort routing to SDD/custom agents.
 /gentle:persona            Switch between gentleman and neutral persona modes.
 /gentle:banner             Configure startup rose, text logo, and color preset.
@@ -598,7 +598,7 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/gentle:toggle-rose`            | Toggles the startup rose.                                           |
 | `/gentle:toggle-text-logo`       | Toggles the startup text logo.                                      |
 | `/gentle:banner-color`           | Selects a startup banner color preset.                              |
-| `/sdd-init`                      | Initializes or refreshes `openspec/config.yaml`.                    |
+| `/sdd-init`                      | Initializes or refreshes `openspec/config.yaml` (openspec/both stores only). |
 | `/gentle:install-sdd`         | Repairs missing global SDD runtime assets without overwriting files. |
 | `/gentle:install-sdd --force` | Force-refreshes installed global SDD assets.                         |
 | `/skill-registry:refresh`        | Regenerates `.atl/skill-registry.md`.                               |

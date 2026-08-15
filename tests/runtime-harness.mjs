@@ -1103,6 +1103,82 @@ async function run() {
 		await rm(engramSddCwd, { recursive: true, force: true });
 	}
 
+	// Issue #64: selecting engram as the artifact store must not cause
+	// /sdd-init to create openspec/ or openspec/config.yaml.
+	const engramSddInitCwd = await tempWorkspace();
+	try {
+		pi.setActiveTools(["read", "bash", "edit", "write", "mem_save"]);
+		const ctx = createCtx(engramSddInitCwd, true, "engram-sdd-init-session");
+		ctx.ui.select = async (label, options) => {
+			if (label === "SDD artifact store") return "engram";
+			return options[0];
+		};
+		await commands.get("gentle:sdd-preflight").handler("", ctx);
+		await commands.get("sdd-init").handler("", ctx);
+		assert.equal(
+			existsSync(join(engramSddInitCwd, "openspec")),
+			false,
+			"/sdd-init must not create openspec/ when artifactStore is engram",
+		);
+		assert.equal(
+			existsSync(join(engramSddInitCwd, "openspec", "config.yaml")),
+			false,
+			"/sdd-init must not write openspec/config.yaml when artifactStore is engram",
+		);
+		assert.doesNotMatch(
+			ctx.ui.notifications.at(-1).message,
+			/Wrote openspec\/config\.yaml/,
+			"/sdd-init must not announce openspec/config.yaml when artifactStore is engram",
+		);
+		assert.match(
+			ctx.ui.notifications.at(-1).message,
+			/SDD initialized for engram:/,
+		);
+		assert.equal(ctx.ui.notifications.at(-1).level, "info");
+	} finally {
+		pi.setActiveTools(["read", "bash", "edit", "write"]);
+		await rm(engramSddInitCwd, { recursive: true, force: true });
+	}
+
+	// Issue #64 counterpart: the engram skip must stay narrow. Selecting both
+	// still has to create the full openspec/ scaffold and write config.yaml,
+	// so an over-broad skip is caught here instead of in the field.
+	const bothSddInitCwd = await tempWorkspace();
+	try {
+		pi.setActiveTools(["read", "bash", "edit", "write", "mem_save"]);
+		const ctx = createCtx(bothSddInitCwd, true, "both-sdd-init-session");
+		ctx.ui.select = async (label, options) => {
+			if (label === "SDD artifact store") return "both";
+			return options[0];
+		};
+		await commands.get("gentle:sdd-preflight").handler("", ctx);
+		await commands.get("sdd-init").handler("", ctx);
+		assert.equal(
+			existsSync(join(bothSddInitCwd, "openspec", "specs")),
+			true,
+			"/sdd-init must create openspec/specs when artifactStore is both",
+		);
+		assert.equal(
+			existsSync(join(bothSddInitCwd, "openspec", "changes", "archive")),
+			true,
+			"/sdd-init must create openspec/changes/archive when artifactStore is both",
+		);
+		assert.equal(
+			existsSync(join(bothSddInitCwd, "openspec", "config.yaml")),
+			true,
+			"/sdd-init must write openspec/config.yaml when artifactStore is both",
+		);
+		assert.match(
+			ctx.ui.notifications.at(-1).message,
+			/Wrote openspec\/config\.yaml/,
+			"/sdd-init must announce openspec/config.yaml when artifactStore is both",
+		);
+		assert.equal(ctx.ui.notifications.at(-1).level, "info");
+	} finally {
+		pi.setActiveTools(["read", "bash", "edit", "write"]);
+		await rm(bothSddInitCwd, { recursive: true, force: true });
+	}
+
 	const directEngramToolCwd = await tempWorkspace();
 	try {
 		pi.setActiveTools(["read", "bash", "edit", "write", "engram_mem_save"]);

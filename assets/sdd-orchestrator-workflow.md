@@ -84,15 +84,19 @@ Manual install commands are recovery/debug paths, not the happy path. `/gentle:s
 
 ## Init Guard
 
-Before any SDD flow, make sure project context exists.
+Before any SDD flow, make sure project context exists. Where that context lives depends on the session's artifact store, so qualify the check by store before acting on it.
 
-In this Pi package, the default local artifact is:
+When the store is `openspec` or `both`, the local artifact is:
 
 ```text
 openspec/config.yaml
 ```
 
-If it is missing, ask the user for the minimal information needed or run `/sdd-init` if available. This init guard runs after the session preflight gate above; project config presence or absence never substitutes for session preflight choices. Do not proceed with a substantial SDD flow while pretending project context, testing capability, or session preflight choices are known.
+If it is missing, ask the user for the minimal information needed or run `/sdd-init` if available.
+
+When the store is `engram` or `none`, `/sdd-init` never writes that file, so its absence is expected and is not a missing init. Never re-trigger `/sdd-init` over it. Resolve project context from the Engram `sdd-init/{project}` topic for `engram`, or inline from the session for `none`, and ask the user only when that context is genuinely absent.
+
+This init guard runs after the session preflight gate above; project config presence or absence never substitutes for session preflight choices. Do not proceed with a substantial SDD flow while pretending project context, testing capability, or session preflight choices are known.
 
 ## Artifact Store Policy
 
