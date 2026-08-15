@@ -68,8 +68,10 @@ The preflight captures:
 
 - execution mode: `interactive` or `auto`;
 - artifact store: `openspec`, `engram`, or `both` when callable memory tools are available;
-- chained PR strategy: `auto-forecast`, `ask-always`, `single-pr-default`, or `force-chained`;
+- chained PR strategy: the canonical `delivery_strategy` — `ask-on-risk`, `auto-chain`, `single-pr`, or `exception-ok`. The preflight menu offers the first three; `exception-ok` is reachable only when the user explicitly accepts `size:exception`, either up front or when `ask-on-risk` stops to ask;
 - review budget in changed lines.
+
+Those four PR values are exactly the `delivery_strategy` domain `sdd-tasks` and `sdd-apply` accept; never emit a value outside it. The preflight offers no separate chained option because `delivery_strategy` is only consulted once the tasks forecast flags review-budget risk: below that line there is nothing to chain, and above it `auto-chain` already resolves without asking again.
 
 The package should ensure SDD assets are present as global Pi runtime assets without the user needing to remember per-project setup commands. If assets are missing, install them non-destructively into:
 
@@ -104,8 +106,10 @@ This package does not provide persistent memory by itself.
 
 Use the session's SDD preflight choice:
 
-- `interactive`: default, pause between major phases and ask whether to continue.
-- `auto`: run phases back-to-back when the user explicitly wants speed and trusts the flow.
+- `auto`: phases run back-to-back without pausing, but the orchestrator gatekeeper validates after each phase before launching the next.
+- `interactive`: after each phase, show a concise summary and ask whether to adjust or continue.
+
+If the user doesn't specify, default to `auto`. After scope approval, expect zero further prompts on the happy path and at most one actionable prompt per recoverable failure; the gatekeeper summarizes phase progress instead of interrupting except on a second consecutive gate failure or a genuine scope/product decision.
 
 In interactive mode, between phases:
 
@@ -116,6 +120,28 @@ In interactive mode, between phases:
 Interactive approval is phase-scoped. A user response such as "continue", "dale", or "go on" approves only the immediate next phase, not the rest of the SDD pipeline. Do not treat a generated artifact as approved until the user has had a chance to review or explicitly delegate that review.
 
 Before `sdd-proposal` in interactive mode, offer the user a proposal question round instead of silently deciding whether the proposal is clear enough. Explain that the questions are meant to improve the PRD/proposal by uncovering business understanding, business rules, implications, impact, edge cases, and product tradeoffs. Prefer 3–5 concrete product questions per round, then summarize the resulting assumptions and ask whether the user wants to correct anything or run a second question round. Cover business/product/PRD decisions: business problem, target users and situations, business rules, product outcome, current-state gap, implications and impact, edge cases, decision gaps, first-slice scope boundaries, non-goals, product constraints, and business tradeoffs. Do not ask about test commands, PR shape, changed-line budget, or other harness mechanics at proposal time unless the user explicitly asks to discuss delivery.
+
+## Delivery Strategy
+
+On the first SDD chain request in a session, resolve the delivery strategy from preflight (or ask once) and cache it:
+
+- `ask-on-risk` — default; ask only when the tasks forecast detects review-budget risk.
+- `auto-chain` — automatically split into chained/stacked PR slices when needed.
+- `single-pr` — proceed as one PR only if the size is within budget.
+- `exception-ok` — user accepts `size:exception` when over budget. The preflight menu cannot select this; it is reached only when the user explicitly accepts `size:exception`, either up front or when `ask-on-risk` stops to ask.
+
+These four are the whole domain. Pass `delivery_strategy` to `sdd-tasks` and `sdd-apply`.
+
+## Chain Strategy
+
+When delivery planning yields chained PRs, ask once for chain strategy and cache it:
+
+- `stacked-to-main` — each PR targets the previous PR branch or main in sequence.
+- `feature-branch-chain` — PR #1 targets the tracker branch; child PRs target the immediate previous PR branch; only the tracker merges to main.
+
+When chained PRs are selected, treat the registry skill `gentle-ai-chained-pr` as a required skill match. Resolve and forward it by registry path to `sdd-tasks` and `sdd-apply`; do not hardcode its path.
+
+Pass it as `chain_strategy` to `sdd-tasks` and `sdd-apply` prompts alongside `delivery_strategy`.
 
 ## Result Contract
 
@@ -190,7 +216,46 @@ The Automatic Mode Gatekeeper one-rerun rule above is a quality gate, not a laun
 
 ## SDD Phase Delegation Mode
 
-Launch SDD phase subagents with `subagent_run` `mode: "task"` when the parent needs the phase result to route the next step. Do not use `mode: "background"` for SDD phases that must feed continuation; background completion is a notification/history mechanism, not an orchestration resume guarantee.
+Launch SDD phase subagents with `subagent_run` `mode: "task"` when the parent needs the phase result to route the next step. SDD phases, writers, dependent verify evidence, and archive are foreground-mandatory under the background subagent policy block in the delegation contract; background completion is a notification/history mechanism, not an orchestration resume guarantee.
+
+## Model Assignments
+
+Read this table before the first SDD/Judgment-Day phase delegation in a session, cache it, and use it only for SDD/Judgment-Day phase agents. If a phase is missing, use the `default` row. If the assigned tier is unavailable, use the runtime's default model and continue.
+
+On Pi, phase model routing is user-owned and persisted, not prompt-passed: `/gentle:models` writes `.pi/gentle-ai/models.json`, and the package applies each saved assignment to the installed phase agent definitions (frontmatter `model:`/`thinking:`) or `.pi/settings.json` overrides. The table below is the default capability tier per phase when the user has saved no assignment.
+
+**Mandatory phase model gate:** before launching an SDD/Judgment-Day phase agent, confirm the phase resolves through the saved model config or these defaults. Never pass an ad-hoc `model` parameter for SDD/Judgment-Day phases, and never apply this table to generic Pi delegation — generic subagents resolve model/thinking through `pi-subagents` config, and `model` is passed there only on an explicit user override.
+
+| Phase        | Default tier   | Reason                                     |
+| ------------ | -------------- | ------------------------------------------ |
+| sdd-explore  | balanced       | Reads code, structural - not architectural |
+| sdd-proposal | deep-reasoning | Architectural decisions                    |
+| sdd-spec     | balanced       | Structured writing                         |
+| sdd-design   | deep-reasoning | Architecture decisions                     |
+| sdd-tasks    | balanced       | Mechanical breakdown                       |
+| sdd-apply    | balanced       | Implementation                             |
+| sdd-verify   | balanced       | Validation against spec                    |
+| sdd-sync     | fast           | Reflect verified state                     |
+| sdd-archive  | fast           | Copy and close                             |
+| jd-judge-a   | deep-reasoning | Adversarial review                         |
+| jd-judge-b   | deep-reasoning | Adversarial review                         |
+| jd-fix-agent | balanced       | Surgical confirmed fixes                   |
+| default      | balanced       | SDD/JD phase fallback                      |
+
+## Sub-Agent Launch Deduplication
+
+Maintain a session-scoped launch log of `(phase, task-fingerprint)` pairs. If the same pair already exists, do NOT launch again. Emit exactly one launch per distinct task and append the pair after launch.
+
+## Sub-Agent Launch Protocol
+
+Pre-flight before every SDD/Judgment-Day phase launch:
+
+1. Identify the phase key (`sdd-apply`, `sdd-verify`, `jd-judge-a`, etc.).
+2. Confirm its model routing per the Model Assignments gate above.
+3. Resolve matching skill paths once per session from the registry and pass exact `SKILL.md` paths under `## Skills to load before work`.
+4. If a delegated result reports `skill_resolution` as `fallback-registry`, `fallback-path`, or `none`, re-read the registry before subsequent delegations.
+
+**Key Learnings closing (generic delegations):** when delegating to generic agents (`gentle-ai-explore`, `gentle-ai-worker`, `gentle-ai-verify`, scout/worker roles, or the native `Agent` fallback), instruct the sub-agent to close its final message with a `## Key Learnings` section containing 1–5 numbered items, each a standalone factual sentence of ≥4 words and ≥20 characters. This enables passive memory capture of learnings across delegation boundaries when a callable memory package is active. Include the same closing instruction in SDD phase launch prompts; Pi has no separate phase-common surface that injects it automatically.
 
 ## Strict TDD Forwarding
 
@@ -204,12 +269,31 @@ STRICT TDD MODE IS ACTIVE. Test runner: <command>. Follow RED, GREEN, TRIANGULAT
 
 Do not rely on the child agent to discover this independently.
 
+## Archive Final-State Handoff
+
+When launching `sdd-archive`, forward explicit final-state facts for any work completed after `apply-progress`, `verify-report`, or `sync-report` were persisted — verify warnings fixed in later commits, blockers resolved, tasks finished, updated test or issue counts — with commit or evidence references where available. Those artifacts are intermediate snapshots, valid at the time they were written; the archive report records the state at close, and explicit final-state facts in the `sdd-archive` launch prompt outrank stale snapshot claims.
+
 ## Review Workload Guard
 
-After `sdd-tasks` and before `sdd-apply`, inspect the task output for review workload risk.
+After `sdd-tasks` completes and before launching `sdd-apply`, inspect the task output's `Review Workload Forecast`.
 
-If estimated changed lines exceed 400, chained PRs are recommended, or a decision is needed, pause and ask unless the user already approved a delivery strategy.
+If it says `Chained PRs recommended: Yes`, `400-line budget risk: High`, estimated changed lines exceed 400, or `Decision needed before apply: Yes`, apply the cached `delivery_strategy`:
+
+- `ask-on-risk`: stop and ask whether to split or proceed with `size:exception`.
+- `auto-chain`: split automatically; ask for `chain_strategy` only if missing.
+- `single-pr`: stop and require/record `size:exception` before apply.
+- `exception-ok`: continue and tell `sdd-apply` this run uses `size:exception`.
+
+Any other `delivery_strategy` value is invalid. Do NOT pick the nearest branch and do NOT proceed: STOP, report the unrecognised value, and re-collect the delivery strategy before launching `sdd-apply`.
+
+Always pass the resolved `delivery_strategy`, `chain_strategy`, and any chosen PR boundary/exception to `sdd-apply` in the launch prompt.
 
 Any review transaction explicitly started outside SDD persists through its own artifact-store branch and budget. SDD completion itself launches no review actors and mints no review authority.
 
 Automatic mode does not override reviewer burnout protection.
+
+## Recovery
+
+- `engram` → resolve state with the injected memory search/get tools on the change topic keys (`sdd/{change-name}/...`).
+- `openspec` → read `openspec/changes/<change>/` artifacts and re-derive readiness through the native status engine.
+- `none` → state is not persisted; explain the limitation.

@@ -16,6 +16,7 @@ const PREFIXED_NAMES: Record<string, string> = {
 	"chained-pr": "gentle-ai-chained-pr",
 	"issue-creation": "gentle-ai-issue-creation",
 	"judgment-day": "gentle-ai-judgment-day",
+	"rdd-defect-workflow": "gentle-ai-rdd-defect-workflow",
 	"skill-creator": "gentle-ai-skill-creator",
 	"skill-improver": "gentle-ai-skill-improver",
 };
