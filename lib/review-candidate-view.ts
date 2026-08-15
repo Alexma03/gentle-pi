@@ -504,11 +504,11 @@ function assertManifestMatchesGit(descriptor: NativeCandidateProjectionDescripto
 	}
 }
 
-function deriveChangedScope(cwd: string, baseCommit: string, candidateTree: string, entries: readonly CandidateTreeEntry[], executor: CandidateGitExecutor): CandidateViewScope {
+function deriveChangedScope(cwd: string, baseTree: string, candidateTree: string, entries: readonly CandidateTreeEntry[], executor: CandidateGitExecutor): CandidateViewScope {
 	const present = new Map(entries.map((entry) => [entry.path, entry]));
 	const paths = new Set<string>();
 	const deleted = new Set<string>();
-	const tokens = gitPathTokens(cwd, ["diff", "--name-status", "-z", "--no-ext-diff", "--find-renames=100%", baseCommit, candidateTree], executor);
+	const tokens = gitPathTokens(cwd, ["diff", "--name-status", "-z", "--no-ext-diff", "--find-renames=100%", baseTree, candidateTree], executor);
 	for (let index = 0; index < tokens.length;) {
 		const status = tokens[index++]?.toString("ascii");
 		if (status === undefined || !/^(?:[AMDT]|R[0-9]{3})$/.test(status)) throw new CandidateViewError("candidate scope Git output contains an unsafe status");
@@ -624,8 +624,60 @@ function explicitBaseRefCandidates(cwd: string, selector: string, env: NodeJS.Pr
 	return [...new Set(candidates)].filter((candidate) => refs.has(candidate));
 }
 
+// Runs a probe command that may exit nonzero as an expected signal (absent
+// ref, detached HEAD). Returns the exit status and trimmed stdout. Timeout,
+// output-limit, and unexpected Git failures propagate as sanitized
+// CandidateViewError diagnostics, same as candidateGit.
+function probeCandidateGit(cwd: string, arguments_: readonly string[], env: NodeJS.ProcessEnv, executor: CandidateGitExecutor): { status: number; stdout: string } {
+	const timeoutMs = resolveCandidateGitTimeoutMs(env);
+	try {
+		const stdout = executor("git", arguments_, {
+			cwd, encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"],
+			timeout: timeoutMs, maxBuffer: CANDIDATE_GIT_MAX_BUFFER_BYTES, windowsHide: true,
+		}) as string;
+		return { status: 0, stdout: stdout.trim() };
+	} catch (error) {
+		const detail = error as NodeJS.ErrnoException & { killed?: boolean; status?: number; stdout?: string | Buffer };
+		if (detail.code === "ENOBUFS" || detail.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.OUTPUT_LIMIT, arguments_, timeoutMs);
+		if (detail.code === "ETIMEDOUT" || detail.killed === true) throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.TIMEOUT, arguments_, timeoutMs);
+		if (typeof detail.status === "number") return { status: detail.status, stdout: typeof detail.stdout === "string" ? detail.stdout.trim() : "" };
+		throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.GIT_FAILURE, arguments_, timeoutMs);
+	}
+}
+
+// An unborn repository's HEAD is a symbolic ref to a branch with no commits.
+// `symbolic-ref --quiet HEAD` exits nonzero for a detached HEAD (not unborn).
+// `rev-parse --verify --quiet <ref>` distinguishes a valid unborn (status 1,
+// ref absent) from a broken symbolic ref (exit 0, ref OID text exists even
+// when the object is missing). Any other status (128, etc.) signals
+// corruption or an I/O failure, so it fails closed instead of masquerading as
+// an unborn repository.
+function isUnbornSymbolicHead(cwd: string, env: NodeJS.ProcessEnv, executor: CandidateGitExecutor): boolean {
+	const symbolic = probeCandidateGit(cwd, ["symbolic-ref", "--quiet", "HEAD"], env, executor);
+	if (symbolic.status !== 0) return false;
+	const refProbeArguments = ["rev-parse", "--verify", "--quiet", symbolic.stdout];
+	const refProbe = probeCandidateGit(cwd, refProbeArguments, env, executor);
+	if (refProbe.status === 1) return true;
+	if (refProbe.status === 0) return false;
+	throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.GIT_FAILURE, refProbeArguments, resolveCandidateGitTimeoutMs(env));
+}
+
+// Derives Git's repository-native empty tree without hardcoding the SHA-1 id,
+// so a sha256 repository derives its own empty-tree object id. `mktree` with
+// ignored stdin reads empty input and writes the empty tree object.
+function resolveEmptyTree(cwd: string, env: NodeJS.ProcessEnv, executor: CandidateGitExecutor): string {
+	return git(cwd, ["mktree"], env, executor);
+}
+
 function resolveCandidateBase(cwd: string, baseRef: string | undefined, env: NodeJS.ProcessEnv, executor: CandidateGitExecutor): ResolvedCandidateBase {
 	const selector = baseRef ?? "HEAD";
+	// An unborn repository has a symbolic HEAD pointing at a branch with no
+	// commits yet. Its review base is Git's repository-native empty tree, not a
+	// missing or malformed commit. Only the default/HEAD selector is entitled to
+	// the empty-tree base; a detached HEAD over a missing commit stays fail-closed.
+	if (selector === "HEAD" && isUnbornSymbolicHead(cwd, env, executor)) {
+		return { commit: "HEAD", tree: resolveEmptyTree(cwd, env, executor) };
+	}
 	try {
 		if (baseRef !== undefined) {
 			const candidates = explicitBaseRefCandidates(cwd, selector, env, executor);
@@ -675,6 +727,37 @@ function checkoutMaterializedEntries(root: string, entries: readonly CandidateTr
 	flush();
 }
 
+// Creates an unborn worktree (symbolic HEAD pointing at a branch with no
+// commits, no ref written, no phantom commit). Git 2.42+ supports --orphan
+// directly; older Git lacks the flag and reports an unsupported-option usage
+// error (exit status 129). Only that exact status triggers the fallback: a
+// temporary empty-tree commit seeds a detached --no-checkout worktree, then
+// a symbolic-ref rewrite makes HEAD unborn. The temporary commit is never
+// referenced by any ref and is GC-able, so it is not a phantom commit. The
+// fallback uses a deterministic author/committer identity and timestamp in a
+// copied environment so it does not depend on user.name/user.email or the
+// ambient date. Contributor HEAD, branch, refs, and index are never touched.
+function addUnbornWorktree(cwd: string, root: string, branch: string, env: NodeJS.ProcessEnv, executor: CandidateGitExecutor): void {
+	const primary = probeCandidateGit(cwd, ["worktree", "add", "--orphan", "-b", branch, root], env, executor);
+	if (primary.status === 0) return;
+	// Only the unsupported-option usage status (129, pre-2.42 Git lacking --orphan)
+	// triggers the fallback. Every other status propagates as a git-failure.
+	if (primary.status !== 129 || existsSync(root)) throw candidateGitFailure(CANDIDATE_VIEW_GIT_FAILURE_CATEGORY.GIT_FAILURE, ["worktree", "add", "--orphan", "-b", branch, root], resolveCandidateGitTimeoutMs(env));
+	const fallbackEnv = {
+		...env,
+		GIT_AUTHOR_NAME: "gentle-ai-candidate",
+		GIT_AUTHOR_EMAIL: "gentle-ai-candidate@example.invalid",
+		GIT_AUTHOR_DATE: "2000-01-01T00:00:00Z",
+		GIT_COMMITTER_NAME: "gentle-ai-candidate",
+		GIT_COMMITTER_EMAIL: "gentle-ai-candidate@example.invalid",
+		GIT_COMMITTER_DATE: "2000-01-01T00:00:00Z",
+	};
+	const emptyTree = git(cwd, ["mktree"], fallbackEnv, executor);
+	const tempCommit = git(cwd, ["commit-tree", "-m", "gentle-ai-candidate", emptyTree], fallbackEnv, executor);
+	git(cwd, ["worktree", "add", "--no-checkout", "--detach", root, tempCommit], env, executor);
+	git(root, ["symbolic-ref", "HEAD", `refs/heads/${branch}`], env, executor);
+}
+
 function materializeCandidateView(request: CreateCandidateViewRequest, executor: CandidateGitExecutor): CandidateViewRecord {
 	const contributorRoot = realpathSync(request.contributorRoot);
 	if (!lstatSync(contributorRoot).isDirectory()) throw new CandidateViewError("contributor root is not a directory");
@@ -692,17 +775,32 @@ function materializeCandidateView(request: CreateCandidateViewRequest, executor:
 	const environment = { ...process.env, GIT_INDEX_FILE: indexPath };
 	try {
 		const baseCommit = base.commit;
-		git(contributorRoot, ["read-tree", candidateCommit.commit], environment, executor);
+		const unborn = baseCommit === "HEAD";
+		// For an unborn repository the base tree is Git's empty tree, so seed the
+		// private candidate index from `--empty` instead of a non-existent commit.
+		if (unborn) git(contributorRoot, ["read-tree", "--empty"], environment, executor);
+		else git(contributorRoot, ["read-tree", candidateCommit.commit], environment, executor);
 		if (!committedOnly) git(contributorRoot, ["add", "-A"], environment, executor);
 		const candidateTree = git(contributorRoot, ["write-tree"], environment, executor);
 		const root = join(parent, randomUUID());
-		git(contributorRoot, ["worktree", "add", "--detach", "--no-checkout", root, candidateCommit.commit], process.env, executor);
+		// The worktree is created under the same try/catch cleanup boundary as
+		// the read-tree materialization that follows. addUnbornWorktree's
+		// fallback path can register a worktree with `worktree add` and then
+		// fail on a later step (for example `symbolic-ref`); moving creation
+		// here ensures any such partial registration is removed by the catch
+		// below instead of leaking a registered/admin worktree and directory.
 		try {
+			// An unborn repository has no commit to detach a worktree at. addUnbornWorktree
+			// creates an orphan worktree (unborn branch, no commit, no ref) to host the
+			// materialized candidate tree without a phantom commit, with a fallback for
+			// Git versions older than 2.42 that do not support --orphan.
+			if (unborn) addUnbornWorktree(contributorRoot, root, `gentle-ai-candidate-${randomUUID()}`, process.env, executor);
+			else git(contributorRoot, ["worktree", "add", "--detach", "--no-checkout", root, candidateCommit.commit], process.env, executor);
 			git(root, ["read-tree", candidateTree], process.env, executor);
 			const tree = parseTree(root, candidateTree, executor);
 			checkoutMaterializedEntries(root, tree.entries, executor);
 			const entries = tree.entries.map((entry) => ({ ...entry, contentHash: entryContentHash(root, entry) }));
-			const scope = deriveChangedScope(contributorRoot, baseCommit, candidateTree, [...tree.entries, ...tree.gitlinks], executor);
+			const scope = deriveChangedScope(contributorRoot, base.tree, candidateTree, [...tree.entries, ...tree.gitlinks], executor);
 			for (const gitlink of tree.gitlinks) if (lstatSync(join(root, gitlink.path), { throwIfNoEntry: false })) throw new CandidateViewError("candidate view materialized a metadata-only gitlink");
 			makeReadonly(root, entries);
 			return { token: basename(root), root: realpathSync(root), parent, contributorRoot, commonDir: canonicalCommonDir, baseCommit, baseTree: base.tree, candidateTree, committedOnly, entries, gitlinks: tree.gitlinks, scope, gitExecutor: executor };

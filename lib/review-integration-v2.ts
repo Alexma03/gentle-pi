@@ -312,6 +312,35 @@ export interface ReviewNextTransitionExecuteV3 {
 	command?: string;
 }
 
+// Provider-owned completing form for a host-mediated capture slot
+// (gentle-pi#311 P4). The provider issues the exact operation and argument
+// tokens that submit the captured bytes; the host substitutes only the
+// artifact location into the declared {{value}} slot and never synthesizes
+// or filters the form itself.
+export interface ReviewCaptureSubmissionValueV1 {
+	slot: string;
+	domain: string;
+	substitutionLocation: number;
+}
+
+export interface ReviewCaptureSubmissionV1 {
+	operationToken: string;
+	argumentTokens: readonly string[];
+	values: readonly ReviewCaptureSubmissionValueV1[];
+}
+
+// The two Go-owned non-lens provider role capture operations (gentle-pi#311
+// P4-roles; provider side gentle-ai#3264). Their collect inputs are
+// self-contained authority-advancing vectors: binding tokens plus
+// `--agent=pi --execute=true`, with NO submission descriptor. The known set
+// is closed — an unknown role capture operation is never executed.
+export const REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION = {
+	CAPTURE_REFUTER: "review.capture-refuter",
+	CAPTURE_VALIDATION: "review.capture-validation",
+} as const;
+export type ReviewProviderRoleCaptureOperation = (typeof REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION)[keyof typeof REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION];
+export const REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS = Object.freeze(Object.values(REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION));
+
 export interface ReviewCollectInputV3 {
 	name: string;
 	schema: string;
@@ -322,6 +351,7 @@ export interface ReviewCollectInputV3 {
 	candidateTree?: string;
 	changedPathManifest?: readonly ChangedPathEntry[];
 	validationRequest?: ReviewTargetedValidationRequestV1;
+	submission?: ReviewCaptureSubmissionV1;
 }
 
 export interface ReviewNextTransitionV3 {
@@ -1047,8 +1077,23 @@ function decodeTransitionArguments(value: unknown, label: string): readonly Revi
 	});
 }
 
+function decodeCaptureSubmission(value: unknown, label: string): ReviewCaptureSubmissionV1 {
+	const submission = exactRecord(value, label, ["operation_token", "argument_tokens", "values"]);
+	const operationToken = text(submission.operation_token, `${label}.operation_token`, { minimum: 1, pattern: /^[a-z0-9-]+$/ });
+	const argumentTokens = stringArray(submission.argument_tokens, `${label}.argument_tokens`, { minimum: 1 });
+	const values = array(submission.values, `${label}.values`, (entry, entryLabel) => {
+		const row = exactRecord(entry, entryLabel, ["slot", "domain", "substitution_location"]);
+		return {
+			slot: nonempty(row.slot, `${entryLabel}.slot`),
+			domain: nonempty(row.domain, `${entryLabel}.domain`),
+			substitutionLocation: integer(row.substitution_location, `${entryLabel}.substitution_location`, 0, argumentTokens.length - 1),
+		};
+	}, { minimum: 1 });
+	return { operationToken, argumentTokens, values };
+}
+
 function decodeCollectInput(value: unknown, label: string): ReviewCollectInputV3 {
-	const input = exactRecord(value, label, ["name", "schema", "capture_operation", "arguments"], ["artifact_subject", "base_tree", "candidate_tree", "changed_path_manifest", "validation_request"]);
+	const input = exactRecord(value, label, ["name", "schema", "capture_operation", "arguments"], ["artifact_subject", "base_tree", "candidate_tree", "changed_path_manifest", "validation_request", "submission"]);
 	const name = text(input.name, `${label}.name`, { minimum: 1, pattern: /^[a-z0-9_]+$/ });
 	const schema = nonempty(input.schema, `${label}.schema`);
 	const captureOperation = nonempty(input.capture_operation, `${label}.capture_operation`);
@@ -1057,8 +1102,27 @@ function decodeCollectInput(value: unknown, label: string): ReviewCollectInputV3
 	if (captureOperation === "external.run_targeted_validation") {
 		if (input.validation_request === undefined) throw new TypeError(`${label}.validation_request is required`);
 		if (schema !== "gentle-ai.review-targeted-validation-request/v1") throw new TypeError(`${label}.schema must be gentle-ai.review-targeted-validation-request/v1`);
+	} else if (captureOperation === REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_VALIDATION) {
+		if (input.validation_request === undefined) throw new TypeError(`${label}.validation_request is required`);
 	} else if (input.validation_request !== undefined) {
-		throw new TypeError(`${label}.validation_request is only valid for external.run_targeted_validation`);
+		throw new TypeError(`${label}.validation_request is only valid for external.run_targeted_validation or review.capture-validation`);
+	}
+
+	// gentle-pi#311 P4-roles: the two Go-owned non-lens provider role capture
+	// operations render SELF-CONTAINED authority-advancing vectors. Executing
+	// the exact rendered tokens makes Go materialize the role prompt, run its
+	// own locked-down pi subprocess, and admit the raw verdict — so a
+	// submission descriptor (the host-mediated completing form) on one of
+	// these inputs would hand the caller a way to author the verdict and is
+	// rejected as a provider contract violation.
+	if (captureOperation === REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_REFUTER && schema !== "https://gentle-ai.dev/schema/review/refuter/v1") {
+		throw new TypeError(`${label}.schema must be https://gentle-ai.dev/schema/review/refuter/v1`);
+	}
+	if (captureOperation === REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_VALIDATION && schema !== "https://gentle-ai.dev/schema/review/validator/v1") {
+		throw new TypeError(`${label}.schema must be https://gentle-ai.dev/schema/review/validator/v1`);
+	}
+	if (input.submission !== undefined && (REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS as readonly string[]).includes(captureOperation)) {
+		throw new TypeError(`${label}.submission is not allowed on the self-contained ${captureOperation} vector`);
 	}
 
 	if (captureOperation === "review.capture-result") {
@@ -1068,6 +1132,9 @@ function decodeCollectInput(value: unknown, label: string): ReviewCollectInputV3
 		if (schema !== "https://gentle-ai.dev/schema/review/reviewer/v1") throw new TypeError(`${label}.schema must be https://gentle-ai.dev/schema/review/reviewer/v1`);
 	} else if (input.artifact_subject !== undefined || input.base_tree !== undefined || input.candidate_tree !== undefined || input.changed_path_manifest !== undefined) {
 		throw new TypeError(`${label} carries capture-result fields without review.capture-result`);
+	}
+	if (input.submission !== undefined && captureOperation !== "review.capture-result") {
+		throw new TypeError(`${label}.submission is only valid for review.capture-result`);
 	}
 
 	return {
@@ -1080,6 +1147,7 @@ function decodeCollectInput(value: unknown, label: string): ReviewCollectInputV3
 		...(input.candidate_tree === undefined ? {} : { candidateTree: gitTree(input.candidate_tree, `${label}.candidate_tree`) }),
 		...(input.changed_path_manifest === undefined ? {} : { changedPathManifest: array(input.changed_path_manifest, `${label}.changed_path_manifest`, decodeChangedPathEntry, { unique: true }) }),
 		...(input.validation_request === undefined ? {} : { validationRequest: decodeTargetedValidationRequestV1(input.validation_request, `${label}.validation_request`) }),
+		...(input.submission === undefined ? {} : { submission: decodeCaptureSubmission(input.submission, `${label}.submission`) }),
 	};
 }
 

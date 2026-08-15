@@ -39,21 +39,13 @@ Route work through the smallest harness that is safe. Three tiers:
 
 1. **Inline Direct** — small, mechanical, parent has context (typo, one-file edit, read-only check of 1-3 known files, bash for state). No SDD ceremony; stop when it is no longer small.
 2. **Simple Delegation** — generic non-SDD exploration → `gentle-ai-explore`; bounded implementation → `gentle-ai-worker`; command-running generic non-SDD verification → `gentle-ai-verify`. Try its package role; if missing/unusable, use native `Agent` under the same read-only mapping/verification constraints and report fallback. SDD roles stay inside SDD; review lenses inside reviews.
-3. **SDD** — large, ambiguous, architectural, product-facing, multi-area, or high-review-risk work, or an explicit `/sdd-new`/`/sdd-ff`/`/sdd-continue` request. Do not jump to implementation; create artifacts and gate for approval.
+3. **SDD (optional)** — selected only by an explicit request (`/sdd-new`/`/sdd-ff`/`/sdd-continue` or a direct ask) or an accepted proposal; size, file count, or risk alone never selects SDD. Suggest it organically when durable proposal/spec/design/tasks would materially reduce substantial ambiguity. Once selected, do not jump to implementation; create artifacts and gate for approval.
 
 ## Delegation Rules
 
 Core question: does this inflate parent context without need?
 
-| Action | Inline | Delegate |
-|---|---:|---:|
-| Truly local read-only check of 1-3 known files | yes | no |
-| Read to explore/understand 4+ files | no | yes |
-| Write atomic one-file mechanical change | yes | no |
-| Write with analysis across multiple files | no | yes |
-| Bash for state (e.g. git status) | yes | no |
-| Bash for execution (tests/builds) | no | yes |
-| Commit/push/PR after code changes | no | no actor; validate the approved receipt and exact target |
+The canonical per-action table is the mirrored gentle-ai canon Delegation Rules table in `{{GENTLE_PI_DELEGATION_PATH}}`.
 
 Mandatory Delegation Triggers — stop rules; once fired, delegate through the best available subagent runtime (prefer `subagent_run`, else Pi's native `Agent`):
 
@@ -65,7 +57,9 @@ Mandatory Delegation Triggers — stop rules; once fired, delegate through the b
 6. **Long-session rule** — ~20 tool calls, 5 exploratory reads, or 2 non-mechanical edits without delegation → pause and delegate.
 7. **Review actor rule** — review lenses run only when selected by ordinary transaction start; explicit Judgment Day uses its two named judges. Lifecycle and SDD boundaries launch zero review actors.
 
-Full table, Work Routing Ladder examples/model-routing detail, Cost and Context Balance, Canonical Workflows, and Review Lens Selection detail: `{{GENTLE_PI_DELEGATION_PATH}}`.
+{{GENTLE_PI_BACKGROUND_POLICY}}; rules: the background-subagents block in the delegation contract.
+
+Full table, Work Routing Ladder examples/model-routing detail, Cost and Context Balance, Canonical Workflows, Review Actor Materialization, and the mirrored gentle-ai canon (blocking-prompt relays + defect handoff, language, delegation, native checking, review execution + stop table): `{{GENTLE_PI_DELEGATION_PATH}}`.
 
 ## SDD Workflow (lazy-loaded)
 
@@ -101,6 +95,7 @@ For skill-shaped requests, do not treat injected `<available_skills>` as complet
 
 ## Safety
 
+- Relay blocking prompts losslessly; STOP for the human's answer.
 - Never commit unless the user explicitly asks.
 - Ask before destructive git operations, publishing, or irreversible file changes.
 - Keep writes single-threaded unless isolated worktrees are explicitly approved.
@@ -108,7 +103,7 @@ For skill-shaped requests, do not treat injected `<available_skills>` as complet
 
 ## Bounded Review Transactions
 
-New ordinary review uses negotiated v1 `gentle_review` `start -> finalize -> validate`. Target status owns one action. START freezes scope, findings, risk, and budget. FINALIZE permits one correction; failure escalates.
+Compact `gentle_review` uses `start -> finalize -> validate`; START freezes scope, risk, and budget; FINALIZE permits one correction, failure escalates.
 
 Compact gates use zero actors and rederive authority, target, and evidence. Pi adds one-shot authorization. Legacy authority is read-only; Judgment Day is separate.
 Release from protected `main` may bypass receipt validation only when its immutable remote SHA and required CI are proven; otherwise native receipt validation applies.
@@ -117,7 +112,5 @@ Major and post-incident releases require explicit extraordinary review even when
 Dangerous-command safety remains independent and authoritative.
 
 SDD completion adds no review or Judgment Day pass.
-
-Review/SDD never publish. The durable transaction may create one local commit after native validation and HEAD proof.
 
 Controller and actor contract: `{{GENTLE_PI_DELEGATION_PATH}}`.
