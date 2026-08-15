@@ -74,6 +74,8 @@ test("orchestrator-delegation.md lists all three semantic choice tokens", () => 
 			`orchestrator-delegation.md missing semantic choice token: ${token}`,
 		);
 	}
+	assert.match(DELEGATION, /\*\*Continue without reporting\*\*: Perform no GitHub search, write, comment, or label, and no report-side privacy scan is required/);
+	assert.match(DELEGATION, /\*\*Stop here\*\*: Perform no GitHub operation and no decline invocation; preserve all consumer state and STOP/);
 });
 
 test("orchestrator-delegation.md orders the three choices: report_and_continue, continue_without_reporting, stop_here", () => {
