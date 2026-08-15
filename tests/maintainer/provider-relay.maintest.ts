@@ -9,7 +9,7 @@
 // them via env. The baseline is described generically; external evidence
 // establishes whether it is the immutable RC8 runtime.
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -18,7 +18,15 @@ import { ARM_POSITIVE_ENV, CASE_KINDS, DESCRIPTOR_SCHEMA, DescriptorValidationEr
 const BASELINE_ENV = "GENTLE_PI_MAINTAINER_BASELINE_BINARY";
 const CAPABLE_ENV = "GENTLE_PI_MAINTAINER_CAPABLE_BINARY";
 const REQUIRE_ENV = "GENTLE_PI_REQUIRE_MAINTAINER";
-const PLACEHOLDER_BINARY = "/tmp/gentle-pi-maintainer-not-a-real-binary";
+// Every declared-but-nonexistent executable path these tests use lives inside
+// one private sandbox. A predictable /tmp path is squattable: another user can
+// pre-create it between runs, and a test that resolves it would then spawn a
+// file it never wrote. mkdtemp's unpredictable name plus 0700 removes that.
+const SANDBOX = mkdtempSync(join(tmpdir(), "gentle-pi-maintainer-sandbox-"));
+chmodSync(SANDBOX, 0o700);
+process.on("exit", () => rmSync(SANDBOX, { recursive: true, force: true }));
+const sandboxPath = (name: string) => join(SANDBOX, name);
+const PLACEHOLDER_BINARY = sandboxPath("not-a-real-gentle-ai-binary");
 const baselineBinary = process.env[BASELINE_ENV];
 const capableBinary = process.env[CAPABLE_ENV];
 const armed = process.env[REQUIRE_ENV] === "1";
@@ -105,14 +113,79 @@ test("loadDescriptor reads and validates a descriptor file", (t) => {
 // never falls through to the package-local production binary.
 // ---------------------------------------------------------------------------
 test("runMatrix uses only the declared executable, never the production resolver", async () => {
-	const [verdict] = await runMatrix(validateDescriptor({ ...descriptor(), gentleAiExecutable: "/tmp/opencode/not-a-gentle-ai-binary" }));
+	const [verdict] = await runMatrix(validateDescriptor({ ...descriptor(), gentleAiExecutable: sandboxPath("not-a-gentle-ai-binary") }));
 	assert.equal(verdict!.verdict, "blocked");
 	assert.match(verdict!.reason, /gentleAiExecutable/);
 	assert.notEqual(verdict!.verdict, "pass");
 });
 test("resolveDeclaredExecutable checks absolute paths verbatim and bare names on PATH only", () => {
-	assert.equal(resolveDeclaredExecutable("/tmp/opencode/nonexistent-absolute-123"), null);
+	assert.equal(resolveDeclaredExecutable(sandboxPath("nonexistent-absolute-123")), null);
 	assert.equal(resolveDeclaredExecutable(""), null);
+});
+
+// ---------------------------------------------------------------------------
+// Mis-declared capable binary — a `relay-unavailable` case is a negative
+// control, so the arm gate must not trust the maintainer-declared `kind`. A
+// declaration-only gate pointed at a CAPABLE binary would materialize, launch
+// a REAL pi model, and run a REAL `capture-result --input=...` submission
+// before reporting `fail`: the mutation would already have happened. Driven by
+// local stub executables (the repo's fake-executable idiom), so it is
+// deterministic and needs no arming.
+// ---------------------------------------------------------------------------
+function capableStubHarness(t: test.TestContext) {
+	const directory = mkdtempSync(join(tmpdir(), "gentle-pi-maintainer-capable-stub-"));
+	chmodSync(directory, 0o700);
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const materializeLog = join(directory, "materialized");
+	const submitLog = join(directory, "submitted");
+	const piLog = join(directory, "pi-launched");
+	const gentleAi = join(directory, "gentle-ai");
+	// Deliberately CAPABLE: it honours --materialize=true and would accept a
+	// submission, exactly like a binary a maintainer mis-declared as incapable.
+	writeFileSync(
+		gentleAi,
+		`#!/usr/bin/env node
+const fs = require("node:fs");
+const argv = process.argv.slice(2);
+if (argv.includes("--materialize=true")) {
+	fs.writeFileSync(${JSON.stringify(materializeLog)}, JSON.stringify(argv));
+	process.stdout.write("prompt-bytes");
+	process.exit(0);
+}
+fs.writeFileSync(${JSON.stringify(submitLog)}, JSON.stringify(argv));
+process.stdout.write(JSON.stringify({ schema: "gentle-ai.review-result-artifact/v2", admission_decision: "completed" }));
+process.exit(0);
+`,
+	);
+	chmodSync(gentleAi, 0o755);
+	const pi = join(directory, "pi");
+	writeFileSync(
+		pi,
+		`#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(${JSON.stringify(piLog)}, "launched");
+const chunks = [];
+process.stdin.on("data", (chunk) => chunks.push(chunk));
+process.stdin.on("end", () => { process.stdout.write("pi-result-bytes"); process.exit(0); });
+`,
+	);
+	chmodSync(pi, 0o755);
+	return { gentleAi, pi, materializeLog, submitLog, piLog };
+}
+test("a relay-unavailable case against a CAPABLE binary fails closed at pi: zero pi launch, zero submission", async (t) => {
+	const stub = capableStubHarness(t);
+	const [verdict] = await runMatrix(validateDescriptor({ ...descriptor(), gentleAiExecutable: stub.gentleAi, piExecutable: stub.pi }));
+	// The declared binary really is capable, so the negative control cannot
+	// pass — but it must fail WITHOUT mutating anything.
+	assert.equal(verdict!.verdict, "fail");
+	assert.match(verdict!.reason, /kind=pi-launch-failed stage=pi mutationOutcome=none/);
+	// The load-bearing assertions: the real pi never ran and the real
+	// submission never fired.
+	assert.equal(existsSync(stub.piLog), false, "pi must never launch for a relay-unavailable case");
+	assert.equal(existsSync(stub.submitLog), false, "a relay-unavailable case must never reach submit");
+	// Materialize still happens: it is the honest capability probe, and it is
+	// read-only (mutationOutcome stays "none" before submit).
+	assert.equal(existsSync(stub.materializeLog), true);
 });
 // ---------------------------------------------------------------------------
 // Negative control — a baseline runtime without --materialize fails closed as
@@ -180,7 +253,7 @@ test("positive arming/skip: an unarmed positive leg blocks loudly and never fake
 	assert.notEqual(verdict!.verdict, "fail");
 });
 test("positive arming/skip: a missing pi blocks at the pi pre-arm before materialize", { skip: !capableArmed }, async () => {
-	const [verdict] = await runMatrix(positiveDescriptor(capableBinary, "/tmp/opencode/not-a-real-pi"));
+	const [verdict] = await runMatrix(positiveDescriptor(capableBinary, sandboxPath("not-a-real-pi")));
 	assert.equal(verdict!.verdict, "blocked");
 	assert.match(verdict!.reason, /piExecutable/);
 	assert.equal(verdict!.command, POSITIVE_JOURNEY_COMMAND);

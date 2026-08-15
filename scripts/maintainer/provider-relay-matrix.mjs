@@ -9,7 +9,8 @@
 // `pnpm test` never imports it; `pnpm run test:maintainer` runs the tests;
 // the CLI is the entry point the separate verifier uses for the real organic
 // positive journey after a user-visible forecast.
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, resolveReviewHostRelaySubmission, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 export const DESCRIPTOR_SCHEMA = "gentle-pi.maintainer.provider-relay-descriptor/v1";
@@ -119,6 +120,14 @@ export function resolveDeclaredExecutable(executable) {
 	return null;
 }
 const missingReason = (executable, label) => `${label} "${executable}" is not an existing executable; arm the descriptor with a real binary, or set GENTLE_PI_REQUIRE_MAINTAINER=1 to fail instead of block.`;
+// A guaranteed-nonexistent pi path inside a fresh private directory. mkdtemp
+// picks an unpredictable name and 0700 keeps it ours, so nothing can race a
+// file into the slot between the mkdtemp and the spawn.
+function unlaunchablePi() {
+	const directory = mkdtempSync(join(tmpdir(), "gentle-pi-maintainer-no-pi-"));
+	chmodSync(directory, 0o700);
+	return { directory, executable: join(directory, "pi-must-never-launch") };
+}
 // Runs the matrix against the REAL relay. A case that cannot run honestly is
 // `blocked` (never `pass`); `fail` is an armed case whose outcome mismatched.
 export async function runMatrix(descriptor, options = {}) {
@@ -142,7 +151,20 @@ export async function runMatrix(descriptor, options = {}) {
 				continue;
 			}
 		}
-		const request = { captureArgumentTokens: caseEntry.captureArgumentTokens, submission: caseEntry.submission, gentleAiExecutable: gentleAiPath, piExecutable: descriptor.piExecutable, ...(options.signal === undefined ? {} : { signal: options.signal }) };
+		// `relay-unavailable` is a NEGATIVE CONTROL: it must never launch pi and
+		// never submit. The maintainer-declared `kind` is not evidence that the
+		// declared binary is actually incapable, so the arm gate cannot key off
+		// the declaration alone. Pointed at a mis-declared CAPABLE binary, a
+		// declaration-only gate materializes, runs a REAL pi model, and executes
+		// a REAL `capture-result --input=...` submission, and only then reports
+		// `fail` — the mutation already happened. So give the negative control a
+		// pi that cannot exist: an incapable binary still classifies
+		// relay-unavailable at materialize (the control stays genuine, since it
+		// never reached pi anyway), while a capable one fails closed at the pi
+		// stage as kind=pi-launch-failed stage=pi mutationOutcome=none, with
+		// zero pi launch and zero submission.
+		const negativeControl = caseEntry.kind === "relay-unavailable" ? unlaunchablePi() : null;
+		const request = { captureArgumentTokens: caseEntry.captureArgumentTokens, submission: caseEntry.submission, gentleAiExecutable: gentleAiPath, piExecutable: negativeControl === null ? descriptor.piExecutable : negativeControl.executable, ...(options.signal === undefined ? {} : { signal: options.signal }) };
 		try {
 			const result = await runReviewHostRelaySlot(request);
 			if (caseEntry.kind === "relay-unavailable") {
@@ -166,6 +188,8 @@ export async function runMatrix(descriptor, options = {}) {
 			} else {
 				verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "fail", reason: `unexpected non-relay error: ${error instanceof Error ? error.message : String(error)}` });
 			}
+		} finally {
+			if (negativeControl !== null) rmSync(negativeControl.directory, { recursive: true, force: true });
 		}
 	}
 	return verdicts;
