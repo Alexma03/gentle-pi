@@ -3,6 +3,8 @@ name: 4r-review
 description: One-shot lens-only 4R discovery against a supplied initial review tree; the controller owns all authority.
 ---
 
+> Manual/compat-lane only: the provider host-relay capture path never loads this chain; it exists solely for explicit manual 4R invocation.
+
 ## review-risk
 
 output: review-risk-report.md

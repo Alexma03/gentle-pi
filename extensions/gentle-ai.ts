@@ -226,15 +226,133 @@ function sddLocalAgentOverrideCount(cwd: string): number {
 	return count;
 }
 
-let orchestratorPromptCache: string | null = null;
-function getOrchestratorPrompt(): string {
-	if (orchestratorPromptCache === null) {
-		orchestratorPromptCache = renderOrchestratorPrompt(ASSETS_DIR);
-	}
-	return orchestratorPromptCache;
+// ---------------------------------------------------------------------------
+// Background subagents policy — project > global > env > default off
+// ---------------------------------------------------------------------------
+
+type BackgroundSubagentsPolicy = "on" | "off";
+type BackgroundSubagentsCapability = "ready" | "absent";
+
+interface BackgroundSubagentsRendering {
+	policy: BackgroundSubagentsPolicy;
+	capability: BackgroundSubagentsCapability;
 }
 
-function renderOrchestratorPrompt(assetsDir: string): string {
+interface LoadBackgroundSubagentsOptions {
+	/** Override the config home directory (used in tests to avoid touching ~/.pi). */
+	gentlePiConfigHome?: string;
+	/** Override the environment lookup (used in tests). */
+	env?: Record<string, string | undefined>;
+}
+
+const BACKGROUND_SUBAGENTS_SCHEMA = "gentle-pi.background-subagents/v1";
+const BACKGROUND_SUBAGENTS_FILE = "background-subagents.json";
+
+const DEFAULT_BACKGROUND_SUBAGENTS_RENDERING: BackgroundSubagentsRendering = {
+	policy: "off",
+	capability: "absent",
+};
+
+/**
+ * Strict decode of {"schema":"gentle-pi.background-subagents/v1","policy":"on"|"off"}.
+ * Any malformed shape (bad JSON, wrong schema, unknown keys, invalid policy)
+ * returns undefined so the caller fails closed to "off".
+ */
+function parseBackgroundSubagentsPolicyFile(
+	raw: string,
+): BackgroundSubagentsPolicy | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(parsed)) return undefined;
+	if (parsed.schema !== BACKGROUND_SUBAGENTS_SCHEMA) return undefined;
+	if (parsed.policy !== "on" && parsed.policy !== "off") return undefined;
+	if (Object.keys(parsed).length !== 2) return undefined;
+	return parsed.policy;
+}
+
+/**
+ * Load the background-subagents policy.
+ *
+ * Resolution order (first hit wins, mirroring loadRuntimeGuardrailsConfig):
+ *   1. Project file `${cwd}/.pi/gentle-ai/background-subagents.json`
+ *   2. Global file `${configHome}/background-subagents.json`
+ *      (configHome honors GENTLE_PI_CONFIG_HOME, default ~/.pi/gentle-ai)
+ *   3. Env var GENTLE_PI_BACKGROUND_SUBAGENTS ("on" | "off")
+ *   4. Default "off"
+ *
+ * A present-but-malformed file fails closed to "off" instead of falling
+ * through to a lower-priority source.
+ */
+function loadBackgroundSubagentsPolicy(
+	cwd: string,
+	options: LoadBackgroundSubagentsOptions = {},
+): BackgroundSubagentsPolicy {
+	try {
+		const env = options.env ?? process.env;
+		const configHome = options.gentlePiConfigHome ?? gentleAiConfigHome();
+		for (const path of [
+			join(cwd, ".pi", "gentle-ai", BACKGROUND_SUBAGENTS_FILE),
+			join(configHome, BACKGROUND_SUBAGENTS_FILE),
+		]) {
+			if (!existsSync(path)) continue;
+			return parseBackgroundSubagentsPolicyFile(readFileSync(path, "utf8")) ?? "off";
+		}
+		const fromEnv = env.GENTLE_PI_BACKGROUND_SUBAGENTS;
+		if (fromEnv === "on" || fromEnv === "off") return fromEnv;
+		return "off";
+	} catch {
+		return "off";
+	}
+}
+
+/**
+ * `subagent_run` availability probe. The extension has no synchronous runtime
+ * tool registry at prompt-render time, so capability is derived from the
+ * pi-subagents package presence via the builtinAgentDirs() probe.
+ */
+function resolveBackgroundSubagentsCapability(
+	cwd: string,
+): BackgroundSubagentsCapability {
+	try {
+		return builtinAgentDirs(cwd).some((dir) => existsSync(dir))
+			? "ready"
+			: "absent";
+	} catch {
+		return "absent";
+	}
+}
+
+function renderBackgroundSubagentsStatusLine(
+	background: BackgroundSubagentsRendering,
+): string {
+	return `Background subagent policy: ${background.policy} (capability: ${background.capability})`;
+}
+
+// Rendered prompts are memoized per background policy/capability key for the
+// process lifetime; the assets bytes themselves are read once per key.
+const orchestratorPromptCache = new Map<string, string>();
+function getOrchestratorPrompt(cwd: string = process.cwd()): string {
+	const background: BackgroundSubagentsRendering = {
+		policy: loadBackgroundSubagentsPolicy(cwd),
+		capability: resolveBackgroundSubagentsCapability(cwd),
+	};
+	const cacheKey = `${background.policy}:${background.capability}`;
+	let prompt = orchestratorPromptCache.get(cacheKey);
+	if (prompt === undefined) {
+		prompt = renderOrchestratorPrompt(ASSETS_DIR, background);
+		orchestratorPromptCache.set(cacheKey, prompt);
+	}
+	return prompt;
+}
+
+function renderOrchestratorPrompt(
+	assetsDir: string,
+	background: BackgroundSubagentsRendering = DEFAULT_BACKGROUND_SUBAGENTS_RENDERING,
+): string {
 	return readFileSync(join(assetsDir, "orchestrator.md"), "utf8")
 		.replaceAll(
 			"{{GENTLE_PI_SDD_WORKFLOW_PATH}}",
@@ -251,6 +369,10 @@ function renderOrchestratorPrompt(assetsDir: string): string {
 		.replaceAll(
 			"{{GENTLE_PI_SKILLS_PATH}}",
 			join(assetsDir, "orchestrator-skills.md"),
+		)
+		.replaceAll(
+			"{{GENTLE_PI_BACKGROUND_POLICY}}",
+			renderBackgroundSubagentsStatusLine(background),
 		)
 		.trim();
 }
@@ -287,7 +409,7 @@ const NEUTRAL_PERSONA_PROMPT = `Persona:
 - Push back when the user asks for code without enough context or understanding.
 - Correct errors directly, explain why, and show the better path.`;
 
-function buildGentlePrompt(persona: PersonaMode): string {
+function buildGentlePrompt(persona: PersonaMode, cwd: string = process.cwd()): string {
 	const personaPrompt =
 		persona === "neutral" ? NEUTRAL_PERSONA_PROMPT : GENTLEMAN_PERSONA_PROMPT;
 	const languageBoundary =
@@ -321,7 +443,7 @@ Harness principles:
 - Protect the human reviewer: avoid oversized changes, surface review workload risk, and ask before turning one task into a large multi-area change.
 - Never claim persistent memory is available because of this package. Memory is provided by separate packages or MCP tools when installed and callable.
 
-${getOrchestratorPrompt()}`;
+${getOrchestratorPrompt(cwd)}`;
 }
 
 // Matches `git [global-flags] push` — tolerates flags like -C /repo or --work-tree=/tmp
@@ -6206,6 +6328,10 @@ export const __testing = {
 	renderSddModelPanel: renderSddModelPanelForTesting,
 	getOrchestratorPrompt,
 	renderOrchestratorPrompt,
+	loadBackgroundSubagentsPolicy,
+	parseBackgroundSubagentsPolicyFile,
+	resolveBackgroundSubagentsCapability,
+	renderBackgroundSubagentsStatusLine,
 	resolveControllerSddStatus,
 	resolveStartupControllerSddStatus,
 	repositoryLocationIdentity,
@@ -6433,7 +6559,7 @@ function createGentleAiExtensionForTesting(
 			: "";
 		const gentlePrompt = isNamedAgent || isSddAgent
 			? ""
-			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd))}`;
+			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd), ctx.cwd)}`;
 		return {
 			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}${nativeStatusPrompt}`,
 		};

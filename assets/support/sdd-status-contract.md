@@ -13,6 +13,16 @@ Any phase that selects, continues, applies, verifies, syncs, or archives an SDD 
 - If multiple active changes match or the active change is unclear, ask the user to choose. Do not guess.
 - If no active changes exist, report that no SDD change is active and suggest starting one.
 
+## Native Engine
+
+- When the session artifact store is `openspec` or `both` (with an `openspec/` directory) and the `gentle-ai` binary is available, prefer `gentle-ai sdd-status [change] --cwd <repo> --json --instructions` for read-only status and `gentle-ai sdd-continue [change] --cwd <repo>` for dispatcher output, and treat their native status JSON as authoritative over prompt inference or manually reconstructed state.
+- For non-authoritative stores (`engram`, `none`, and `both` without an `openspec/` directory), do not treat dispatcher output as authoritative; follow Engine Authority by Store below.
+- Runtime-attempt authority is different from artifact dispatch: normal runtime-bearing OpenSpec and Engram continuations MUST bracket external execution with `gentle-ai sdd-attempt acquire|settle --cwd <repo> --change <change>`. Their bounded result contains only `proceed`, `blocked`, or `complete` plus an opaque continuation token when required, and MAY carry `settle_obligation` on a `proceed`. The Git-common-dir immutable chain remains the sole authority for ordinals, cumulative attempt/line budgets, runtime evidence, and atomic bound remediation.
+- A phase actor launched BY a parent that already holds a `proceed`-state acquire for that exact work unit is a distinct call/process, not a fresh continuation: it MUST NOT `acquire` again blind. Colliding with its own parent's active attempt is not a genuine `blocked: active_attempt` (#2291). It authenticates as that SAME attempt by passing the parent's returned token on its own `acquire --token <token>` call: a token matching the ledger's live active attempt returns `proceed` with that same token and zero mutation, while a non-matching token gets the ordinary `blocked: active_attempt` naming the real active token.
+- When `blockedReasons` is non-empty, do not proceed to terminal, archive, or apply work. Return or report `blockedReasons` and stop unless `nextRecommended` is `verify`, in which case verification may run only to remediate or refresh evidence for the blockers. When `nextRecommended` is `resolve-blockers`, always report `blockedReasons` and stop. When `nextRecommended` is a planning token (`propose`, `spec`, `design`, or `tasks`), launch the corresponding planning phase — missing planning artifacts are the expected output of those phases, not genuine blockers.
+- `nextRecommended` is a bounded machine token for routing, not human prose. Route only by `nextRecommended` and dependency states. Human-readable explanation belongs in `blockedReasons`, not `nextRecommended`.
+- If the binary is unavailable, fall back to this prompt contract and the manual status schema below. Manual fallback status MUST stay shape-compatible with the native status JSON even when values are reconstructed manually.
+
 ## Status Schema
 
 Return status as markdown with these fields, or equivalent JSON when the host supports it:
@@ -71,7 +81,7 @@ actionContext:
   workspaceRoot: <absolute path>
   allowedEditRoots: [<absolute paths>]
   warnings: []
-nextRecommended: <command-or-action>
+nextRecommended: <bounded-machine-token>
 isNonAuthoritative: false  # boolean; true when the native engine is not authoritative for the store
 ```
 

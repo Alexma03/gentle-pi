@@ -103,6 +103,7 @@ const requiredPaths = [
   "skills/gentle-ai/SKILL.md",
   "skills/issue-creation/SKILL.md",
   "skills/judgment-day/SKILL.md",
+  "skills/rdd-defect-workflow/SKILL.md",
   "skills/release/SKILL.md",
   "skills/skill-creator/SKILL.md",
   "skills/skill-improver/SKILL.md",
