@@ -21,7 +21,7 @@ const EXCLUDE_NAMES = new Set(["_shared", "skill-registry"]);
 const EXCLUDE_PREFIXES = ["sdd-"];
 const ATL_IGNORE_ENTRY = ".atl/";
 const WATCH_DEBOUNCE_MS = 500;
-const REGISTRY_SCHEMA_VERSION = 6;
+const REGISTRY_SCHEMA_VERSION = 7;
 const NO_SKILL_REGISTRY_FLAG = "no-skill-registry";
 const NO_SKILL_REGISTRY_ENV = "GENTLE_PI_NO_SKILL_REGISTRY";
 const LEGACY_PROJECT_REGISTRY_REL_PATH = ".pi/extensions/skill-registry.ts";
@@ -253,7 +253,14 @@ async function fingerprint(files: string[]): Promise<string> {
 	for (const file of files) {
 		try {
 			const info = await stat(file);
-			lines.push(`${file}:${info.mtimeMs}:${info.size}`);
+			let contentHash: string;
+			try {
+				contentHash = createHash("sha1").update(await readFile(file)).digest("hex");
+			} catch {
+				lines.push(`${file}:unreadable`);
+				continue;
+			}
+			lines.push(`${file}:${info.mtimeMs}:${info.size}:${contentHash}`);
 		} catch {
 			lines.push(`${file}:missing`);
 		}
@@ -526,6 +533,7 @@ export const __testing = {
 	normalizeSkillDescription,
 	parseFrontmatter,
 	renderRegistry,
+	regenerateRegistry,
 	shouldSkipSkillRegistryStartup,
 	shouldSkipDuplicateExtensionLoad,
 	startSkillRegistryWatcher,

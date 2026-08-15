@@ -12,6 +12,17 @@ const requiredPaths = [
   "assets/orchestrator-delegation.md",
   "assets/orchestrator-memory.md",
   "assets/orchestrator-skills.md",
+  "assets/sdd-orchestrator-workflow.md",
+  "assets/agents/gentle-ai-explore.md",
+  "assets/agents/gentle-ai-verify.md",
+  "assets/agents/gentle-ai-worker.md",
+  "assets/agents/jd-fix-agent.md",
+  "assets/agents/jd-judge-a.md",
+  "assets/agents/jd-judge-b.md",
+  "assets/agents/review-readability.md",
+  "assets/agents/review-reliability.md",
+  "assets/agents/review-resilience.md",
+  "assets/agents/review-risk.md",
   "assets/agents/sdd-apply.md",
   "assets/agents/sdd-archive.md",
   "assets/agents/sdd-design.md",
@@ -24,8 +35,7 @@ const requiredPaths = [
   "assets/agents/sdd-sync.md",
   "assets/agents/sdd-tasks.md",
   "assets/agents/sdd-verify.md",
-  "assets/agents/review-refuter.md",
-  "assets/agents/review-validator.md",
+  "assets/chains/4r-review.chain.md",
   "assets/chains/sdd-full.chain.md",
   "assets/chains/sdd-plan.chain.md",
   "assets/chains/sdd-verify.chain.md",
@@ -35,6 +45,7 @@ const requiredPaths = [
   "assets/support/sdd-status-contract.md",
   "assets/support/strict-tdd.md",
   "assets/support/strict-tdd-verify.md",
+  "docs/native-authority-architecture.md",
   "docs/skill-style-guide.md",
   "docs/review-integration.md",
   "extensions/gentle-ai.ts",
@@ -43,22 +54,46 @@ const requiredPaths = [
   "lib/gentle-ai-binary.ts",
   "lib/git-commit-transaction.ts",
   "lib/native-review-cli.ts",
+  "lib/provider-contract-bundle.ts",
+  "lib/review-host-relay.ts",
   "lib/review-integration-v2.ts",
+  "lib/review-relay-contract.ts",
   "lib/sdd-preflight.ts",
 	"runtime/gentle-ai-binary.mjs",
 	"runtime/git-commit-transaction.mjs",
 	"runtime/native-review-cli.mjs",
 	"runtime/review-integration-v2.mjs",
+	"runtime/review-relay-contract.mjs",
 	"scripts/build-git-commit-transaction-runner.mjs",
+  "scripts/check-provider-contract.mjs",
   "scripts/gentle-ai-installer.mjs",
   "scripts/install-gentle-ai.mjs",
+  "scripts/mirror-provider-contract.mjs",
   "scripts/run-git-commit-transaction.mjs",
 	"scripts/test-packed-runner.mjs",
   "tests/fixtures/native-review-cli/v2.1.3/start.json",
-  "prompts/gcl.md",
-  "prompts/gis.md",
-  "prompts/gpr.md",
-  "prompts/gwr.md",
+  "tests/fixtures/provider-contract-bundle/v1.1.0/README.md",
+  "tests/fixtures/provider-contract-bundle/v1.1.0/manifest.json",
+  "tests/fixtures/provider-contract-bundle/v1.1.0/schemas/lens.schema.json",
+  "tests/fixtures/provider-contract-bundle/v1.1.0/schemas/refuter.schema.json",
+  "tests/fixtures/provider-contract-bundle/v1.1.0/schemas/targeted-validator.schema.json",
+  "tests/fixtures/provider-contract-bundle/v1.1.0/vectors/lens.json",
+  "tests/fixtures/provider-contract-bundle/v1.1.0/vectors/refuter.json",
+  "tests/fixtures/provider-contract-bundle/v1.1.0/vectors/targeted-validator.json",
+  // Provider contract mirror (gentle-pi#311 P1/P2). Presence is enforced here;
+  // exact bytes are pinned by the lock-driven scripts/check-provider-contract.mjs
+  // drift check, which runs in the same pnpm test flow.
+  "contracts/review-provider-contract-mirror/provider-contract.lock.json",
+  "contracts/review-provider-contract-mirror/v1.1.0/bundle/README.md",
+  "contracts/review-provider-contract-mirror/v1.1.0/bundle/manifest.json",
+  "contracts/review-provider-contract-mirror/v1.1.0/bundle/schemas/lens.schema.json",
+  "contracts/review-provider-contract-mirror/v1.1.0/bundle/schemas/refuter.schema.json",
+  "contracts/review-provider-contract-mirror/v1.1.0/bundle/schemas/targeted-validator.schema.json",
+  "contracts/review-provider-contract-mirror/v1.1.0/bundle/vectors/lens.json",
+  "contracts/review-provider-contract-mirror/v1.1.0/bundle/vectors/refuter.json",
+  "contracts/review-provider-contract-mirror/v1.1.0/bundle/vectors/targeted-validator.json",
+  "contracts/review-provider-contract-mirror/v1.1.0/generated/provider-capabilities.baseline.json",
+  "contracts/review-provider-contract-mirror/v1.1.0/generated/provider-roles.baseline.json",
   "prompts/skill-creation.md",
   "skills/_shared/review-ledger-contract.md",
   "skills/branch-pr/SKILL.md",
@@ -68,6 +103,7 @@ const requiredPaths = [
   "skills/gentle-ai/SKILL.md",
   "skills/issue-creation/SKILL.md",
   "skills/judgment-day/SKILL.md",
+  "skills/rdd-defect-workflow/SKILL.md",
   "skills/release/SKILL.md",
   "skills/skill-creator/SKILL.md",
   "skills/skill-improver/SKILL.md",
@@ -157,12 +193,19 @@ function listFilesRecursively(directory) {
 // byte-pinned contract artifact but lives outside this walk root). Reports
 // the two drift directions separately so a new unlisted file and a stale
 // hash-map entry are both visible.
+//
+// `contracts/review-provider-contract-mirror/**` is deliberately excluded:
+// that subtree has exactly one byte authority — the mirror's own lock record,
+// enforced by scripts/check-provider-contract.mjs in the same pnpm test flow —
+// so listing it here would create a second, drift-prone pin for the same bytes.
+const PROVIDER_CONTRACT_MIRROR_PREFIX = "contracts/review-provider-contract-mirror/";
+
 export function reconcileContractsOnDisk(packageRoot, hashes) {
   const contractsRoot = join(packageRoot, "contracts");
   const walked = existsSync(contractsRoot)
-    ? listFilesRecursively(contractsRoot).map((absolutePath) =>
-        relative(packageRoot, absolutePath).split(sep).join("/"),
-      )
+    ? listFilesRecursively(contractsRoot)
+        .map((absolutePath) => relative(packageRoot, absolutePath).split(sep).join("/"))
+        .filter((relativePath) => !relativePath.startsWith(PROVIDER_CONTRACT_MIRROR_PREFIX))
     : [];
   const listed = Object.keys(hashes).filter((relativePath) => relativePath.startsWith("contracts/"));
   const walkedSet = new Set(walked);

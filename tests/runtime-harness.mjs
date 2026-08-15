@@ -625,6 +625,76 @@ async function run() {
 		await rm(join(globalConfigHome, "banner.json"), { force: true });
 	}
 
+	// issue-301: cancelling the color picker must be a no-op — no write,
+	// no notify, and the previously saved color must survive byte/semantically
+	// unchanged. Covers both entry points: /gentle:banner-color picker
+	// (cancelled), and /gentle:banner -> Color row -> nested picker (cancelled).
+	// Also covers an invalid non-empty argument, which must still open the
+	// picker and treat its cancellation as a no-op.
+	const cancelPickerCwd = await tempWorkspace();
+	try {
+		const bannerConfigPath = join(globalConfigHome, "banner.json");
+		const seeded = {
+			showRose: false,
+			showTextLogo: false,
+			color: "green",
+		};
+		const seededJson = `${JSON.stringify(seeded, null, 2)}\n`;
+		await writeFile(bannerConfigPath, seededJson, "utf8");
+
+		const cancelCtx = createCtx(cancelPickerCwd, true);
+
+		// (a) /gentle:banner-color picker cancelled: seeded color unchanged, no notify.
+		cancelCtx.ui.notifications.length = 0;
+		cancelCtx.ui.selections.length = 0;
+		cancelCtx.ui.select = async (label, options) => {
+			cancelCtx.ui.selections.push({ label, options });
+			return undefined;
+		};
+		await commands.get("gentle:banner-color").handler("", cancelCtx);
+		let afterCancel = await readFile(bannerConfigPath, "utf8");
+		assert.equal(afterCancel, seededJson, "banner-color cancel must not rewrite banner.json");
+		assert.equal(cancelCtx.ui.selections.length, 1, "banner-color cancel must open the picker once");
+		assert.equal(cancelCtx.ui.notifications.length, 0, "banner-color cancel must not notify");
+
+		// (d) invalid non-empty /gentle:banner-color input still opens picker;
+		//     cancelling it is a no-op.
+		cancelCtx.ui.notifications.length = 0;
+		cancelCtx.ui.selections.length = 0;
+		await commands.get("gentle:banner-color").handler("purple", cancelCtx);
+		afterCancel = await readFile(bannerConfigPath, "utf8");
+		assert.equal(afterCancel, seededJson, "banner-color invalid+cancel must not rewrite banner.json");
+		assert.equal(cancelCtx.ui.selections.length, 1, "invalid banner-color arg must still open the picker");
+		assert.equal(cancelCtx.ui.notifications.length, 0, "banner-color invalid+cancel must not notify");
+
+		// (b) /gentle:banner selects the Color row, then the nested picker is
+		//     cancelled: seeded color unchanged, no notify. The outer select
+		//     returns the Color row; the nested select returns undefined.
+		cancelCtx.ui.notifications.length = 0;
+		cancelCtx.ui.selections.length = 0;
+		let selectCall = 0;
+		cancelCtx.ui.select = async (label, options) => {
+			cancelCtx.ui.selections.push({ label, options });
+			selectCall += 1;
+			// First call: outer "Startup banner" menu -> pick the Color row.
+			// Second call: nested color picker -> cancel (undefined).
+			return selectCall === 1 ? options[options.length - 1] : undefined;
+		};
+		await commands.get("gentle:banner").handler("", cancelCtx);
+		afterCancel = await readFile(bannerConfigPath, "utf8");
+		assert.equal(afterCancel, seededJson, "banner Color-row cancel must not rewrite banner.json");
+		assert.equal(cancelCtx.ui.selections.length, 2, "banner Color-row flow must open outer then nested picker");
+		assert.equal(cancelCtx.ui.notifications.length, 0, "banner Color-row cancel must not notify");
+
+		// Sanity: the seeded config round-trips through normalization unchanged,
+		// proving the byte equality above is semantic, not a test artifact.
+		const reparsed = JSON.parse(await readFile(bannerConfigPath, "utf8"));
+		assert.deepEqual(reparsed, seeded, "seeded non-default color must round-trip semantically");
+	} finally {
+		await rm(cancelPickerCwd, { recursive: true, force: true });
+		await rm(join(globalConfigHome, "banner.json"), { force: true });
+	}
+
 	const noUiCwd = await tempWorkspace();
 	try {
 		for (const handler of hooks.get("session_start")) {
@@ -641,22 +711,22 @@ async function run() {
 			"session_start must not install project-local SDD chains",
 		);
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
+		// gentle-pi#311 P5: the Pi-authored adversarial role agents are retired;
+		// installation must not (re)create them.
 		const installedRefuterPath = join(globalAgentHome, "agents", "review-refuter.md");
-		assert.equal(existsSync(installedRefuterPath), true);
+		assert.equal(existsSync(installedRefuterPath), false, "the retired review-refuter agent must not be installed");
+		assert.equal(
+			existsSync(join(globalAgentHome, "agents", "review-validator.md")),
+			false,
+			"the retired review-validator agent must not be installed",
+		);
+		const installedExplorePath = join(globalAgentHome, "agents", "gentle-ai-explore.md");
+		assert.equal(existsSync(installedExplorePath), true);
 		assert.deepEqual(
-			readAgentDefinition(await readFile(installedRefuterPath, "utf8")),
-			{ name: "review-refuter", tools: ["read", "grep", "find"] },
-			"isolated package installation must activate only the refuter inspection tools",
+			readAgentDefinition(await readFile(installedExplorePath, "utf8")),
+			{ name: "gentle-ai-explore", tools: ["read", "grep", "find", "codegraph"] },
+			"isolated package installation must activate only the explorer inspection tools",
 		);
-		const installedRefuterSource = await readFile(installedRefuterPath, "utf8");
-		assert.match(
-			installedRefuterSource,
-			/^tools:\n {2}- "\*": false$/m,
-			"installed refuter must lead its tool map with the deny-all rule",
-		);
-		assert.match(installedRefuterSource, /complete inferential-severe frozen-row list once/);
-		assert.match(installedRefuterSource, /refuted \| corroborated \| inconclusive/);
-		assert.doesNotMatch(installedRefuterSource, /general, correctness, impact\/exploitability, or reproducibility/);
 		const installedRiskSource = await readFile(
 			join(globalAgentHome, "agents", "review-risk.md"),
 			"utf8",
@@ -686,6 +756,13 @@ async function run() {
 		].join("\n");
 		await writeFile(installedRefuterPath, samePathUserRefuter);
 		delete managedAssetsManifest.assets["agents/review-refuter.md"];
+		// Retirement sweep: a hash-proven package-managed copy of a retired
+		// asset is deleted on refresh; the user-authored same-path refuter
+		// above must survive because its hash proves nothing.
+		const retiredManagedValidatorPath = join(globalAgentHome, "agents", "review-validator.md");
+		const retiredManagedValidator = "stale managed validator\n";
+		await writeFile(retiredManagedValidatorPath, retiredManagedValidator);
+		managedAssetsManifest.assets["agents/review-validator.md"] = sha256(retiredManagedValidator);
 		await mkdir(join(globalAgentHome, "subagents"), { recursive: true });
 		const userRefuterOverride = join(globalAgentHome, "subagents", "review-refuter.md");
 		await writeFile(userRefuterOverride, "user refuter override must stay\n");
@@ -738,6 +815,24 @@ async function run() {
 			await readFile(userRefuterOverride, "utf8"),
 			"user refuter override must stay\n",
 			"package refresh must not rewrite or certify an explicit user refuter",
+		);
+		assert.equal(
+			existsSync(retiredManagedValidatorPath),
+			false,
+			"session refresh must delete a hash-proven package-managed copy of a retired asset",
+		);
+		const refreshedManagedAssets = JSON.parse(
+			await readFile(managedAssetsManifestPath, "utf8"),
+		);
+		assert.equal(
+			refreshedManagedAssets.assets["agents/review-validator.md"],
+			undefined,
+			"a retired asset must lose package-managed ownership",
+		);
+		assert.equal(
+			refreshedManagedAssets.assets["agents/review-refuter.md"],
+			undefined,
+			"a user-authored same-path retired asset must stay unowned",
 		);
 	} finally {
 		await rm(noUiCwd, { recursive: true, force: true });
@@ -1737,6 +1832,44 @@ async function run() {
 		const restoredAgent = await readFile(join(modelsCwd, ".pi", "agents", "sdd-apply.md"), "utf8");
 		assert.match(restoredAgent, /model: restore\/provider/);
 		assert.match(restoredAgent, /thinking: high/);
+
+		// issue #286: `thinking: "max"` must survive save normalization and
+		// reach both subagents.json (effort) and agent frontmatter (thinking).
+		ctx.ui.custom = () =>
+			Promise.resolve({
+				type: "save",
+				config: { "sdd-apply": { model: "openai/gpt-5", thinking: "max" } },
+			});
+		await commands.get("gentle:models").handler("", ctx);
+		const maxSavedConfig = JSON.parse(await readFile(globalModelsPath, "utf8"));
+		assert.equal(maxSavedConfig["sdd-apply"].thinking, "max");
+		const maxSubagents = JSON.parse(
+			await readFile(join(modelsCwd, ".pi", "subagents.json"), "utf8"),
+		);
+		assert.equal(maxSubagents.model_profiles["sdd-apply"].effort, "max");
+		const maxApplyAgent = await readFile(
+			join(modelsCwd, ".pi", "agents", "sdd-apply.md"),
+			"utf8",
+		);
+		assert.match(maxApplyAgent, /thinking: max/);
+
+		// issue #286: effort picker must offer `max` after `xhigh` and save it.
+		let maxPickerCalls = 0;
+		ctx.ui.custom = (factory) =>
+			new Promise((resolve) => {
+				maxPickerCalls += 1;
+				const panel = factory(null, null, null, resolve);
+				if (maxPickerCalls === 1) {
+					panel.handleInput(kittyE); // open effort picker (set-all row)
+					for (let i = 0; i < 7; i++) panel.handleInput("j"); // max
+					panel.handleInput("\r");
+					panel.handleInput("\u0013"); // ctrl+s saves the draft
+					return;
+				}
+			});
+		await commands.get("gentle:models").handler("", ctx);
+		const pickerMaxConfig = JSON.parse(await readFile(globalModelsPath, "utf8"));
+		assert.equal(pickerMaxConfig["sdd-apply"].thinking, "max");
 	} finally {
 		await rm(modelsCwd, { recursive: true, force: true });
 		await rm(globalModelsPath, { force: true });

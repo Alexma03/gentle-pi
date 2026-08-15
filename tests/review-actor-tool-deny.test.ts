@@ -12,13 +12,15 @@ const ROOT = join(import.meta.dirname, "..");
 const ASSETS_AGENTS_DIR = join(ROOT, "assets", "agents");
 const DENY_ALL_RULE = '"*": false';
 
+// gentle-pi#311 P5: review-refuter.md and review-validator.md are retired —
+// the adversarial roles execute through Go-owned pi processes via
+// provider-rendered self-contained vectors, so no Pi agent definition exists
+// for them to deny tools on.
 const READ_ONLY_REVIEW_ACTORS = [
 	"review-risk.md",
 	"review-reliability.md",
 	"review-resilience.md",
 	"review-readability.md",
-	"review-refuter.md",
-	"review-validator.md",
 	"jd-judge-a.md",
 	"jd-judge-b.md",
 ] as const;
@@ -88,12 +90,15 @@ test("every read-only review actor leads its tool map with the deny-all rule", (
 });
 
 test("a tool absent from the allowlist resolves to denied under the deny-all rule", () => {
+	// Mirrors the tool names a real Pi child session can resolve. `glob` is
+	// deliberately absent: it is not a Pi builtin, so a lens that declares it
+	// silently loses filesystem discovery instead of failing loudly. Keeping
+	// the fiction here is what let that ship green.
 	const registry = [
 		"read",
 		"grep",
-		"glob",
-		"gentle_review_scope",
 		"find",
+		"gentle_review_scope",
 		"edit",
 		"write",
 		"bash",
@@ -102,13 +107,6 @@ test("a tool absent from the allowlist resolves to denied under the deny-all rul
 		"mcp__slack__slack_send_message",
 		"subagent_run",
 	] as const;
-
-	const refuterEntries = readToolEntries(join(ASSETS_AGENTS_DIR, "review-refuter.md"));
-	const refuterActive = resolveActiveTools(refuterEntries, registry);
-	assert.deepEqual(refuterActive, ["read", "grep", "find"]);
-	for (const omitted of ["edit", "write", "bash", "mem_save", "codegraph_explore", "mcp__slack__slack_send_message", "subagent_run"]) {
-		assert.ok(!refuterActive.includes(omitted), `review-refuter must deny omitted tool ${omitted}`);
-	}
 
 	// The four lenses deny bash and add only the bounded scope reader required
 	// to consume controller-owned compact manifests. Contract v2 is explicit: a
@@ -125,7 +123,7 @@ test("a tool absent from the allowlist resolves to denied under the deny-all rul
 	// the other half of the same rule, not an exception to it.
 	for (const lens of ["review-risk", "review-resilience", "review-readability", "review-reliability"]) {
 		const lensActive = resolveActiveTools(readToolEntries(join(ASSETS_AGENTS_DIR, `${lens}.md`)), registry);
-		assert.deepEqual(lensActive, ["read", "grep", "glob", "gentle_review_scope"], `${lens} must expose only candidate readers and the bounded scope reader`);
+		assert.deepEqual(lensActive, ["read", "grep", "find", "gentle_review_scope"], `${lens} must expose only candidate readers and the bounded scope reader`);
 		for (const omitted of ["bash", "edit", "write", "mem_save", "codegraph_explore", "mcp__slack__slack_send_message", "subagent_run"]) {
 			assert.ok(!lensActive.includes(omitted), `${lens} must deny ${omitted}`);
 		}
