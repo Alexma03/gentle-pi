@@ -435,6 +435,33 @@ test("packaged agents use YAML list syntax for tool allowlists", () => {
 	}
 });
 
+// The Pi child-session tool registry exposes `find` for filesystem discovery
+// and has no `glob` or `webfetch` builtin (see tests/runtime-harness.mjs and
+// the working builtin `reviewer` canary in issue #62). A packaged agent that
+// declares a name the runtime cannot resolve does not fail loudly: the SDK
+// silently drops it and the child starts with a reduced allowlist, so the
+// agent reports itself blocked instead of naming the missing tool.
+const UNSUPPORTED_CHILD_SESSION_TOOLS = ["glob", "webfetch"];
+
+test("packaged agents declare only tool names a Pi child session can resolve", () => {
+	const agentsDir = join(PACKAGE_ROOT, "assets", "agents");
+	const agentFiles = readdirSync(agentsDir).flatMap((entry) =>
+		entry.endsWith(".md") ? [join(agentsDir, entry)] : [],
+	);
+
+	assert.ok(agentFiles.length > 0, "gentle-pi must ship packaged agents");
+
+	for (const file of agentFiles) {
+		const { tools } = readAgentDefinition(file);
+		for (const unsupported of UNSUPPORTED_CHILD_SESSION_TOOLS) {
+			assert.ok(
+				!tools.includes(unsupported),
+				`${file} declares ${unsupported}, which no Pi child session exposes; use find for discovery`,
+			);
+		}
+	}
+});
+
 test("the retired Pi adversarial role agents are not packaged", () => {
 	// gentle-pi#311 P5: the refuter and targeted validator verdicts execute
 	// through Go-owned pi processes via provider-rendered self-contained
