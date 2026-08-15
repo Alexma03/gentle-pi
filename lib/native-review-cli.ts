@@ -5,7 +5,7 @@ import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, posix, win32 } from "node:path";
 import { promisify } from "node:util";
-import { GENTLE_AI_VERSION, PackageLocalGentleAiBinaryMissingError, resolveGentleAiBinary } from "./gentle-ai-binary.ts";
+import { GENTLE_AI_VERSION, PackageLocalGentleAiBinaryMissingError, gentleAiDevBinaryOverrideConfigured, resolveGentleAiBinary } from "./gentle-ai-binary.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "./review-relay-contract.ts";
 import {
 	REVIEW_INTEGRATION_CONTRACT,
@@ -226,6 +226,22 @@ export const REVIEW_CONSENT_NOTICES = Object.freeze([
 function stderrIsTolerated(stderr: string, tolerated: readonly string[]): boolean {
 	const lines = stderr.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
 	return lines.length > 0 && lines.every((line) => tolerated.includes(line));
+}
+
+// gentle-ai main narrates the negotiated STATUS forecast head to a human on
+// stderr while keeping the machine envelope on stdout (reviewNarrateForecast
+// in internal/cli/review_narration.go, ground-truthed live against a main-line
+// dev build). The pinned release does not emit it, so this narration is
+// tolerated only for negotiated STATUS while the dev-binary override is
+// configured; any other stderr keeps failing closed.
+const FORECAST_NARRATION_LINES = Object.freeze([
+	/^Forecast horizon: (?:partial|terminal)$/,
+	/^step [0-9]+: (?:execute|collect|stop); reason_code=[a-z0-9_]+; description=.+$/,
+	/^Re-query STATUS after completing this partial head\.$/,
+]);
+function stderrIsForecastNarration(stderr: string): boolean {
+	const lines = stderr.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+	return lines.length > 0 && lines.every((line) => FORECAST_NARRATION_LINES.some((pattern) => pattern.test(line)));
 }
 
 export const NATIVE_REVIEW_RECOVER_DISPOSITION = ["scope_changed", "invalidated", "escalated"] as const;
@@ -748,6 +764,21 @@ export function setNativeCliContractForTesting(version: string, contract: Record
 }
 function resolvedNativeCliContract(version: string): Record<NativeCliCapability, boolean> | undefined {
 	return nativeCliContractsTestingOverlay.get(version) ?? (NATIVE_CLI_CONTRACTS as Record<string, Record<NativeCliCapability, boolean> | undefined>)[version];
+}
+
+// The latest known contract row, used as the capability floor for the
+// explicit dev-binary override (unpinned field-test mode): a maintainer
+// dev build is at least as capable as the newest release Pi knows. The table
+// is declared in ascending release order, so its last key is the latest.
+const LATEST_NATIVE_CLI_CONTRACT_VERSION = Object.keys(NATIVE_CLI_CONTRACTS).at(-1) as keyof typeof NATIVE_CLI_CONTRACTS;
+
+// Dev-binary override version discipline: with the override configured, a
+// version reported outside the pinned table resolves to the latest known row;
+// with the override absent, behavior is byte-identical to the pinned gate.
+function effectiveNativeCliContract(version: string): Record<NativeCliCapability, boolean> | undefined {
+	const pinned = resolvedNativeCliContract(version);
+	if (pinned !== undefined) return pinned;
+	return gentleAiDevBinaryOverrideConfigured() ? NATIVE_CLI_CONTRACTS[LATEST_NATIVE_CLI_CONTRACT_VERSION] : undefined;
 }
 
 export interface NativeReviewStructuredDenial {
@@ -1330,8 +1361,14 @@ export class NativeReviewCliV214 {
 		if (result.timedOut) throw nativeError(NATIVE_REVIEW_ERROR_CODE.TIMEOUT, NATIVE_REVIEW_OPERATION.VERSION, false, "version process timed out", result);
 		if (result.signal) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SIGNAL, NATIVE_REVIEW_OPERATION.VERSION, false, "version process was signalled", result);
 		if (result.exitCode !== 0) throw nativeError(NATIVE_REVIEW_ERROR_CODE.NON_ZERO, NATIVE_REVIEW_OPERATION.VERSION, false, "version process failed", result);
-		const version = /^gentle-ai ([0-9]+\.[0-9]+\.[0-9]+)\n$/.exec(result.stdout.replace(/\r\n$/, "\n"))?.[1];
-		const contract = version === undefined ? undefined : resolvedNativeCliContract(version);
+		const normalized = result.stdout.replace(/\r\n$/, "\n");
+		const pinnedVersion = /^gentle-ai ([0-9]+\.[0-9]+\.[0-9]+)\n$/.exec(normalized)?.[1];
+		// Dev-binary override (unpinned field-test mode): accept the binary's
+		// reported version even when it is not a pinned three-part release
+		// version (a main-line dev build reports e.g. "2.4.0-rc.8+fix...").
+		// The banner shape itself stays strict. Pinned mode is byte-identical.
+		const version = pinnedVersion ?? (gentleAiDevBinaryOverrideConfigured() ? /^gentle-ai (\S+)\n$/.exec(normalized)?.[1] : undefined);
+		const contract = version === undefined ? undefined : effectiveNativeCliContract(version);
 		if (result.stderr.trim().length > 0 || contract === undefined || capabilities.some((capability) => !contract[capability])) throw nativeError(NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VERSION, false, `native gentle-ai lacks required capabilities: expected v${GENTLE_AI_VERSION}, found v${version ?? "unparseable"}`);
 		return version as keyof typeof NATIVE_CLI_CONTRACTS;
 	}
@@ -1342,7 +1379,7 @@ export class NativeReviewCliV214 {
 		if (request.baseRef !== undefined && request.committedOnly !== true) throw new TypeError("Native START baseRef requires explicit committedOnly acknowledgement");
 		if (request.baseRef === undefined && request.committedOnly !== undefined) throw new TypeError("Native START committedOnly requires an explicit baseRef");
 		const version = await this.verifyVersion(request.cwd, request.signal, ["start"]);
-		const toleratedStderr = resolvedNativeCliContract(version)?.mode === true ? REVIEW_CONSENT_NOTICES : [];
+		const toleratedStderr = effectiveNativeCliContract(version)?.mode === true ? REVIEW_CONSENT_NOTICES : [];
 		const { body: result } = await this.execute(NATIVE_REVIEW_OPERATION.START, request.cwd, ["review", "start", "--cwd", request.cwd, ...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef, "--committed-only"]), ...(request.lineageId ? ["--lineage", request.lineageId] : []), ...(request.policyPath ? ["--policy", request.policyPath] : []), ...(request.focus ? ["--focus", request.focus] : [])], true, request.signal, toleratedStderr);
 		return decode(NATIVE_REVIEW_OPERATION.START, true, () => {
 			// `target_identity` and `lens_bindings` are real, unconditionally-present
@@ -2060,7 +2097,8 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 				throw nativeError(NATIVE_REVIEW_ERROR_CODE.NON_ZERO, operation, mutating, "native negotiated operation failed without a valid failure envelope", result);
 			}
 		}
-		if (result.stderr.trim().length > 0 && !stderrIsTolerated(result.stderr, toleratedStderr)) throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNEXPECTED_STDERR, operation, mutating, "native process wrote stderr", result);
+		const forecastNarrationTolerated = operation === NATIVE_REVIEW_OPERATION.STATUS && gentleAiDevBinaryOverrideConfigured() && stderrIsForecastNarration(result.stderr);
+		if (result.stderr.trim().length > 0 && !stderrIsTolerated(result.stderr, toleratedStderr) && !forecastNarrationTolerated) throw nativeError(NATIVE_REVIEW_ERROR_CODE.UNEXPECTED_STDERR, operation, mutating, "native process wrote stderr", result);
 		return { body, exitCode: result.exitCode };
 	}
 
@@ -2089,7 +2127,12 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 				if (error instanceof NativeReviewCliError) throw error;
 				throw nativeError(NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VERSION, false, `expected gentle-ai v${GENTLE_AI_VERSION}; the installed runtime is incompatible — reinstall gentle-pi`);
 			}
-			if (capabilities.packageVersion !== GENTLE_AI_VERSION) {
+			// Dev-binary override (unpinned field-test mode): the session accepts
+			// the binary's self-reported package version instead of the exact pin.
+			// The full capabilities decode above still applies unchanged, so an
+			// incompatible envelope is refused either way. Pinned mode keeps the
+			// exact equality byte-identical.
+			if (capabilities.packageVersion !== GENTLE_AI_VERSION && !gentleAiDevBinaryOverrideConfigured()) {
 				throw nativeError(NATIVE_REVIEW_ERROR_CODE.VERSION_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VERSION, false, `expected gentle-ai v${GENTLE_AI_VERSION}, provider reported v${capabilities.packageVersion}`);
 			}
 			return capabilities;
