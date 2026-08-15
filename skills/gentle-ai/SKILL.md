@@ -129,4 +129,4 @@ SDD completion adds no review or Judgment Day pass.
 
 Review operations, validation, and SDD perform no push, PR creation, release, or publication. Only the separate durable commit runner may create one local commit after exact native authorization and HEAD proof.
 
-The package ensures SDD agents and chains are available as global Pi runtime assets. Its isolated package-managed `review-refuter` uses exactly `read`, `grep`, and `find`. Project/user agent definitions are overrides and may shadow package assets; never rewrite or claim their effective permissions. Use `/gentle:install-sdd --force` only for recovery or intentional global refresh.
+The package ensures SDD agents and chains are available as global Pi runtime assets. Adversarial review roles (refuter, targeted validator) are never Pi-authored: the provider renders self-contained capture vectors and Go runs its own locked-down `pi` process on them. Project/user agent definitions are overrides and may shadow package assets; never rewrite or claim their effective permissions. Use `/gentle:install-sdd --force` only for recovery or intentional global refresh.

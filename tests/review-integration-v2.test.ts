@@ -590,3 +590,73 @@ test("next_transition.execute.binding stays open, as its schema declares no prop
 
 	assert.doesNotThrow(() => decodeReviewNextTransitionV3(withContext));
 });
+
+// gentle-pi#311 P4-roles: the two Go-owned non-lens provider role capture
+// operations render SELF-CONTAINED vectors (binding tokens + --agent=pi
+// --execute=true). Their schemas are pinned, capture-validation carries the
+// frozen validation request, and a submission descriptor on either one is a
+// contract violation (it would hand the caller a way to author the verdict).
+test("next_transition decodes the self-contained provider role capture vectors strictly", () => {
+	const tree = "b".repeat(40);
+	const validationRequest = {
+		schema: "gentle-ai.review-targeted-validation-request/v1",
+		request_hash: digest,
+		lineage_id: "review-fixture",
+		expected_revision: digest,
+		target_identity: digest,
+		fix_finding_ids: ["RISK-001"],
+		projection: "workspace",
+		correction_candidate_tree: tree,
+		correction_target_identity: digest,
+		correction_paths: ["lib/a.ts"],
+		correction_paths_digest: digest,
+	};
+	const roleInput = (name: string, captureOperation: string, schema: string, extra: Record<string, unknown> = {}) => ({
+		kind: "collect",
+		reason_code: "provider_refuter_required",
+		collect: { inputs: [{
+			name,
+			schema,
+			capture_operation: captureOperation,
+			arguments: [
+				{ name: "lineage", value: "review-fixture", token: "--lineage=review-fixture" },
+				{ name: "expected-revision", value: digest, token: `--expected-revision=${digest}` },
+				{ name: "target", value: digest, token: `--target=${digest}` },
+				{ name: "repository-context", value: `rctx1_${"c".repeat(64)}`, token: `--repository-context=rctx1_${"c".repeat(64)}` },
+				{ name: "agent", value: "pi", token: "--agent=pi" },
+				{ name: "execute", value: "true", token: "--execute=true" },
+			],
+			...extra,
+		}] },
+	});
+
+	const refuter = roleInput("provider_refuter", "review.capture-refuter", "https://gentle-ai.dev/schema/review/refuter/v1");
+	const decodedRefuter = decodeReviewNextTransitionV3(refuter);
+	assert.equal(decodedRefuter.collect?.inputs[0]?.captureOperation, "review.capture-refuter");
+	assert.equal(decodedRefuter.collect?.inputs[0]?.arguments.at(-1)?.token, "--execute=true");
+
+	assert.throws(
+		() => decodeReviewNextTransitionV3(roleInput("provider_refuter", "review.capture-refuter", "https://gentle-ai.dev/schema/review/reviewer/v1")),
+		/schema must be https:\/\/gentle-ai\.dev\/schema\/review\/refuter\/v1/,
+	);
+	assert.throws(
+		() => decodeReviewNextTransitionV3(roleInput("provider_refuter", "review.capture-refuter", "https://gentle-ai.dev/schema/review/refuter/v1", {
+			submission: { operation_token: "capture-refuter", argument_tokens: ["--input={{value}}"], values: [{ slot: "{{value}}", domain: "artifact-path", substitution_location: 0 }] },
+		})),
+		/submission is not allowed on the self-contained/,
+	);
+
+	const validator = roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: validationRequest });
+	const decodedValidator = decodeReviewNextTransitionV3(validator);
+	assert.equal(decodedValidator.collect?.inputs[0]?.captureOperation, "review.capture-validation");
+	assert.equal(decodedValidator.collect?.inputs[0]?.validationRequest?.requestHash, digest);
+
+	assert.throws(
+		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1")),
+		/validation_request is required/,
+	);
+	assert.throws(
+		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/refuter/v1", { validation_request: validationRequest })),
+		/schema must be https:\/\/gentle-ai\.dev\/schema\/review\/validator\/v1/,
+	);
+});

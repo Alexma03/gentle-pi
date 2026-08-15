@@ -1,18 +1,16 @@
-import {
-	CAUSAL_DISPOSITION,
-	COMPACT_EVIDENCE_CLASS,
-	COMPACT_FINDING_OUTCOME,
-	COMPACT_SEVERITY,
-	type CompactRefuterResultInput,
-	type CompactFinding,
-	type CompactLensResultInput,
-	type CompactValidationProofInput,
-	type CompactReviewResultInput,
-	type CompactTargetedValidationInput,
-} from "./review-compact.ts";
-import { REVIEW_LENS } from "./review-triggers.ts";
-import { domainHashV1 } from "./review-canonical.ts";
-import { normalizeRefuterBatch, type RefuterBatch } from "./review-refuter-adapter.ts";
+// The reduced Pi FINALIZE input contract (gentle-pi#311 P5).
+//
+// Pi no longer authors or transports reviewer, refuter, or validator
+// verdicts: lens results are admitted natively through the pi host relay,
+// the adversarial roles execute through Go-owned pi processes via
+// provider-rendered self-contained vectors, and the terminal FINALIZE runs
+// the provider's own negotiated transition (captured-results discovery).
+// What remains here are the negotiated collection ANSWERS the pinned
+// provider still consumes from the host: the pre-edit correction forecast,
+// the targeted validation document requested by the exact
+// `external.run_targeted_validation` collection input, and the final
+// verification evidence with its explicit outcome.
+
 import { CORRECTION_OUTCOMES, type CorrectionOutcome } from "./review-correction-lifecycle.ts";
 
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -30,28 +28,38 @@ export class CompactReviewContractError extends Error {
 	}
 }
 
+// Relocated from the deleted lib/review-compact.ts (gentle-pi#311 P5): the
+// only compact shapes with surviving production consumers are the targeted
+// validation document and its component rows.
+export interface CompactValidationCheckInput {
+	passed: boolean;
+	evidence: string[];
+}
+
+export interface CompactFollowUp {
+	finding_id: string;
+	location: string;
+	summary: string;
+	proof_refs: string[];
+}
+
+export interface CompactTargetedValidationInput {
+	request_hash: string;
+	correction_ids: string[];
+	original_criteria: CompactValidationCheckInput;
+	correction_regression: CompactValidationCheckInput;
+	fix_caused_findings?: unknown[];
+	follow_ups: CompactFollowUp[];
+}
+
 export interface CompactFinalizeContractInput {
 	cwd: string;
 	lineageId?: string;
-	review_result?: CompactReviewResultInput;
 	correction_line_forecast?: number;
-	validation_proof?: CompactValidationProofInput;
 	validation?: CompactTargetedValidationInput;
 	final_evidence?: string;
 	final_verification_passed?: boolean;
 	final_verification_outcome?: CorrectionOutcome;
-	refuter_batch?: unknown;
-}
-
-export interface NativeRefuterRequestInput {
-	lineageId: string;
-	candidateTree?: string;
-	reviewResult: CompactReviewResultInput;
-}
-
-export interface NativeRefuterRequest {
-	request_hash: string;
-	findings: CompactFinding[];
 }
 
 function fail(area: string, code: string, message: string): never {
@@ -89,68 +97,10 @@ function strings(value: unknown, area: string): string[] {
 	return parsed;
 }
 
-function enumValue<T extends Record<string, string>>(value: unknown, values: T, area: string): T[keyof T] {
-	const parsed = string(value, area);
-	if (!Object.values(values).includes(parsed)) return fail(area, "enum", "contains an unsupported value");
-	return parsed as T[keyof T];
-}
-
 function optionalLineage(value: unknown, area: string): string | undefined {
 	const parsed = optionalString(value, area);
 	if (parsed !== undefined && !LINEAGE_ID.test(parsed)) fail(area, "lineage", "is malformed");
 	return parsed;
-}
-
-function parseFinding(value: unknown, area: string) {
-	const row = exact(value, area, ["location", "severity", "claim", "proof_refs"], ["id", "lens", "evidence_class", "causal_disposition"]);
-	const severity = enumValue(row.severity, COMPACT_SEVERITY, `${area}.severity`);
-	const severe = severity === COMPACT_SEVERITY.BLOCKER || severity === COMPACT_SEVERITY.CRITICAL;
-	if (severe && (row.evidence_class === undefined || row.causal_disposition === undefined)) fail(area, "required", "severe findings require evidence_class and causal_disposition");
-	return {
-		...(row.id === undefined ? {} : { id: string(row.id, `${area}.id`) }),
-		...(row.lens === undefined ? {} : { lens: enumValue(row.lens, REVIEW_LENS, `${area}.lens`) }),
-		location: string(row.location, `${area}.location`),
-		severity,
-		claim: string(row.claim, `${area}.claim`),
-		...(row.evidence_class === undefined ? {} : { evidence_class: enumValue(row.evidence_class, COMPACT_EVIDENCE_CLASS, `${area}.evidence_class`) }),
-		...(row.causal_disposition === undefined ? {} : { causal_disposition: enumValue(row.causal_disposition, CAUSAL_DISPOSITION, `${area}.causal_disposition`) }),
-		proof_refs: strings(row.proof_refs, `${area}.proof_refs`),
-	};
-}
-
-function parseReviewResult(value: unknown, area: string): CompactReviewResultInput {
-	const input = exact(value, area, ["lens_results"], ["refuter_request_hash", "refuter_results"]);
-	if (!Array.isArray(input.lens_results)) fail(`${area}.lens_results`, "type", "must be an array");
-	const lens_results = input.lens_results.map((item, index) => {
-		const row = exact(item, `${area}.lens_results[${index}]`, ["findings", "evidence"], ["lens"]);
-		if (!Array.isArray(row.findings)) fail(`${area}.lens_results[${index}].findings`, "type", "must be an array");
-		return {
-			...(row.lens === undefined ? {} : { lens: enumValue(row.lens, REVIEW_LENS, `${area}.lens_results[${index}].lens`) }),
-			findings: row.findings.map((finding, findingIndex) => parseFinding(finding, `${area}.lens_results[${index}].findings[${findingIndex}]`)),
-			evidence: strings(row.evidence, `${area}.lens_results[${index}].evidence`),
-		};
-	});
-	const refuter_request_hash = optionalString(input.refuter_request_hash, `${area}.refuter_request_hash`);
-	if (refuter_request_hash !== undefined && !DIGEST.test(refuter_request_hash)) fail(`${area}.refuter_request_hash`, "digest", "is malformed");
-	let refuter_results: CompactRefuterResultInput[] | undefined;
-	if (input.refuter_results !== undefined) {
-		if (!Array.isArray(input.refuter_results)) fail(`${area}.refuter_results`, "type", "must be an array");
-		refuter_results = input.refuter_results.map((item, index) => {
-			const row = exact(item, `${area}.refuter_results[${index}]`, ["finding_id", "outcome", "proof_refs"]);
-			return { finding_id: string(row.finding_id, `${area}.refuter_results[${index}].finding_id`), outcome: enumValue(row.outcome, COMPACT_FINDING_OUTCOME, `${area}.refuter_results[${index}].outcome`), proof_refs: strings(row.proof_refs, `${area}.refuter_results[${index}].proof_refs`) };
-		});
-	}
-	return { lens_results, ...(refuter_request_hash === undefined ? {} : { refuter_request_hash }), ...(refuter_results === undefined ? {} : { refuter_results }) };
-}
-
-function parseValidationProof(value: unknown, area: string): CompactValidationProofInput {
-	const input = exact(value, area, ["original_criteria", "correction_regression"]);
-	const check = (item: unknown, label: string) => {
-		const row = exact(item, label, ["passed", "evidence"]);
-		if (typeof row.passed !== "boolean") fail(`${label}.passed`, "type", "must be boolean");
-		return { passed: row.passed, evidence: strings(row.evidence, `${label}.evidence`) };
-	};
-	return { original_criteria: check(input.original_criteria, `${area}.original_criteria`), correction_regression: check(input.correction_regression, `${area}.correction_regression`) };
 }
 
 function parseValidation(value: unknown, area: string): CompactTargetedValidationInput {
@@ -171,39 +121,8 @@ function parseValidation(value: unknown, area: string): CompactTargetedValidatio
 	return { request_hash, correction_ids: strings(input.correction_ids, `${area}.correction_ids`), original_criteria: check(input.original_criteria, `${area}.original_criteria`), correction_regression: check(input.correction_regression, `${area}.correction_regression`), fix_caused_findings: [], follow_ups };
 }
 
-const CANDIDATE_CAUSAL_DISPOSITIONS = new Set<string>([
-	CAUSAL_DISPOSITION.INTRODUCED,
-	CAUSAL_DISPOSITION.BEHAVIOR_ACTIVATED,
-	CAUSAL_DISPOSITION.WORSENED,
-]);
-
-export function deriveNativeRefuterRequest(input: NativeRefuterRequestInput): NativeRefuterRequest | undefined {
-	const lens_results = input.reviewResult.lens_results.map((result, index) => ({
-		lens: result.lens ?? `lens-${index}`,
-		findings: result.findings.map((finding) => ({ ...finding, proof_refs: [...finding.proof_refs].toSorted() })).toSorted((left, right) => (left.id ?? "").localeCompare(right.id ?? "")),
-		evidence: [...result.evidence].toSorted(),
-	})).toSorted((left, right) => left.lens.localeCompare(right.lens));
-	const findings = lens_results.flatMap(({ findings }) => findings).filter((finding) =>
-		(finding.severity === COMPACT_SEVERITY.BLOCKER || finding.severity === COMPACT_SEVERITY.CRITICAL) &&
-		finding.evidence_class === COMPACT_EVIDENCE_CLASS.INFERENTIAL &&
-		CANDIDATE_CAUSAL_DISPOSITIONS.has(finding.causal_disposition ?? ""),
-	);
-	if (findings.some((finding) => finding.id === undefined || finding.lens === undefined)) fail("review/finalize.review_result", "finding-id", "inferential severe findings require stable IDs and lenses for refuter derivation");
-	if (findings.length === 0) return undefined;
-	if (input.candidateTree === undefined) fail("review/finalize", "candidate-tree", "requires a frozen candidate tree for refuter derivation");
-	return {
-		request_hash: domainHashV1("compact-refuter-request", {
-			lineage_id: input.lineageId,
-			candidate_tree: input.candidateTree,
-			lens_results,
-			finding_ids: findings.map(({ id }) => id),
-		}),
-		findings: findings as CompactFinding[],
-	};
-}
-
-function parseCompactFinalizeInputValue(value: unknown, preserveFinalEvidence: boolean): CompactFinalizeContractInput {
-	const input = exact(value, "review/finalize", ["cwd"], ["lineageId", "review_result", "correction_line_forecast", "validation_proof", "validation", "final_evidence", "final_verification_passed", "final_verification_outcome", "refuter_batch"]);
+function parseCompactFinalizeInputValue(value: unknown): CompactFinalizeContractInput {
+	const input = exact(value, "review/finalize", ["cwd"], ["lineageId", "correction_line_forecast", "validation", "final_evidence", "final_verification_passed", "final_verification_outcome"]);
 	const outcomeFields = Number(input.final_verification_passed !== undefined) + Number(input.final_verification_outcome !== undefined);
 	if ((input.final_evidence === undefined && outcomeFields !== 0) || (input.final_evidence !== undefined && outcomeFields !== 1)) fail("review/finalize", "field-pair", "final evidence requires exactly one verification result or outcome");
 	let correction_line_forecast: number | undefined;
@@ -220,79 +139,28 @@ function parseCompactFinalizeInputValue(value: unknown, preserveFinalEvidence: b
 	}
 	let final_evidence: string | undefined;
 	if (input.final_evidence !== undefined) {
-		if (preserveFinalEvidence) {
-			if (typeof input.final_evidence !== "string" || input.final_evidence.length === 0) fail("review/finalize.final_evidence", "empty", "must contain at least one byte");
-			final_evidence = input.final_evidence;
-		} else {
-			final_evidence = string(input.final_evidence, "review/finalize.final_evidence");
-		}
+		// Final evidence is preserved BYTE-FOR-BYTE: it is staged into the native
+		// --evidence file untouched, so the canonical trimmed-string rule does
+		// not apply — only zero-length evidence is refused.
+		if (typeof input.final_evidence !== "string" || input.final_evidence.length === 0) fail("review/finalize.final_evidence", "empty", "must contain at least one byte");
+		final_evidence = input.final_evidence;
 	}
-	return { cwd: string(input.cwd, "review/finalize.cwd"), ...(optionalLineage(input.lineageId, "review/finalize.lineageId") === undefined ? {} : { lineageId: optionalLineage(input.lineageId, "review/finalize.lineageId")! }), ...(input.review_result === undefined ? {} : { review_result: parseReviewResult(input.review_result, "review/finalize.review_result") }), ...(correction_line_forecast === undefined ? {} : { correction_line_forecast }), ...(input.validation_proof === undefined ? {} : { validation_proof: parseValidationProof(input.validation_proof, "review/finalize.validation_proof") }), ...(input.validation === undefined ? {} : { validation: parseValidation(input.validation, "review/finalize.validation") }), ...(final_evidence === undefined ? {} : { final_evidence }), ...(input.final_verification_passed === undefined ? {} : { final_verification_passed: input.final_verification_passed }), ...(final_verification_outcome === undefined ? {} : { final_verification_outcome }), ...(input.refuter_batch === undefined ? {} : { refuter_batch: input.refuter_batch }) };
+	return { cwd: string(input.cwd, "review/finalize.cwd"), ...(optionalLineage(input.lineageId, "review/finalize.lineageId") === undefined ? {} : { lineageId: optionalLineage(input.lineageId, "review/finalize.lineageId")! }), ...(correction_line_forecast === undefined ? {} : { correction_line_forecast }), ...(input.validation === undefined ? {} : { validation: parseValidation(input.validation, "review/finalize.validation") }), ...(final_evidence === undefined ? {} : { final_evidence }), ...(input.final_verification_passed === undefined ? {} : { final_verification_passed: input.final_verification_passed }), ...(final_verification_outcome === undefined ? {} : { final_verification_outcome }) };
 }
 
-export function parseNativeCompactFinalizeInput(value: unknown): CompactFinalizeContractInput & { refuter_batch?: RefuterBatch } {
-	const input = parseCompactFinalizeInputValue(value, true);
-	for (const lens of input.review_result?.lens_results ?? []) {
-		if (lens.evidence.length === 0 || lens.findings.some((finding) => finding.proof_refs?.length === 0)) fail("review/finalize.review_result", "empty", "reviewer evidence and proof_refs must be non-empty");
-		if (lens.findings.some((finding) => finding.evidence_class === COMPACT_EVIDENCE_CLASS.INFO)) fail("review/finalize.review_result", "enum", "reviewer evidence_class must match the published native schema");
-	}
-	for (const validation of [input.validation_proof, input.validation]) {
-		if (validation && (validation.original_criteria.evidence.length === 0 || validation.correction_regression.evidence.length === 0)) fail("review/finalize.validation", "empty", "validator evidence must be non-empty");
+export function parseNativeCompactFinalizeInput(value: unknown): CompactFinalizeContractInput {
+	const input = parseCompactFinalizeInputValue(value);
+	if (input.validation && (input.validation.original_criteria.evidence.length === 0 || input.validation.correction_regression.evidence.length === 0)) {
+		fail("review/finalize.validation", "empty", "validator evidence must be non-empty");
 	}
 	if (input.validation?.follow_ups.some((row) => row.proof_refs.length === 0)) fail("review/finalize.validation.follow_ups", "empty", "follow-up proof_refs must be non-empty");
-	let refuter_batch: RefuterBatch | undefined;
-	if (input.refuter_batch !== undefined) {
-		const reviewResult = input.review_result;
-		if (reviewResult?.refuter_request_hash === undefined) fail("review/finalize.refuter_batch", "request-hash", "requires the expected review_result.refuter_request_hash");
-		const candidateCausality = new Set<string>([CAUSAL_DISPOSITION.INTRODUCED, CAUSAL_DISPOSITION.BEHAVIOR_ACTIVATED, CAUSAL_DISPOSITION.WORSENED]);
-		const findings: CompactFinding[] = [];
-		for (const lens of reviewResult.lens_results) {
-			for (const finding of lens.findings) {
-				if ((finding.severity !== COMPACT_SEVERITY.BLOCKER && finding.severity !== COMPACT_SEVERITY.CRITICAL) || finding.evidence_class !== COMPACT_EVIDENCE_CLASS.INFERENTIAL || !candidateCausality.has(finding.causal_disposition ?? "")) continue;
-				if (finding.id === undefined || (finding.lens ?? lens.lens) === undefined) fail("review/finalize.refuter_batch", "finding-id", "requires stable IDs and lenses for every refuted finding");
-				findings.push({
-					id: finding.id,
-					lens: (finding.lens ?? lens.lens)!,
-					location: finding.location!,
-					severity: finding.severity,
-					claim: finding.claim!,
-					evidence_class: finding.evidence_class,
-					causal_disposition: finding.causal_disposition!,
-					proof_refs: [...finding.proof_refs!],
-				});
-			}
-		}
-		const normalized = normalizeRefuterBatch({ request_hash: reviewResult.refuter_request_hash, findings }, input.refuter_batch);
-		if (normalized.status !== "normalized") fail("review/finalize.refuter_batch", normalized.reason_code, "must match the frozen request hash and IDs with complete concrete proof rows");
-		refuter_batch = {
-			schema: "gentle-ai.refuter-result-batch/v1",
-			request_hash: normalized.refuter_request_hash,
-			results: normalized.refuter_results,
-		};
-	}
-	return { ...input, ...(refuter_batch === undefined ? {} : { refuter_batch }) };
+	return input;
 }
 
-const NATIVE_REVIEWER_LENS = {
-	[REVIEW_LENS.RISK]: "risk",
-	[REVIEW_LENS.RESILIENCE]: "resilience",
-	[REVIEW_LENS.READABILITY]: "readability",
-	[REVIEW_LENS.RELIABILITY]: "reliability",
-} as const;
-
-export function toNativeReviewerDocument(input: CompactLensResultInput) {
-	const lens = input.lens === undefined ? undefined : NATIVE_REVIEWER_LENS[input.lens as keyof typeof NATIVE_REVIEWER_LENS];
-	return {
-		...(lens === undefined ? {} : { lens }),
-		findings: input.findings.map((finding) => ({ ...finding, ...(finding.lens === undefined ? {} : { lens: NATIVE_REVIEWER_LENS[finding.lens as keyof typeof NATIVE_REVIEWER_LENS] }) })),
-		evidence: [...input.evidence],
-	};
-}
-
-export function toNativeValidatorDocument(input: CompactValidationProofInput | CompactTargetedValidationInput) {
+export function toNativeValidatorDocument(input: CompactTargetedValidationInput) {
 	return {
 		original_criteria: input.original_criteria,
 		correction_regression: input.correction_regression,
-		follow_ups: "follow_ups" in input ? input.follow_ups.map((row) => ({ observation: row.summary, proof_refs: [...row.proof_refs] })) : [],
+		follow_ups: input.follow_ups.map((row) => ({ observation: row.summary, proof_refs: [...row.proof_refs] })),
 	};
 }

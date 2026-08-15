@@ -334,7 +334,7 @@ SDD completion adds no review or Judgment Day pass.
 
 Review operations, validation, and SDD perform no push, PR creation, release, or publication. The separate durable commit runner may create exactly one local commit only after final native pre-commit validation and post-commit tree proof.
 
-`review-refuter` uses exactly `read`, `grep`, and `find` in a package-managed isolated installation. Project and user overrides may shadow the package asset; `gentle-pi` preserves those definitions and does not claim their effective permissions are package-compliant.
+Adversarial review roles (the refuter and the targeted validator) are never Pi-authored: the provider renders self-contained `review.capture-refuter` / `review.capture-validation` vectors and Go runs its own locked-down `pi` process on them. Package agent assets remain a package-managed isolated installation. Project and user overrides may shadow a package asset; `gentle-pi` preserves those definitions and does not claim their effective permissions are package-compliant.
 
 ## SDD/OpenSpec flow
 

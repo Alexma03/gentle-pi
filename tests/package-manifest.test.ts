@@ -17,7 +17,8 @@ import { applyModelConfig } from "../extensions/gentle-ai.ts";
 import { installSddAssets } from "../lib/sdd-preflight.ts";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const REVIEW_REFUTER_FILE = "review-refuter.md";
+const MANAGED_EXEMPLAR_FILE = "gentle-ai-explore.md";
+const RETIRED_REFUTER_FILE = "review-refuter.md";
 const REVIEW_RISK_FILE = "review-risk.md";
 const V013_REVIEW_RISK_FIXTURE = join(
 	PACKAGE_ROOT,
@@ -49,17 +50,12 @@ const V014_MANAGED_ASSETS = join(
 	"migrations",
 	"managed-assets-v0.14.json",
 );
-const REVIEW_REFUTER_TOOLS = ["read", "grep", "find"];
-const FORBIDDEN_REFUTER_TOOLS = [
-	"bash",
-	"edit",
-	"write",
-	"task",
-	"subagent",
-	"subagent_run",
-	"mem_save",
-	"mem_update",
-];
+// gentle-pi#311 P5: the managed-asset installer mechanism tests use
+// gentle-ai-explore.md as their exemplar (packaged, absent from the v0.13
+// manifest) after review-refuter.md was retired together with every
+// Pi-authored adversarial review verdict.
+const MANAGED_EXEMPLAR_TOOLS = ["read", "grep", "find", "codegraph"];
+const RETIRED_ADVERSARIAL_AGENTS = ["review-refuter.md", "review-validator.md"];
 
 interface ManagedAssetsManifest {
 	schemaVersion: number;
@@ -439,25 +435,25 @@ test("packaged agents use YAML list syntax for tool allowlists", () => {
 	}
 });
 
-test("package source defines review-refuter with the exact read-only boundary", () => {
-	const refuterPath = join(PACKAGE_ROOT, "assets", "agents", REVIEW_REFUTER_FILE);
-	assert.ok(existsSync(refuterPath), "gentle-pi must package review-refuter.md");
-
-	const { name, tools } = readAgentDefinition(refuterPath);
-	assert.equal(name, "review-refuter");
-	assert.deepEqual(tools, REVIEW_REFUTER_TOOLS);
-	for (const tool of FORBIDDEN_REFUTER_TOOLS) {
-		assert.ok(!tools.includes(tool), `review-refuter must deny ${tool}`);
+test("the retired Pi adversarial role agents are not packaged", () => {
+	// gentle-pi#311 P5: the refuter and targeted validator verdicts execute
+	// through Go-owned pi processes via provider-rendered self-contained
+	// vectors; the Pi-authored agent definitions must stay deleted.
+	for (const retired of RETIRED_ADVERSARIAL_AGENTS) {
+		assert.ok(!existsSync(join(PACKAGE_ROOT, "assets", "agents", retired)), `${retired} must stay deleted`);
 	}
 });
 
-test("forced package installation preserves same-path user-authored agents and separate shadows", () => {
+test("forced package installation preserves same-path user-authored agents and separate shadows, including on retired asset paths", () => {
+	// The user-authored file below sits on the RETIRED review-refuter.md path:
+	// this also pins that gentle-pi#311 P5 asset retirement deletes only
+	// hash-proven package-managed copies, never user content.
 	const temporaryAgentHome = mkdtempSync(join(tmpdir(), "gentle-pi-refuter-home-"));
 	const temporaryProject = mkdtempSync(join(tmpdir(), "gentle-pi-refuter-project-"));
 	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
-	const samePathUserAgent = join(temporaryAgentHome, "agents", REVIEW_REFUTER_FILE);
-	const userShadow = join(temporaryAgentHome, "subagents", REVIEW_REFUTER_FILE);
-	const projectOverride = join(temporaryProject, ".pi", "agents", REVIEW_REFUTER_FILE);
+	const samePathUserAgent = join(temporaryAgentHome, "agents", RETIRED_REFUTER_FILE);
+	const userShadow = join(temporaryAgentHome, "subagents", RETIRED_REFUTER_FILE);
+	const projectOverride = join(temporaryProject, ".pi", "agents", RETIRED_REFUTER_FILE);
 	const userAgentSource = [
 		"---",
 		"name: review-refuter",
@@ -538,7 +534,7 @@ test("first forced sync migrates untouched v0.13 assets, preserves routing, and 
 	const temporaryAgentHome = mkdtempSync(join(tmpdir(), "gentle-pi-v013-upgrade-"));
 	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
 	const installedReviewRisk = join(temporaryAgentHome, "agents", REVIEW_RISK_FILE);
-	const installedRefuter = join(temporaryAgentHome, "agents", REVIEW_REFUTER_FILE);
+	const installedExemplar = join(temporaryAgentHome, "agents", MANAGED_EXEMPLAR_FILE);
 	const managedAssetsManifest = join(
 		temporaryAgentHome,
 		"gentle-ai",
@@ -572,8 +568,8 @@ test("first forced sync migrates untouched v0.13 assets, preserves routing, and 
 			"migration must update the package body without losing user routing",
 		);
 		assert.equal(
-			readFileSync(installedRefuter, "utf8"),
-			readFileSync(join(PACKAGE_ROOT, "assets", "agents", REVIEW_REFUTER_FILE), "utf8"),
+			readFileSync(installedExemplar, "utf8"),
+			readFileSync(join(PACKAGE_ROOT, "assets", "agents", MANAGED_EXEMPLAR_FILE), "utf8"),
 			"an asset missing from v0.13 must install normally",
 		);
 
@@ -582,8 +578,8 @@ test("first forced sync migrates untouched v0.13 assets, preserves routing, and 
 		) as ManagedAssetsManifest;
 		assert.equal(manifest.assets[`agents/${REVIEW_RISK_FILE}`], sha256(migrated));
 		assert.equal(
-			manifest.assets[`agents/${REVIEW_REFUTER_FILE}`],
-			sha256(readFileSync(installedRefuter, "utf8")),
+			manifest.assets[`agents/${MANAGED_EXEMPLAR_FILE}`],
+			sha256(readFileSync(installedExemplar, "utf8")),
 		);
 
 		const userEditedMigration = migrated.replace(
@@ -684,23 +680,23 @@ test("first forced sync preserves a body-edited v0.13 asset byte-for-byte", () =
 test("forced package installation refreshes an asset recorded as package-managed", () => {
 	const temporaryAgentHome = mkdtempSync(join(tmpdir(), "gentle-pi-malformed-refuter-"));
 	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
-	const installedRefuter = join(temporaryAgentHome, "agents", REVIEW_REFUTER_FILE);
+	const installedExemplar = join(temporaryAgentHome, "agents", MANAGED_EXEMPLAR_FILE);
 	const managedAssetsManifest = join(
 		temporaryAgentHome,
 		"gentle-ai",
 		"managed-assets.json",
 	);
 	const previousPackageSource =
-		"---\nname: review-refuter\ntools:\n  - read\n  - bash\n---\nprevious package version\n";
+		"---\nname: gentle-ai-explore\ntools:\n  - read\n  - bash\n---\nprevious package version\n";
 	const routedPreviousPackageSource = previousPackageSource.replace(
-		"name: review-refuter\n",
-		"name: review-refuter\nmodel: openai/previous-package\nthinking: high\n",
+		"name: gentle-ai-explore\n",
+		"name: gentle-ai-explore\nmodel: openai/previous-package\nthinking: high\n",
 	);
 
 	try {
 		process.env.GENTLE_PI_AGENT_HOME = temporaryAgentHome;
 		installSddAssets(PACKAGE_ROOT, true);
-		assert.ok(existsSync(installedRefuter), "a missing package asset must install");
+		assert.ok(existsSync(installedExemplar), "a missing package asset must install");
 		assert.ok(
 			existsSync(managedAssetsManifest),
 			"the installer must record ownership independently from the filename",
@@ -709,16 +705,16 @@ test("forced package installation refreshes an asset recorded as package-managed
 		const manifest = JSON.parse(
 			readFileSync(managedAssetsManifest, "utf8"),
 		) as ManagedAssetsManifest;
-		writeFileSync(installedRefuter, routedPreviousPackageSource);
-		manifest.assets[`agents/${REVIEW_REFUTER_FILE}`] = sha256(
+		writeFileSync(installedExemplar, routedPreviousPackageSource);
+		manifest.assets[`agents/${MANAGED_EXEMPLAR_FILE}`] = sha256(
 			routedPreviousPackageSource,
 		);
 		writeFileSync(managedAssetsManifest, JSON.stringify(manifest, null, 2));
 
 		installSddAssets(PACKAGE_ROOT, true);
 
-		const refreshed = readAgentDefinition(installedRefuter);
-		assert.deepEqual(refreshed.tools, REVIEW_REFUTER_TOOLS);
+		const refreshed = readAgentDefinition(installedExemplar);
+		assert.deepEqual(refreshed.tools, MANAGED_EXEMPLAR_TOOLS);
 		assert.doesNotMatch(refreshed.source, /^  - bash$/m);
 	} finally {
 		if (previousAgentHome === undefined) {
@@ -736,7 +732,7 @@ function assertManagedAgentUserEditIsPreserved(
 ): void {
 	const temporaryAgentHome = mkdtempSync(join(tmpdir(), "gentle-pi-managed-edit-"));
 	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
-	const installedRefuter = join(temporaryAgentHome, "agents", REVIEW_REFUTER_FILE);
+	const installedExemplar = join(temporaryAgentHome, "agents", MANAGED_EXEMPLAR_FILE);
 	const managedAssetsManifest = join(
 		temporaryAgentHome,
 		"gentle-ai",
@@ -746,15 +742,15 @@ function assertManagedAgentUserEditIsPreserved(
 	try {
 		process.env.GENTLE_PI_AGENT_HOME = temporaryAgentHome;
 		installSddAssets(PACKAGE_ROOT, true);
-		const installedSource = readFileSync(installedRefuter, "utf8");
+		const installedSource = readFileSync(installedExemplar, "utf8");
 		const userEditedSource = editSource(installedSource);
 		assert.notEqual(userEditedSource, installedSource, `${editLabel} must alter the asset`);
-		writeFileSync(installedRefuter, userEditedSource);
+		writeFileSync(installedExemplar, userEditedSource);
 
 		installSddAssets(PACKAGE_ROOT, true);
 
 		assert.deepEqual(
-			readFileSync(installedRefuter),
+			readFileSync(installedExemplar),
 			Buffer.from(userEditedSource),
 			`${editLabel} must invalidate ownership and survive force refresh byte-for-byte`,
 		);
@@ -762,7 +758,7 @@ function assertManagedAgentUserEditIsPreserved(
 			readFileSync(managedAssetsManifest, "utf8"),
 		) as ManagedAssetsManifest;
 		assert.equal(
-			manifest.assets[`agents/${REVIEW_REFUTER_FILE}`],
+			manifest.assets[`agents/${MANAGED_EXEMPLAR_FILE}`],
 			undefined,
 			`${editLabel} must remove package ownership`,
 		);
@@ -779,8 +775,8 @@ function assertManagedAgentUserEditIsPreserved(
 test("forced package installation preserves a model-only edit to a managed agent", () => {
 	assertManagedAgentUserEditIsPreserved("a model-only user edit", (source) =>
 		source.replace(
-			"name: review-refuter\n",
-			"name: review-refuter\nmodel: private/user-model\n",
+			"name: gentle-ai-explore\n",
+			"name: gentle-ai-explore\nmodel: private/user-model\n",
 		),
 	);
 });
@@ -788,8 +784,8 @@ test("forced package installation preserves a model-only edit to a managed agent
 test("forced package installation preserves a thinking-only edit to a managed agent", () => {
 	assertManagedAgentUserEditIsPreserved("a thinking-only user edit", (source) =>
 		source.replace(
-			"name: review-refuter\n",
-			"name: review-refuter\nthinking: xhigh\n",
+			"name: gentle-ai-explore\n",
+			"name: gentle-ai-explore\nthinking: xhigh\n",
 		),
 	);
 });
@@ -797,8 +793,8 @@ test("forced package installation preserves a thinking-only edit to a managed ag
 test("forced package installation preserves an ordinary body edit to a managed agent", () => {
 	assertManagedAgentUserEditIsPreserved("an ordinary body edit", (source) =>
 		source.replace(
-			"Challenge the supplied inferential claims",
-			"Preserve this user-authored body change and challenge the supplied inferential claims",
+			"You are the read-only explorer for generic non-SDD work.",
+			"Preserve this user-authored body change. You are the read-only explorer for generic non-SDD work.",
 		),
 	);
 });
@@ -806,7 +802,7 @@ test("forced package installation preserves an ordinary body edit to a managed a
 test("package model assignment keeps only package-managed agents owned", () => {
 	const temporaryAgentHome = mkdtempSync(join(tmpdir(), "gentle-pi-model-ownership-"));
 	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
-	const installedRefuter = join(temporaryAgentHome, "agents", REVIEW_REFUTER_FILE);
+	const installedExemplar = join(temporaryAgentHome, "agents", MANAGED_EXEMPLAR_FILE);
 	const userAgent = join(temporaryAgentHome, "agents", "user-router.md");
 	const managedAssetsManifest = join(
 		temporaryAgentHome,
@@ -821,14 +817,14 @@ test("package model assignment keeps only package-managed agents owned", () => {
 		writeFileSync(userAgent, userAgentSource);
 
 		applyModelConfig(PACKAGE_ROOT, {
-			"review-refuter": { model: "package/selected-model", thinking: "high" },
+			"gentle-ai-explore": { model: "package/selected-model", thinking: "high" },
 			"user-router": { model: "user/selected-model", thinking: "low" },
 		});
 
-		const routedRefuter = readFileSync(installedRefuter, "utf8");
+		const routedExemplar = readFileSync(installedExemplar, "utf8");
 		const routedUserAgent = readFileSync(userAgent, "utf8");
-		assert.match(routedRefuter, /^model: package\/selected-model$/m);
-		assert.match(routedRefuter, /^thinking: high$/m);
+		assert.match(routedExemplar, /^model: package\/selected-model$/m);
+		assert.match(routedExemplar, /^thinking: high$/m);
 		assert.match(routedUserAgent, /^model: user\/selected-model$/m);
 		assert.match(routedUserAgent, /^thinking: low$/m);
 
@@ -836,8 +832,8 @@ test("package model assignment keeps only package-managed agents owned", () => {
 			readFileSync(managedAssetsManifest, "utf8"),
 		) as ManagedAssetsManifest;
 		assert.equal(
-			manifest.assets[`agents/${REVIEW_REFUTER_FILE}`],
-			sha256(routedRefuter),
+			manifest.assets[`agents/${MANAGED_EXEMPLAR_FILE}`],
+			sha256(routedExemplar),
 			"package-controlled routing must update the managed asset hash coherently",
 		);
 		assert.equal(
@@ -848,8 +844,8 @@ test("package model assignment keeps only package-managed agents owned", () => {
 
 		installSddAssets(PACKAGE_ROOT, true);
 		assert.equal(
-			readFileSync(installedRefuter, "utf8"),
-			readFileSync(join(PACKAGE_ROOT, "assets", "agents", REVIEW_REFUTER_FILE), "utf8"),
+			readFileSync(installedExemplar, "utf8"),
+			readFileSync(join(PACKAGE_ROOT, "assets", "agents", MANAGED_EXEMPLAR_FILE), "utf8"),
 			"a routed package-managed agent must remain eligible for package refresh",
 		);
 		assert.equal(
@@ -1148,7 +1144,10 @@ test("v2.1.2 release package and runtime stop before publication", () => {
 	assert.ok(packageJson.files?.includes("contracts/"));
 
 	const verifier = readFileSync(join(PACKAGE_ROOT, "scripts", "verify-package-files.mjs"), "utf8");
-	assert.match(verifier, /assets\/agents\/review-refuter\.md/);
+	// gentle-pi#311 P5: the retired adversarial role agents must not be pinned
+	// as required package files, while the append-only migration history stays.
+	assert.doesNotMatch(verifier, /assets\/agents\/review-refuter\.md/);
+	assert.doesNotMatch(verifier, /assets\/agents\/review-validator\.md/);
 	assert.match(verifier, /assets\/migrations\/managed-assets-v0\.13\.json/);
 	assert.match(verifier, /assets\/migrations\/managed-assets-v0\.14\.json/);
 
@@ -1173,9 +1172,9 @@ test("README documents bounded review transactions and the honest installed perm
 		"Native compact gate validation is read-only.",
 		"Release from protected `main` may bypass receipt validation only when the tag targets the current immutable `origin/main` SHA, required CI for that exact SHA is successful, the remote head is rechecked before tag push, and no fresh risk evidence exists; otherwise release fails closed through native receipt validation.",
 		"Dangerous-command safety remains independent and authoritative.",
-		"`review-refuter` uses exactly `read`, `grep`, and `find`",
+		"Adversarial review roles (the refuter and the targeted validator) are never Pi-authored",
 		"package-managed isolated installation",
-		"Project and user overrides may shadow the package asset",
+		"Project and user overrides may shadow a package asset",
 	]) {
 		assert.ok(readme.includes(clause), `README missing review v2 clause: ${clause}`);
 	}
