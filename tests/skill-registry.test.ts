@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -266,4 +266,53 @@ test("orchestrator documents path injection protocol", () => {
 	assert.match(source, /## Skills to load before work/);
 	assert.match(source, /paths-injected/);
 	assert.doesNotMatch(source, /Use matching compact rules based on code context and task intent/);
+});
+
+test("non-forced regeneration invalidates cache when skill bytes change but path, size, and mtime are restored", async () => {
+	const cwd = join(tmpdir(), `gentle-pi-fingerprint-${Date.now()}`);
+	const skillPath = join(cwd, "skills", "alpha", "SKILL.md");
+	mkdirSync(dirname(skillPath), { recursive: true });
+
+	const contentV1 =
+		'---\nname: alpha\ndescription: "Trigger: alpha skill. Variant one. Body A."\n---\n\n## Rules\n\n- Rule A.\n';
+	const contentV2 =
+		'---\nname: alpha\ndescription: "Trigger: alpha skill. Variant two. Body B."\n---\n\n## Rules\n\n- Rule B.\n';
+	assert.equal(
+		Buffer.byteLength(contentV1),
+		Buffer.byteLength(contentV2),
+		"test fixtures must have identical byte length",
+	);
+
+	const fixedMtimeSeconds = 1_000_000_000;
+	writeFileSync(skillPath, contentV1);
+	utimesSync(skillPath, fixedMtimeSeconds, fixedMtimeSeconds);
+	const beforeStat = statSync(skillPath);
+	const beforeMtimeMs = beforeStat.mtimeMs;
+	const beforeSize = beforeStat.size;
+
+	const first = await __testing.regenerateRegistry(cwd, false);
+	assert.equal(first.regenerated, true, "initial non-forced regeneration writes the registry");
+	assert.equal(first.reason, "fingerprint-changed");
+
+	const registryPath = join(cwd, ".atl", "skill-registry.md");
+	const firstRegistry = readFileSync(registryPath, "utf8");
+	assert.match(firstRegistry, /Variant one\. Body A\./);
+
+	writeFileSync(skillPath, contentV2);
+	utimesSync(skillPath, fixedMtimeSeconds, fixedMtimeSeconds);
+	const midStat = statSync(skillPath);
+	assert.equal(midStat.size, beforeSize, "byte size must be unchanged after rewrite");
+	assert.equal(midStat.mtimeMs, beforeMtimeMs, "mtime must be restored exactly");
+
+	const second = await __testing.regenerateRegistry(cwd, false);
+	assert.equal(
+		second.regenerated,
+		true,
+		"non-forced regeneration must invalidate cache when content bytes changed",
+	);
+	assert.equal(second.reason, "fingerprint-changed");
+
+	const secondRegistry = readFileSync(registryPath, "utf8");
+	assert.match(secondRegistry, /Variant two\. Body B\./);
+	assert.doesNotMatch(secondRegistry, /Variant one\. Body A\./);
 });
