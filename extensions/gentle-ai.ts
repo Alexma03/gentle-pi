@@ -317,18 +317,86 @@ function loadBackgroundSubagentsPolicy(
 	}
 }
 
+const SUBAGENTS_PACKAGE_NAMES = ["pi-subagents-j0k3r", "pi-subagents"] as const;
+const SUBAGENT_RUN_TOOL = "subagent_run";
+
 /**
- * `subagent_run` availability probe. The extension has no synchronous runtime
- * tool registry at prompt-render time, so capability is derived from the
- * pi-subagents package presence via the builtinAgentDirs() probe.
+ * Roots where an installed subagents package may live. These are the same
+ * roots builtinAgentDirs() walks, minus its `/agents` suffix.
+ *
+ * builtinAgentDirs() looks for markdown agent definitions, which the package
+ * legitimately may not ship. Capability is a different question, so it must
+ * not reuse that path: pi-subagents-j0k3r v1.5.2 ships index.ts, src/, skills/
+ * and scripts/ and no agents/ directory at all, so an agents-dir probe reports
+ * "absent" on every real install and leaves the background policy inert.
+ */
+function subagentsPackageRoots(cwd: string): string[] {
+	return SUBAGENTS_PACKAGE_NAMES.flatMap((packageName) => [
+		join(PACKAGE_ROOT, "..", packageName),
+		join(cwd, ".pi", "npm", "node_modules", packageName),
+		join(homedir(), ".local", "lib", "node_modules", packageName),
+	]);
+}
+
+/** A package root counts as installed only when it carries its own manifest. */
+function hasInstalledSubagentsPackage(cwd: string): boolean {
+	return subagentsPackageRoots(cwd).some((root) =>
+		existsSync(join(root, "package.json")),
+	);
+}
+
+function hasSubagentRunTool(activeTools: readonly string[]): boolean {
+	return activeTools.some(
+		(name) => name === SUBAGENT_RUN_TOOL || name.endsWith(`.${SUBAGENT_RUN_TOOL}`),
+	);
+}
+
+/**
+ * Read the live pi tool registry, or undefined when it carries no signal.
+ *
+ * An absent handle, a non-array result, a throwing registry, and an empty list
+ * are all "no signal" rather than "no subagents": reporting absent from an
+ * uninformative registry would reproduce the very defect this probe fixes.
+ */
+function readActiveToolNames(pi: unknown): readonly string[] | undefined {
+	try {
+		const getActiveTools = (pi as { getActiveTools?: () => unknown })
+			?.getActiveTools;
+		if (typeof getActiveTools !== "function") return undefined;
+		const tools = getActiveTools.call(pi);
+		if (!Array.isArray(tools)) return undefined;
+		const names = tools
+			.map((tool) =>
+				typeof tool === "string"
+					? tool
+					: isRecord(tool) && typeof tool.name === "string"
+						? tool.name
+						: "",
+			)
+			.filter((name) => name.length > 0);
+		return names.length > 0 ? names : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * `subagent_run` availability probe.
+ *
+ * The live tool registry answers the question directly and wins whenever it
+ * carries any signal. Without it -- prompt rendering outside a session, or a
+ * runtime with no getActiveTools -- capability falls back to the presence of
+ * an installed subagents package.
  */
 function resolveBackgroundSubagentsCapability(
 	cwd: string,
+	activeTools?: readonly string[],
 ): BackgroundSubagentsCapability {
 	try {
-		return builtinAgentDirs(cwd).some((dir) => existsSync(dir))
-			? "ready"
-			: "absent";
+		if (activeTools !== undefined && activeTools.length > 0) {
+			return hasSubagentRunTool(activeTools) ? "ready" : "absent";
+		}
+		return hasInstalledSubagentsPackage(cwd) ? "ready" : "absent";
 	} catch {
 		return "absent";
 	}
@@ -343,10 +411,13 @@ function renderBackgroundSubagentsStatusLine(
 // Rendered prompts are memoized per background policy/capability key for the
 // process lifetime; the assets bytes themselves are read once per key.
 const orchestratorPromptCache = new Map<string, string>();
-function getOrchestratorPrompt(cwd: string = process.cwd()): string {
+function getOrchestratorPrompt(
+	cwd: string = process.cwd(),
+	activeTools?: readonly string[],
+): string {
 	const background: BackgroundSubagentsRendering = {
 		policy: loadBackgroundSubagentsPolicy(cwd),
-		capability: resolveBackgroundSubagentsCapability(cwd),
+		capability: resolveBackgroundSubagentsCapability(cwd, activeTools),
 	};
 	const cacheKey = `${background.policy}:${background.capability}`;
 	let prompt = orchestratorPromptCache.get(cacheKey);
@@ -417,7 +488,11 @@ const NEUTRAL_PERSONA_PROMPT = `Persona:
 - Push back when the user asks for code without enough context or understanding.
 - Correct errors directly, explain why, and show the better path.`;
 
-function buildGentlePrompt(persona: PersonaMode, cwd: string = process.cwd()): string {
+function buildGentlePrompt(
+	persona: PersonaMode,
+	cwd: string = process.cwd(),
+	activeTools?: readonly string[],
+): string {
 	const personaPrompt =
 		persona === "neutral" ? NEUTRAL_PERSONA_PROMPT : GENTLEMAN_PERSONA_PROMPT;
 	const languageBoundary =
@@ -451,7 +526,7 @@ Harness principles:
 - Protect the human reviewer: avoid oversized changes, surface review workload risk, and ask before turning one task into a large multi-area change.
 - Never claim persistent memory is available because of this package. Memory is provided by separate packages or MCP tools when installed and callable.
 
-${getOrchestratorPrompt(cwd)}`;
+${getOrchestratorPrompt(cwd, activeTools)}`;
 }
 
 // Matches `git [global-flags] push` — tolerates flags like -C /repo or --work-tree=/tmp
@@ -6361,6 +6436,7 @@ export const __testing = {
 	loadBackgroundSubagentsPolicy,
 	parseBackgroundSubagentsPolicyFile,
 	resolveBackgroundSubagentsCapability,
+	readActiveToolNames,
 	renderBackgroundSubagentsStatusLine,
 	resolveControllerSddStatus,
 	resolveStartupControllerSddStatus,
@@ -6608,7 +6684,7 @@ function createGentleAiExtensionForTesting(
 			: "";
 		const gentlePrompt = isNamedAgent || isSddAgent
 			? ""
-			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd), ctx.cwd)}`;
+			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd), ctx.cwd, readActiveToolNames(pi))}`;
 		return {
 			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}${nativeStatusPrompt}`,
 		};
