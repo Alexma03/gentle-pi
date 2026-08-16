@@ -1105,6 +1105,36 @@ export class CandidateViewRegistry {
 		}
 	}
 
+	/**
+	 * Mirrors the START-time dispatch registration for a lineage this
+	 * controller never started (live defect 2026-08-16: a successor created
+	 * by native `review recover` exists only in native authority). The
+	 * authoritative STATUS descriptor supplies the frozen projection; the
+	 * live candidate is re-materialized and must match it exactly before the
+	 * dispatch-facing current binding is established with the provider-named
+	 * pending lenses.
+	 */
+	restoreCurrentForDispatchFromNative(lineageId: string, contributorRoot: string, descriptor: NativeCandidateProjectionDescriptor, selectedLenses: readonly string[]): void {
+		if (this.current !== undefined) throw new CandidateViewError("candidate view already has a current lineage binding", "current-binding-already-established");
+		const lenses = this.validateSelectedLenses(selectedLenses);
+		this.restoreProjectionFromNative(lineageId, contributorRoot, descriptor);
+		const projection = this.resolveProjection(lineageId, contributorRoot);
+		const record = materializeCandidateView({ contributorRoot, baseRef: projection.baseCommit, committedOnly: projection.committedOnly }, this.gitExecutor);
+		try {
+			if (record.baseTree !== projection.baseTree || record.candidateTree !== projection.candidateTree || JSON.stringify(record.scope.paths) !== JSON.stringify(projection.paths)) {
+				throw new CandidateViewError("live candidate does not match the native frozen projection");
+			}
+			this.records.set(record.token, record);
+			this.bindRecord(record.token, lineageId, lenses);
+			this.current = { lineageId, token: record.token };
+		} catch (error) {
+			this.projections.delete(lineageId);
+			this.records.delete(record.token);
+			this.remove(record);
+			throw error;
+		}
+	}
+
 	resolveProjection(lineageId: string, contributorRoot: string): FrozenCandidateProjection {
 		const projection = this.projections.get(lineageId);
 		if (!projection || realpathSync(contributorRoot) !== projection.contributorRoot) {

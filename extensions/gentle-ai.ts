@@ -5485,6 +5485,41 @@ async function executeProviderRoleVectorCollection(
 	};
 }
 
+// The provider-named lenses still awaiting a reviewer result: one lens per
+// pending `review.capture-result` collect input, in provider order.
+function pendingReviewerLenses(status: ReviewStatusV3): readonly string[] {
+	if (status.nextTransition?.kind !== "collect") return [];
+	return [...new Set((status.nextTransition.collect?.inputs ?? [])
+		.filter((input) => input.captureOperation === "review.capture-result")
+		.map((input) => input.artifactSubject?.lens)
+		.filter((lens): lens is NonNullable<typeof lens> => lens !== undefined))];
+}
+
+// Live defect (2026-08-16, Engram #12461): a successor lineage created by
+// native `review recover` exists only in native authority — this controller
+// never saw its START, so direct reviewer dispatch refused with
+// current-binding-missing even though the controller itself had just decoded
+// the successor's authoritative STATUS. Mirror the START-time registration
+// from STATUS discovery: when an unknown-but-live lineage still collecting
+// reviewer results appears in a status this controller decoded, restore its
+// frozen projection from the native descriptor and bind the dispatch-facing
+// current candidate view with the provider-named pending lenses. Best-effort
+// by design: when the live candidate no longer matches the frozen descriptor,
+// dispatch keeps its own typed refusal.
+function hydrateDispatchBindingFromStatus(candidateViews: CandidateViewRegistry | null, contributorRoot: string, status: ReviewStatusV3): void {
+	if (candidateViews === null || candidateViews.hasCurrentBinding()) return;
+	const lineageId = status.authority?.lineageId;
+	if (lineageId === undefined || status.applicability !== "current_target" || candidateViews.hasProjection(lineageId)) return;
+	const lenses = pendingReviewerLenses(status);
+	if (lenses.length === 0) return;
+	try {
+		candidateViews.restoreCurrentForDispatchFromNative(lineageId, contributorRoot, status.projection, lenses);
+	} catch {
+		// Dispatch surfaces its own typed refusal when the live candidate
+		// cannot be bound; a read-only STATUS never fails on hydration.
+	}
+}
+
 async function executeReviewControllerOperation(
 	parametersValue: unknown,
 	sessionCwd: string,
@@ -5979,6 +6014,36 @@ async function executeReviewControllerOperation(
 				if (roleVectorSlots.length > 0 && input.final_evidence === undefined && input.correction_line_forecast === undefined && input.validation === undefined) {
 					return await executeProviderRoleVectorCollection(parameters.operation, parameters.lineageId, roleVectorSlots, nativeReviewCli, defaultCwd, signal);
 				}
+				// Live defect (2026-08-16, Engram #12466): FINALIZE on a lineage
+				// still at reviewer_results_required misrouted into the correction
+				// evidence-first-ordering lane and failed. Route strictly from the
+				// provider transition: a collect naming review.capture-result means
+				// reviewer results are still outstanding — no correction-evidence
+				// or targeted-validation lane is ever admissible here, so any
+				// document-carrying FINALIZE stops with the provider-offered step.
+				// A document-free FINALIZE stops too on the live status/v5 lane
+				// (the same v5 keying as the workspace rebind above); the pinned
+				// pre-v5 raw-finalize fallback keeps its native captured-results
+				// discovery unchanged. Materialize-marked pi slots were already
+				// routed through the host relay above.
+				const reviewerResultsOutstanding = negotiatedStatus.nextTransition?.kind === "collect"
+					&& (negotiatedStatus.nextTransition.collect?.inputs ?? []).some((collectInput) => collectInput.captureOperation === "review.capture-result");
+				const finalizeDocumentsPresent = input.final_evidence !== undefined || input.validation !== undefined || input.correction_line_forecast !== undefined;
+				if (reviewerResultsOutstanding && (finalizeDocumentsPresent || (negotiatedStatus.raw as { schema?: unknown }).schema === "gentle-ai.review-integration.status/v5")) {
+					const outstandingReviewerLenses = pendingReviewerLenses(negotiatedStatus);
+					if (candidateView !== undefined && candidateViews && (correctionCompletion || validationAttempt)) candidateViews.cleanup(candidateView.token);
+					return {
+						operation: parameters.operation,
+						status: "blocked",
+						outcome: "reviewer-results-required",
+						reason: "Capture the reviewer result first; the provider offers review.capture-result. Correction evidence and targeted validation are never admissible while reviewer results are outstanding.",
+						...(outstandingReviewerLenses.length === 0 ? {} : { pending_lenses: outstandingReviewerLenses }),
+						result: negotiatedStatus.raw,
+						mutation_performed: false,
+						mutation_outcome: "none",
+						next_action: "review.capture-result",
+					};
+				}
 				// Ordinary final verification (field defect, 2026-08-16): at
 				// native state `validating` the provider collects one final
 				// `review.capture-evidence` record and then offers exactly one
@@ -6335,6 +6400,7 @@ async function executeReviewControllerOperation(
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(signal === undefined ? {} : { signal }),
 				});
+				hydrateDispatchBindingFromStatus(candidateViews, defaultCwd, status);
 				return mapNativeTargetStatus(parameters.operation, status, parameters.lineageId);
 			} catch (error) {
 				return nativeOperationFailure(parameters.operation, error);
