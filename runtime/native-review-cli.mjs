@@ -544,6 +544,21 @@ export const NATIVE_REVIEW_CONSENT_ANSWER = { GRANTED: "granted", DECLINED: "dec
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export const NATIVE_REVIEW_AUTHORITY_STATUS = {
 	CLEAN: "clean",
 	ACTIVE: "active",
@@ -2430,6 +2445,7 @@ export class NativeReviewCliV216                            {
 			"--projection", request.projection ?? "workspace",
 			...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef]),
 			...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
+			...(request.agent === undefined ? [] : ["--agent", request.agent]),
 			"--next-transition",
 		], false, request.signal);
 		assertSupportedNextTransitionOperation(execution.body);

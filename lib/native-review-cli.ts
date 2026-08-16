@@ -540,7 +540,22 @@ export interface NativeBindSddRequest { cwd: string; change: string; lineage: st
 export interface NativeSddStatusRequest { cwd: string; change: string; signal?: AbortSignal; }
 export interface NativeReviewStatusRequest { cwd: string; signal?: AbortSignal; }
 export interface NativeCapabilitiesRequest { cwd?: string; signal?: AbortSignal; }
-export interface NativeTargetStatusRequest { cwd: string; lineageId?: string; baseRef?: string; projection?: "workspace" | "staged"; signal?: AbortSignal; }
+export interface NativeTargetStatusRequest {
+	cwd: string;
+	lineageId?: string;
+	baseRef?: string;
+	projection?: "workspace" | "staged";
+	/**
+	 * The immutable reviewer runtime this host provides. Measured against the
+	 * live 2.4.0-main provider: the materialize-marked relay slot (agent=pi,
+	 * materialize=true, plus the provider submission) is offered ONLY when the
+	 * caller names its agent; an agent-less status returns a bare
+	 * capture-result input the host relay cannot consume. Older providers
+	 * (pinned 2.2.3) refuse the flag, so callers probe and fall back.
+	 */
+	agent?: "pi";
+	signal?: AbortSignal;
+}
 export interface NativeGateContext { lineageId: string; storeRevision: string; raw: Record<string, unknown>; }
 
 export const NATIVE_REVIEW_AUTHORITY_STATUS = {
@@ -2429,6 +2444,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			"--projection", request.projection ?? "workspace",
 			...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef]),
 			...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
+			...(request.agent === undefined ? [] : ["--agent", request.agent]),
 			"--next-transition",
 		], false, request.signal);
 		assertSupportedNextTransitionOperation(execution.body);

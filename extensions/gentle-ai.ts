@@ -126,6 +126,7 @@ import {
 	NativeReviewCliError,
 	NativeReviewConsentBindingError,
 	NativeReviewConsentRequiredError,
+	NativeReviewIntegrationError,
 	NATIVE_REVIEW_ERROR_CODE,
 	NATIVE_REVIEW_OPERATION,
 	NATIVE_REVIEW_LEGACY_QUARANTINE,
@@ -135,6 +136,7 @@ import {
 	NATIVE_REVIEW_RECONCILE_ANOMALIES,
 	sanitizeForeignNativeReviewDiagnostics,
 	type NativeReviewCli,
+	type NativeTargetStatusRequest,
 	type NativeFinalizeResult,
 	type NativeReviewVerificationEvidenceV2,
 	type NativeReviewModeOperation,
@@ -5512,6 +5514,60 @@ function pendingReviewerLenses(status: ReviewStatusV3): readonly string[] {
 // through STATUS. It also never fails its caller: STATUS and the blocked
 // FINALIZE envelope stay read-only, and the outcome is returned so the caller
 // can report it instead of swallowing it.
+// Field defect (2026-08-16, third report): the Pi host relay never ran for a
+// real lineage. Measured against the live 2.4.0-main provider on a faithful
+// reproduction — an agent-less `review status` returns a bare capture-result
+// collect input (lineage, expected-revision, target, repository-context, lens,
+// order, subject-hash), while the SAME status with `--agent pi` additionally
+// carries agent=pi, materialize=true and the provider submission. The adapter
+// never named its agent, so reviewHostRelaySlots() saw zero materialize slots,
+// the relay was unreachable, and no lens was ever launched.
+//
+// The agent is PROBED, never assumed: the pinned 2.2.3 provider refuses the
+// flag outright. A typed refusal is remembered per provider instance and the
+// exact provider cause is reported to the user rather than degraded into a
+// generic candidate-view message.
+const REVIEW_HOST_AGENT = "pi" as const;
+const REVIEW_TRANSPORT_REFUSAL_CODES = new Set([
+	"immutable_review_transport_unsupported",
+	"unsupported_agent",
+	"unknown_flag",
+]);
+interface ReviewTransportRefusal { supported: false; code: string; message: string; }
+const reviewTransportRefusalByProvider = new WeakMap<object, ReviewTransportRefusal>();
+
+function clearReviewTransportProbeForTesting(nativeReviewCli: NativeReviewCli | null): void {
+	if (nativeReviewCli !== null) reviewTransportRefusalByProvider.delete(nativeReviewCli as unknown as object);
+}
+
+/**
+ * Queries negotiated STATUS for the pi reviewer transport so the provider
+ * offers its materialize-marked relay slot, probing the agent exactly once per
+ * provider and falling back to the agent-less status on a typed refusal. The
+ * refusal is returned, never swallowed.
+ */
+async function negotiatedStatusForHostTransport(
+	nativeReviewCli: NativeReviewCli,
+	request: NativeTargetStatusRequest,
+): Promise<{ status: ReviewStatusV3; transport?: ReviewTransportRefusal }> {
+	const provider = nativeReviewCli as unknown as object;
+	const remembered = reviewTransportRefusalByProvider.get(provider);
+	if (remembered !== undefined) {
+		return { status: await nativeReviewCli.targetStatus!(request), transport: remembered };
+	}
+	try {
+		return { status: await nativeReviewCli.targetStatus!({ ...request, agent: REVIEW_HOST_AGENT }) };
+	} catch (error) {
+		const code = error instanceof NativeReviewIntegrationError ? error.failureEnvelope.code : undefined;
+		// Only a transport-shaped refusal falls back; every other failure is
+		// the caller's to handle exactly as before.
+		if (code === undefined || !REVIEW_TRANSPORT_REFUSAL_CODES.has(code)) throw error;
+		const refusal: ReviewTransportRefusal = { supported: false, code, message: error.message };
+		reviewTransportRefusalByProvider.set(provider, refusal);
+		return { status: await nativeReviewCli.targetStatus!(request), transport: refusal };
+	}
+}
+
 type DispatchHydrationOutcome =
 	| { hydrated: true; lineage_id: string; lenses: readonly string[] }
 	| { hydrated: false; lineage_id: string; reason: string; message: string }
@@ -5969,6 +6025,7 @@ async function executeReviewControllerOperation(
 			let provisionalCandidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			let nativeResult: NativeFinalizeResult | undefined;
 			let correctionStep: CorrectionStep | undefined;
+			let transportRefusal: ReviewTransportRefusal | undefined;
 			try {
 				if (parameters.lineageId === undefined) throw new CandidateViewError("Native FINALIZE requires an explicit lineage");
 				correctionCompletion = input.validation !== undefined && input.final_evidence !== undefined;
@@ -5985,7 +6042,13 @@ async function executeReviewControllerOperation(
 				}
 				candidateView?.verify();
 				const statusCandidateRoot = candidateView?.root ?? defaultCwd;
-				negotiatedStatus = await nativeReviewCli.targetStatus({ cwd: statusCandidateRoot, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+				// Name the host's reviewer transport so the provider offers its
+				// materialize-marked relay slot; a provider without that
+				// transport answers the agent-less status and its typed refusal
+				// travels with the result.
+				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: statusCandidateRoot, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+				negotiatedStatus = negotiated.status;
+				transportRefusal = negotiated.transport;
 				if (negotiatedStatus.applicability !== "current_target" || negotiatedStatus.authority?.lineageId !== parameters.lineageId || (negotiatedStatus.action !== "finalize" && negotiatedStatus.action !== "reconcile_finalize")) {
 					if (provisionalCandidateView && candidateViews) {
 						candidateViews.cleanup(provisionalCandidateView.token);
@@ -6008,7 +6071,9 @@ async function executeReviewControllerOperation(
 				// the workspace root before executing any rendered payload.
 				// Pinned pre-v5 emitters keep the frozen-view status untouched.
 				if (statusCandidateRoot !== defaultCwd && (negotiatedStatus.raw as { schema?: unknown }).schema === "gentle-ai.review-integration.status/v5") {
-					const workspaceStatus = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+					const rebound = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+					const workspaceStatus = rebound.status;
+					transportRefusal = rebound.transport;
 					if (workspaceStatus.authority?.lineageId !== parameters.lineageId || workspaceStatus.authority.revision !== negotiatedStatus.authority.revision) {
 						throw new CandidateViewError("workspace-root status no longer matches the negotiated lifecycle authority", "workspace-status-rebind-drift");
 					}
@@ -6021,7 +6086,14 @@ async function executeReviewControllerOperation(
 					? reviewHostRelaySlots(negotiatedStatus.nextTransition.collect?.inputs ?? [])
 					: [];
 				if (hostRelaySlots.length > 0 && input.final_evidence === undefined && input.correction_line_forecast === undefined) {
-					return await executeReviewHostRelayCollection(parameters.operation, parameters.lineageId, hostRelaySlots, nativeReviewCli, defaultCwd, signal);
+					// The relay itself needs no candidate view (it consumes only
+					// provider-issued tokens), but a session that dispatches a
+					// reviewer by hand on this same lineage does. Hydrate here too
+					// so both routes work; it is best-effort and never fails the
+					// relay.
+					const relayDispatchBinding = hydrateDispatchBindingFromStatus(candidateViews, defaultCwd, negotiatedStatus);
+					const relayResult = await executeReviewHostRelayCollection(parameters.operation, parameters.lineageId, hostRelaySlots, nativeReviewCli, defaultCwd, signal);
+					return relayDispatchBinding === undefined ? relayResult : { ...relayResult, dispatch_binding: relayDispatchBinding };
 				}
 				// gentle-pi#311 P4-roles: the provider renders the non-lens
 				// adversarial roles as self-contained --execute vectors; each is
@@ -6062,9 +6134,12 @@ async function executeReviewControllerOperation(
 						operation: parameters.operation,
 						status: "blocked",
 						outcome: "reviewer-results-required",
-						reason: "Capture the reviewer result first; the provider offers review.capture-result. Correction evidence and targeted validation are never admissible while reviewer results are outstanding.",
+						reason: transportRefusal === undefined
+							? "Capture the reviewer result first; the provider offers review.capture-result. Correction evidence and targeted validation are never admissible while reviewer results are outstanding."
+							: `Capture the reviewer result first; the provider offers review.capture-result. This provider does not admit the pi reviewer transport (${transportRefusal.code}), so it offers no host-relay slot: ${transportRefusal.message}`,
 						...(outstandingReviewerLenses.length === 0 ? {} : { pending_lenses: outstandingReviewerLenses }),
 						...(dispatchBinding === undefined ? {} : { dispatch_binding: dispatchBinding }),
+						...(transportRefusal === undefined ? {} : { relay_transport: transportRefusal }),
 						result: negotiatedStatus.raw,
 						mutation_performed: false,
 						mutation_outcome: "none",
@@ -6835,6 +6910,7 @@ export const __testing = {
 	nativeStatusUnsupported,
 	executeReviewControllerOperation,
 	setReviewHostRelayRunnerForTesting,
+	clearReviewTransportProbeForTesting,
 	enforceReviewGateAndCommandSafety,
 	renderSddModelPanel: renderSddModelPanelForTesting,
 	getOrchestratorPrompt,
