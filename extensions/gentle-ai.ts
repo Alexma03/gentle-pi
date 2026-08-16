@@ -6204,6 +6204,25 @@ async function executeReviewControllerOperation(
 				// belongs to a different worktree than the requested workspace (#169).
 				if (candidateViews && parameters.lineageId && candidateViews.hasProjection(parameters.lineageId)) candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
 				candidateView ??= candidateViews && parameters.lineageId && !ordinaryFinalVerification ? (correctionCompletion || validationAttempt) ? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey) : candidateViews.resolveForFinalize(parameters.lineageId) : undefined;
+				// Field defect (Engram #12547): a FINALIZE that merely follows the
+				// provider's own execute transition carries no documents, so
+				// neither correctionCompletion nor validationAttempt holds and the
+				// START-time reviewer view is resolved. After an admitted bounded
+				// correction the candidate identity has legitimately moved, so
+				// that view is compared against the corrected target the provider
+				// itself authorized and every finalize fails as drift — no receipt
+				// is ever minted, while a fresh process finalizes the same lineage
+				// fine because it restores from the native descriptor. Re-derive
+				// the binding from that same descriptor here instead of reading a
+				// retired reviewer view as drift. It is not a relaxation: the
+				// replacement is materialized from Git, must match the provider
+				// descriptor exactly, and is asserted immediately below.
+				if (
+					candidateView !== undefined && candidateViews && parameters.lineageId && !ordinaryFinalVerification &&
+					candidateView.candidateTree !== negotiatedStatus.projection.currentCandidateTree
+				) {
+					candidateView = candidateViews.rebindForFinalizeFromNative(parameters.lineageId, defaultCwd, negotiatedStatus.projection);
+				}
 				if (candidateView !== undefined) assertNativeFinalizeCandidateBinding(candidateView, negotiatedStatus);
 				if (ordinaryFinalVerification && parameters.lineageId) {
 					// A projection held by this process routes the top-of-try path
