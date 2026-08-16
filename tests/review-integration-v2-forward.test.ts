@@ -74,6 +74,21 @@ import {
 //   the path form re-ran the exact same admitted slot with --cwd instead,
 //   which discovers the identical canonical bytes and answers with the
 //   provider-owned store path. Both agree on every binding field.
+// - status-v5-capture-result-submission.captured.json was captured 2026-08-16
+//   from the real binary at /home/gentleman/.cargo/bin/gentle-ai reporting
+//   "gentle-ai 2.4.0-main.b1afef46", in a scratch git repository holding a
+//   committed src/add.js baseline plus an uncommitted double() helper
+//   (medium tier, one review-reliability lens), with
+//   GENTLE_PI_REVIEW_RELAY_CONTRACT=gentle-pi.review-relay/v1 exported:
+//   negotiated STATUS (--agent pi), the rendered consent/v3 START, its exact
+//   granted invocation, then
+//     gentle-ai review status --contract gentle-ai.review-integration/v2 \
+//       --cwd <scratch> --agent pi --next-transition
+//   at reviewer_results_required. Its materialize capture-result collect
+//   input carries the submission descriptor as a SINGULAR `value` object
+//   with a `schema` key (emitter: gentle-ai f1a95179, singular from its
+//   first commit) — not the `values` array this decoder was originally
+//   written against. The capture is authoritative.
 
 const fixtureRoot = join(import.meta.dirname, "fixtures", "devbinary");
 const fixture = <T = Record<string, unknown>>(name: string): T => JSON.parse(readFileSync(join(fixtureRoot, name), "utf8")) as T;
@@ -318,6 +333,72 @@ test("a v5 provider role task input decodes and is confined to external.run_prov
 	const misplaced = fixture<JsonObject>("status-v5.captured.json");
 	(((misplaced.next_transition as JsonObject).collect as JsonObject).inputs as JsonObject[])[0]!.provider_task = providerTask;
 	assert.throws(() => decodeReviewStatusV3(misplaced), /provider_task/);
+});
+
+// --- v5 pi materialize capture-result submission: the singular `value` form ---
+
+test("the captured v5 materialize capture-result submission decodes its singular value form", () => {
+	const status = decodeReviewStatusV3(fixture("status-v5-capture-result-submission.captured.json"));
+	assert.equal(status.authority?.state, "reviewing");
+	assert.equal(status.nextTransition?.reasonCode, "reviewer_results_required");
+	const input = status.nextTransition?.collect?.inputs[0];
+	assert.equal(input?.captureOperation, "review.capture-result");
+	assert.equal(input?.submissionDescriptor, undefined);
+	assert.equal(input?.submission?.operationToken, "capture-result");
+	// The singular wire `value` normalizes into the typed one-entry values
+	// array the host relay already consumes.
+	assert.deepEqual(input?.submission?.values, [{
+		slot: "reviewer_result",
+		domain: "artifact_path_or_stdin",
+		schema: "https://gentle-ai.dev/schema/review/reviewer/v1",
+		substitutionLocation: 7,
+	}]);
+});
+
+test("the v5 singular capture-result value form is closed to its captured shape", () => {
+	const base = fixture<JsonObject>("status-v5-capture-result-submission.captured.json");
+	const withSubmission = (mutate: (submission: JsonObject) => void): JsonObject => {
+		const body = clone(base);
+		mutate((((body.next_transition as JsonObject).collect as JsonObject).inputs as JsonObject[])[0]!.submission as JsonObject);
+		return body;
+	};
+	// Carrying both wire forms at once matches no captured shape.
+	assert.throws(() => decodeReviewStatusV3(withSubmission((submission) => {
+		submission.values = [submission.value];
+	})), /value/);
+	// The singular form owns no numeric or enumerated domain: minimum,
+	// maximum, and allowed_values belong to the finalize/capture-evidence
+	// descriptor forms only.
+	for (const [key, smuggled] of [["minimum", 1], ["maximum", 2], ["allowed_values", ["x"]]] as const) {
+		assert.throws(() => decodeReviewStatusV3(withSubmission((submission) => {
+			(submission.value as JsonObject)[key] = smuggled;
+		})), /not allowed/);
+	}
+	// The captured form always names its reviewer schema and slot.
+	assert.throws(() => decodeReviewStatusV3(withSubmission((submission) => {
+		delete (submission.value as JsonObject).schema;
+	})), /schema/);
+	assert.throws(() => decodeReviewStatusV3(withSubmission((submission) => {
+		(submission.value as JsonObject).slot = "validation";
+	})), /slot/);
+	assert.throws(() => decodeReviewStatusV3(withSubmission((submission) => {
+		submission.operation_token = "finalize-relay";
+	})), /operation_token/);
+	// The legacy values-array rows stay exactly as they were: they never
+	// learned the schema key the singular form carries.
+	assert.throws(() => decodeReviewStatusV3(withSubmission((submission) => {
+		const row = submission.value as JsonObject;
+		delete submission.value;
+		submission.values = [row];
+	})), /not allowed/);
+});
+
+test("the v3 identity keeps rejecting the singular capture-result value form", () => {
+	const body = clone(fixture<JsonObject>("status-v5-capture-result-submission.captured.json"));
+	body.schema = "gentle-ai.review-integration.status/v3";
+	delete body.forecast;
+	delete body.repository_context;
+	assert.throws(() => decodeReviewStatusV3(body), /values is required/);
 });
 
 test("the v3 next transition keeps rejecting every v5-only surface", () => {
