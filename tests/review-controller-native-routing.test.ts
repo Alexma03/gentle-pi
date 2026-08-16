@@ -5208,3 +5208,516 @@ test("large repository end-to-end: tiny candidate diff reaches START, reviewer d
 		frozen.cleanup();
 	}
 });
+
+// Field defect (fambig, 2026-08-16, dev binary 2.4.0-main): at every
+// evidence-pending sub-state the provider renders the `review.capture-evidence`
+// collect slot with the identity native demands — for a correction that is the
+// FIX-DIFF `--target` identity plus an opaque `--repository-context`, never the
+// top-level live workspace snapshot identity. Rebinding the capture to
+// `negotiatedStatus.targetIdentity` failed deterministically with
+// "verification evidence binding does not match the current authority
+// revision". Collect satisfaction must execute the slot's rendered submission
+// tokens verbatim, exactly like captureResult does.
+const EVIDENCE_SLOT_FIX_TARGET = `sha256:${"e".repeat(64)}`;
+const EVIDENCE_SLOT_REPOSITORY_CONTEXT = `rctx1_${"f".repeat(64)}`;
+
+function bindEvidenceSubmissionCollection(status: ReviewStatusV3, fixTargetIdentity = EVIDENCE_SLOT_FIX_TARGET, repositoryContext = EVIDENCE_SLOT_REPOSITORY_CONTEXT): ReviewStatusV3 {
+	const lineageId = status.authority!.lineageId;
+	const revision = status.authority!.revision;
+	const argumentTokens = [
+		`--lineage=${lineageId}`,
+		`--expected-revision=${revision}`,
+		`--target=${fixTargetIdentity}`,
+		`--repository-context=${repositoryContext}`,
+		"--outcome={{outcome}}",
+		"--input={{input}}",
+	];
+	status.nextTransition = {
+		kind: "collect",
+		reasonCode: "correction_repository_verification_required",
+		collect: { inputs: [{
+			name: "evidence",
+			schema: "https://gentle-ai.dev/schema/review/verification-evidence/v1",
+			captureOperation: "review.capture-evidence",
+			arguments: [
+				{ name: "lineage", value: lineageId, token: `--lineage=${lineageId}` },
+				{ name: "expected-revision", value: revision, token: `--expected-revision=${revision}` },
+				{ name: "target", value: fixTargetIdentity, token: `--target=${fixTargetIdentity}` },
+				{ name: "repository-context", value: repositoryContext, token: `--repository-context=${repositoryContext}` },
+			],
+			submissionDescriptor: {
+				operationToken: "capture-evidence",
+				argumentTokens,
+				values: [
+					{ slot: "outcome", domain: "verification_outcome", allowedValues: ["passed", "verification_failed", "procedural_tooling_failed"], substitutionLocation: 4 },
+					{ slot: "input", domain: "artifact_path_or_stdin", schema: "https://gentle-ai.dev/schema/review/verification-evidence/v1", substitutionLocation: 5 },
+				],
+			},
+		}] },
+	};
+	delete status.validationRequest;
+	return status;
+}
+
+// The record the live binary returns for a slot-bound capture: it binds the
+// slot's fix-diff target identity, and its paths digest covers the record's
+// own (fix-diff) paths — NOT the frozen projection digest (captured 2026-08-16,
+// lineage review-2b6206ed68fb9128: record paths ["calc.go"] against projection
+// paths ["calc.go", "util.go"]).
+function capturedSlotEvidence(status: ReviewStatusV3, outcome: "passed" | "verification_failed" | "procedural_tooling_failed", identityDigit: string) {
+	return {
+		...capturedCorrectionEvidence(status, outcome, identityDigit),
+		targetIdentity: EVIDENCE_SLOT_FIX_TARGET,
+		pathsDigest: `sha256:${identityDigit.repeat(64)}`,
+	};
+}
+
+test("correction evidence capture executes the collect slot's rendered submission tokens verbatim", async (t) => {
+	for (const [outcome, expectedKind] of [
+		["passed", "run-targeted-validation"],
+		["verification_failed", "recapture-required"],
+	] as const) {
+		await t.test(outcome, async (scenario) => {
+			const cwd = repository(scenario);
+			writeFileSync(join(cwd, "app.ts"), `export const outcome = ${JSON.stringify(outcome)};\n`);
+			const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+			const beforeCapture = bindEvidenceSubmissionCollection(targetStatusFixture({
+				lineageId: `slot-correction-${outcome.replaceAll("_", "-")}`,
+				authorityState: "correction_required",
+				baseTree: frozen.baseTree,
+				currentCandidateTree: frozen.candidateTree,
+				paths: frozen.paths,
+			}));
+			const expectedTokens = beforeCapture.nextTransition!.collect!.inputs[0]!.submissionDescriptor!.argumentTokens;
+			const afterCapture = targetStatusFixture({
+				lineageId: beforeCapture.authority!.lineageId,
+				authorityState: outcome === "passed" ? "validating" : "correction_required",
+				baseTree: frozen.baseTree,
+				currentCandidateTree: frozen.candidateTree,
+				paths: frozen.paths,
+			});
+			if (outcome === "passed") bindTargetedValidation(afterCapture);
+			else bindEvidenceSubmissionCollection(afterCapture);
+			frozen.cleanup();
+			const misboundCaptures: Array<Record<string, unknown>> = [];
+			const submissions: Array<Record<string, unknown>> = [];
+			let statuses = 0;
+			let finalizes = 0;
+			const { controller } = runtime(fakeNative({
+				targetStatus: async () => {
+					statuses += 1;
+					return statuses === 1 ? beforeCapture : afterCapture;
+				},
+				captureEvidence: async (request) => {
+					misboundCaptures.push(request as unknown as Record<string, unknown>);
+					throw new Error("misbound capture: the collect slot's rendered submission tokens were bypassed");
+				},
+				captureEvidenceSubmission: async (request: Record<string, unknown>) => {
+					submissions.push(request);
+					return capturedSlotEvidence(beforeCapture, outcome, outcome === "passed" ? "1" : "2");
+				},
+				finalize: async () => {
+					finalizes += 1;
+					return { lineageId: beforeCapture.authority!.lineageId, state: "approved", action: "approved", storeRevision: "r-final" };
+				},
+			} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+			const validation = outcome === "passed" ? {
+				request_hash: "9".repeat(64), correction_ids: [],
+				original_criteria: { passed: true, evidence: ["acceptance passes"] },
+				correction_regression: { passed: true, evidence: ["regression passes"] },
+				fix_caused_findings: [], follow_ups: [],
+			} : undefined;
+			const result = await controller.execute(`slot-correction-${outcome}`, {
+				operation: "finalize",
+				lineageId: beforeCapture.authority!.lineageId,
+				input: JSON.stringify({ final_evidence: `evidence: ${outcome}`, final_verification_outcome: outcome, ...(validation === undefined ? {} : { validation }) }),
+			}, undefined, undefined, context(cwd));
+			const details = result.details as Record<string, unknown>;
+			assert.deepEqual(misboundCaptures, [], "capture-evidence must never rebind to the top-level live workspace identity");
+			assert.equal(submissions.length, 1, "the slot submission must be executed exactly once");
+			const submission = submissions[0]!;
+			assert.deepEqual(submission.argumentTokens, expectedTokens, "the provider-rendered submission tokens must be passed verbatim, in provider order");
+			assert.equal(submission.outcomeSubstitutionLocation, 4);
+			assert.equal(submission.inputSubstitutionLocation, 5);
+			assert.equal(submission.cwd, undefined, "the slot's --repository-context is authoritative; never pass --cwd alongside it");
+			assert.equal(submission.outcome, outcome);
+			assert.equal(submission.evidenceDocument, `evidence: ${outcome}`);
+			assert.equal((details.correction_step as { kind?: string } | undefined)?.kind, expectedKind);
+			assert.equal(finalizes, outcome === "passed" ? 1 : 0);
+		});
+	}
+});
+
+test("ordinary final verification at validating captures evidence through the slot's rendered submission tokens", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const finalSlot = true;\n");
+	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+	const beforeCapture = bindEvidenceSubmissionCollection(targetStatusFixture({
+		lineageId: "final-verification-slot",
+		authorityState: "validating",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}));
+	const expectedTokens = beforeCapture.nextTransition!.collect!.inputs[0]!.submissionDescriptor!.argumentTokens;
+	const afterCapture = bindFinalVerificationTransition(targetStatusFixture({
+		lineageId: "final-verification-slot",
+		authorityState: "validating",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}), "passed");
+	frozen.cleanup();
+	const misboundCaptures: Array<Record<string, unknown>> = [];
+	const submissions: Array<Record<string, unknown>> = [];
+	const transitions: Array<readonly string[]> = [];
+	let statuses = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statuses += 1;
+			return statuses === 1 ? beforeCapture : afterCapture;
+		},
+		captureEvidence: async (request) => {
+			misboundCaptures.push(request as unknown as Record<string, unknown>);
+			throw new Error("misbound capture: the collect slot's rendered submission tokens were bypassed");
+		},
+		captureEvidenceSubmission: async (request: Record<string, unknown>) => {
+			submissions.push(request);
+			return capturedSlotEvidence(beforeCapture, "passed", "3");
+		},
+		finalizeTransition: async (request) => {
+			transitions.push(request.argumentTokens);
+			return { lineageId: "final-verification-slot", state: "approved", action: "terminal", storeRevision: "r2", receiptPath: "/opaque/receipt" };
+		},
+	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	const result = await controller.execute("final-verification-slot", {
+		operation: "finalize",
+		lineageId: "final-verification-slot",
+		input: JSON.stringify({ final_evidence: "verification run: passed", final_verification_outcome: "passed" }),
+	}, undefined, undefined, context(cwd));
+	const details = result.details as Record<string, unknown>;
+	assert.deepEqual(misboundCaptures, [], "capture-evidence must never rebind to the top-level live workspace identity");
+	assert.equal(submissions.length, 1);
+	assert.deepEqual(submissions[0]!.argumentTokens, expectedTokens);
+	assert.equal(submissions[0]!.cwd, undefined, "the slot's --repository-context is authoritative; never pass --cwd alongside it");
+	assert.deepEqual(transitions, [["--lineage=final-verification-slot", "--captured-evidence=true"]]);
+	assert.equal((details.result as { state?: string } | undefined)?.state, "approved");
+});
+
+// Field defect amplifier (fambig, 2026-08-16): an envelope-less mutating
+// failure is stamped mutationOutcome "unknown", and the reconciler KEPT
+// "unknown" even after fresh STATUS proved the authority revision identical to
+// the pre-operation revision — reporting a replay prohibition for an operation
+// that provably never mutated. A proven non-mutation must be reported as
+// mutation_outcome none with the proof named; a genuinely ambiguous result
+// (revision moved, or STATUS unavailable) stays fail-closed unknown.
+test("finalize reconciliation downgrades an envelope-less unknown to proven non-mutation when the authority revision is unchanged", async (t) => {
+	const cwd = repository(t);
+	let statuses = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statuses += 1;
+			return targetStatusFixture({ lineageId: "unchanged-revision" });
+		},
+		finalize: async () => {
+			throw Object.assign(new Error("stderr-only native failure without a typed envelope"), { mutationOutcome: "unknown", nextAction: "review.status" });
+		},
+	}));
+	const details = (await controller.execute("proven-none", { operation: "finalize", lineageId: "unchanged-revision", input: "{}" }, undefined, undefined, context(cwd))).details as Record<string, unknown>;
+	assert.equal(details.outcome, "native-mutation-status-reconciled");
+	assert.equal(details.mutation_performed, false, "a reconciled unchanged revision proves the operation did not mutate");
+	assert.equal(details.mutation_outcome, "none");
+	assert.match(String(details.mutation_outcome_reason), /revision unchanged/i, "the downgrade must name its proof");
+	assert.equal("replayability" in details, false, "a proven non-mutation must not claim replay prohibition");
+	assert.equal(details.next_action, "finalize");
+	assert.equal(statuses, 2);
+});
+
+test("finalize reconciliation preserves fail-closed unknown when the reconciled authority revision moved", async (t) => {
+	const cwd = repository(t);
+	const moved = targetStatusFixture({ lineageId: "moved-revision" });
+	moved.authority!.revision = `sha256:${"b".repeat(64)}`;
+	let statuses = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statuses += 1;
+			return statuses === 1 ? targetStatusFixture({ lineageId: "moved-revision" }) : moved;
+		},
+		finalize: async () => {
+			throw Object.assign(new Error("stderr-only native failure without a typed envelope"), { mutationOutcome: "unknown", nextAction: "review.status" });
+		},
+	}));
+	const details = (await controller.execute("kept-unknown", { operation: "finalize", lineageId: "moved-revision", input: "{}" }, undefined, undefined, context(cwd))).details as Record<string, unknown>;
+	assert.equal(details.outcome, "native-mutation-status-reconciled");
+	assert.equal(details.mutation_outcome, "unknown", "a moved revision is genuinely ambiguous and must stay fail-closed");
+	assert.equal(details.replayability, "not_replayable");
+});
+
+// Same misbinding class, remaining finalize-form slots (live smoke,
+// 2026-08-16, dev binary 2.4.0-main): the correction PLAN and TARGETED
+// VALIDATION collect slots render `finalize` submission descriptors whose
+// tokens carry --contract/--lineage/--expected-revision/--target/
+// --request-hash/--repository-context plus one {{value}} slot. The legacy
+// reconstructed `finalize --correction-lines/--validation` argv fails on the
+// live emitter with "reconcile compact predecessor effects: repository
+// context effect binding or payload does not match committed intent". Collect
+// satisfaction must execute the rendered tokens verbatim.
+function bindPlanSubmissionCollection(status: ReviewStatusV3, repositoryContext = EVIDENCE_SLOT_REPOSITORY_CONTEXT): ReviewStatusV3 {
+	const lineageId = status.authority!.lineageId;
+	const revision = status.authority!.revision;
+	status.nextTransition = {
+		kind: "collect",
+		reasonCode: "correction_plan_required",
+		collect: { inputs: [{
+			name: "correction_lines",
+			schema: "gentle-ai.review-correction-plan/v1",
+			captureOperation: "external.plan_correction",
+			arguments: [
+				{ name: "lineage", value: lineageId, token: `--lineage=${lineageId}` },
+				{ name: "expected-revision", value: revision, token: `--expected-revision=${revision}` },
+				{ name: "target", value: status.targetIdentity, token: `--target=${status.targetIdentity}` },
+			],
+			submissionDescriptor: {
+				operationToken: "finalize",
+				argumentTokens: [
+					"--contract=gentle-ai.review-integration/v2",
+					`--lineage=${lineageId}`,
+					`--expected-revision=${revision}`,
+					`--target=${status.targetIdentity}`,
+					`--request-hash=sha256:${"c".repeat(64)}`,
+					`--repository-context=${repositoryContext}`,
+					"--correction-lines={{value}}",
+				],
+				value: { slot: "correction_lines", domain: "positive_correction_lines", minimum: 1, maximum: 9, substitutionLocation: 6 },
+			},
+		}] },
+	};
+	delete status.validationRequest;
+	return status;
+}
+
+test("correction plan forecast executes the collect slot's rendered finalize submission tokens verbatim", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const plan = true;\n");
+	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+	const status = bindPlanSubmissionCollection(targetStatusFixture({
+		lineageId: "plan-submission",
+		authorityState: "correction_required",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}));
+	const expectedTokens = status.nextTransition!.collect!.inputs[0]!.submissionDescriptor!.argumentTokens;
+	frozen.cleanup();
+	const legacyFinalizes: Array<Record<string, unknown>> = [];
+	const submissions: Array<Record<string, unknown>> = [];
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => status,
+		finalize: async (request) => {
+			legacyFinalizes.push(request as unknown as Record<string, unknown>);
+			throw new Error("misbound plan: the collect slot's rendered finalize submission tokens were bypassed");
+		},
+		finalizeSubmission: async (request: Record<string, unknown>) => {
+			submissions.push(request);
+			return { lineageId: "plan-submission", state: "correction_required", action: "continue the current review state", storeRevision: "r-plan" };
+		},
+	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	const planned = await controller.execute("plan-submission", {
+		operation: "finalize",
+		lineageId: "plan-submission",
+		input: JSON.stringify({ correction_line_forecast: 2 }),
+	}, undefined, undefined, context(cwd));
+	const details = planned.details as Record<string, unknown>;
+	assert.deepEqual(legacyFinalizes, [], "the legacy reconstructed --correction-lines argv must never run when the slot renders submission tokens");
+	assert.equal(submissions.length, 1);
+	assert.deepEqual(submissions[0]!.argumentTokens, expectedTokens, "the provider-rendered submission tokens must be passed verbatim, in provider order");
+	assert.equal(submissions[0]!.valueSubstitutionLocation, 6);
+	assert.equal(submissions[0]!.valueLiteral, "2");
+	assert.equal((details.result as { state?: string } | undefined)?.state, "correction_required");
+
+	// An out-of-bounds forecast fails closed before any native launch.
+	const outOfBounds = await controller.execute("plan-submission-oob", {
+		operation: "finalize",
+		lineageId: "plan-submission",
+		input: JSON.stringify({ correction_line_forecast: 99 }),
+	}, undefined, undefined, context(cwd));
+	assert.equal((outOfBounds.details as { outcome?: string }).outcome, "native-operation-failed");
+	assert.match(JSON.stringify(outOfBounds.details), /correction-forecast-out-of-bounds/);
+	assert.equal(submissions.length, 1);
+	assert.deepEqual(legacyFinalizes, []);
+	execFileSync("chmod", ["-R", "u+w", cwd]);
+});
+
+function bindTargetedValidationSubmission(status: ReviewStatusV3): ReviewStatusV3 {
+	bindTargetedValidation(status);
+	const input = status.nextTransition!.collect!.inputs[0]! as { submissionDescriptor?: unknown };
+	const lineageId = status.authority!.lineageId;
+	const revision = status.authority!.revision;
+	input.submissionDescriptor = {
+		operationToken: "finalize",
+		argumentTokens: [
+			"--contract=gentle-ai.review-integration/v2",
+			`--lineage=${lineageId}`,
+			`--expected-revision=${revision}`,
+			`--target=${status.targetIdentity}`,
+			`--request-hash=${status.validationRequest!.requestHash}`,
+			`--repository-context=${EVIDENCE_SLOT_REPOSITORY_CONTEXT}`,
+			"--validation={{value}}",
+		],
+		value: { slot: "validation", domain: "artifact_path_or_stdin", substitutionLocation: 6 },
+	};
+	return status;
+}
+
+test("targeted validation executes the collect slot's rendered finalize submission tokens verbatim", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const validated = true;\n");
+	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+	const beforeCapture = bindEvidenceSubmissionCollection(targetStatusFixture({
+		lineageId: "validation-submission",
+		authorityState: "correction_required",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}));
+	const afterCapture = bindTargetedValidationSubmission(targetStatusFixture({
+		lineageId: "validation-submission",
+		authorityState: "validating",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}));
+	const expectedTokens = (afterCapture.nextTransition!.collect!.inputs[0]! as { submissionDescriptor: { argumentTokens: readonly string[] } }).submissionDescriptor.argumentTokens;
+	frozen.cleanup();
+	const legacyFinalizes: Array<Record<string, unknown>> = [];
+	const submissions: Array<Record<string, unknown>> = [];
+	let statuses = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statuses += 1;
+			return statuses === 1 ? beforeCapture : afterCapture;
+		},
+		captureEvidenceSubmission: async () => capturedSlotEvidence(beforeCapture, "passed", "7"),
+		finalize: async (request) => {
+			legacyFinalizes.push(request as unknown as Record<string, unknown>);
+			throw new Error("misbound validation: the collect slot's rendered finalize submission tokens were bypassed");
+		},
+		finalizeSubmission: async (request: Record<string, unknown>) => {
+			submissions.push(request);
+			return { lineageId: "validation-submission", state: "approved", action: "approved", storeRevision: "r-approved" };
+		},
+	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	const completed = await controller.execute("validation-submission", {
+		operation: "finalize",
+		lineageId: "validation-submission",
+		input: JSON.stringify({
+			final_evidence: "evidence: passed",
+			final_verification_outcome: "passed",
+			validation: {
+				request_hash: "9".repeat(64), correction_ids: [],
+				original_criteria: { passed: true, evidence: ["acceptance passes"] },
+				correction_regression: { passed: true, evidence: ["regression passes"] },
+				fix_caused_findings: [], follow_ups: [],
+			},
+		}),
+	}, undefined, undefined, context(cwd));
+	const details = completed.details as Record<string, unknown>;
+	assert.deepEqual(legacyFinalizes, [], "the legacy reconstructed --validation argv must never run when the slot renders submission tokens");
+	assert.equal(submissions.length, 1);
+	assert.deepEqual(submissions[0]!.argumentTokens, expectedTokens, "the provider-rendered submission tokens must be passed verbatim, in provider order");
+	assert.equal(submissions[0]!.valueSubstitutionLocation, 6);
+	const staged = JSON.parse(String(submissions[0]!.valueDocument)) as Record<string, unknown>;
+	assert.equal(staged.targeted_validation_request_hash, afterCapture.validationRequest!.requestHash);
+	assert.equal(staged.correction_target_identity, afterCapture.validationRequest!.correctionTargetIdentity);
+	assert.deepEqual(staged.original_criteria, { passed: true, evidence: ["acceptance passes"] });
+	assert.equal((details.result as { state?: string } | undefined)?.state, "approved");
+});
+
+// Live smoke root cause (2026-08-16, dev binary 2.4.0-main): status/v5 mints
+// the opaque --repository-context handle BOUND TO THE STATUS QUERY ROOT, and
+// every rendered payload embeds it. The finalize lane queries negotiated
+// STATUS from a frozen candidate-view root, so every rendered submission it
+// executed carried a context bound to the wrong root and failed the live
+// emitter's committed-intent reconciliation ("repository context effect
+// binding or payload does not match committed intent"). On v5 the lane must
+// rebind its negotiated STATUS to the workspace root before executing any
+// rendered payload; pinned pre-v5 emitters keep the frozen-view status.
+test("status/v5 finalize lane rebinds negotiated status to the workspace root before executing rendered payloads", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const rebind = true;\n");
+	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+	const viewContext = `rctx1_${"a".repeat(64)}`;
+	const workspaceContext = `rctx1_${"b".repeat(64)}`;
+	const makeBefore = (repositoryContext: string) => {
+		const status = bindEvidenceSubmissionCollection(targetStatusFixture({
+			lineageId: "v5-rebind",
+			authorityState: "correction_required",
+			baseTree: frozen.baseTree,
+			currentCandidateTree: frozen.candidateTree,
+			paths: frozen.paths,
+		}), EVIDENCE_SLOT_FIX_TARGET, repositoryContext);
+		(status.raw as Record<string, unknown>).schema = "gentle-ai.review-integration.status/v5";
+		return status;
+	};
+	const viewBefore = makeBefore(viewContext);
+	const workspaceBefore = makeBefore(workspaceContext);
+	const workspaceAfter = bindTargetedValidationSubmission(targetStatusFixture({
+		lineageId: "v5-rebind",
+		authorityState: "validating",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}));
+	(workspaceAfter.raw as Record<string, unknown>).schema = "gentle-ai.review-integration.status/v5";
+	// Live post-evidence shape (2026-08-16): the validation request binds the
+	// FROZEN authority target identity while the top-level target identity is
+	// the live workspace snapshot (which now contains the fix).
+	workspaceAfter.authorityTargetIdentity = workspaceAfter.validationRequest!.targetIdentity;
+	workspaceAfter.targetIdentity = `sha256:${"d".repeat(64)}`;
+	const expectedEvidenceTokens = workspaceBefore.nextTransition!.collect!.inputs[0]!.submissionDescriptor!.argumentTokens;
+	const expectedValidationTokens = (workspaceAfter.nextTransition!.collect!.inputs[0]! as { submissionDescriptor: { argumentTokens: readonly string[] } }).submissionDescriptor.argumentTokens;
+	frozen.cleanup();
+	const statusRoots: string[] = [];
+	const evidenceSubmissions: Array<Record<string, unknown>> = [];
+	const finalizeSubmissions: Array<Record<string, unknown>> = [];
+	let workspaceStatuses = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async (request) => {
+			statusRoots.push(request.cwd);
+			if (request.cwd !== cwd) return viewBefore;
+			workspaceStatuses += 1;
+			return workspaceStatuses === 1 ? workspaceBefore : workspaceAfter;
+		},
+		captureEvidenceSubmission: async (request: Record<string, unknown>) => {
+			evidenceSubmissions.push(request);
+			return capturedSlotEvidence(workspaceBefore, "passed", "8");
+		},
+		finalizeSubmission: async (request: Record<string, unknown>) => {
+			finalizeSubmissions.push(request);
+			return { lineageId: "v5-rebind", state: "approved", action: "approved", storeRevision: "r-approved" };
+		},
+	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	const completed = await controller.execute("v5-rebind", {
+		operation: "finalize",
+		lineageId: "v5-rebind",
+		input: JSON.stringify({
+			final_evidence: "evidence: passed",
+			final_verification_outcome: "passed",
+			validation: {
+				request_hash: "9".repeat(64), correction_ids: [],
+				original_criteria: { passed: true, evidence: ["acceptance passes"] },
+				correction_regression: { passed: true, evidence: ["regression passes"] },
+				fix_caused_findings: [], follow_ups: [],
+			},
+		}),
+	}, undefined, undefined, context(cwd));
+	const details = completed.details as Record<string, unknown>;
+	assert.notEqual(statusRoots[0], cwd, "the first status query still freezes through the candidate view root");
+	assert.equal(statusRoots[1], cwd, "a v5 status must be rebound to the workspace root before any rendered payload executes");
+	assert.equal(evidenceSubmissions.length, 1);
+	assert.deepEqual(evidenceSubmissions[0]!.argumentTokens, expectedEvidenceTokens, "the evidence submission must carry the workspace-root-minted tokens");
+	assert.equal(finalizeSubmissions.length, 1);
+	assert.deepEqual(finalizeSubmissions[0]!.argumentTokens, expectedValidationTokens, "the validation submission must carry the workspace-root-minted tokens");
+	assert.equal(statusRoots.filter((root) => root === cwd).length, 2, "post-evidence status must also be workspace-bound");
+	assert.equal((details.result as { state?: string } | undefined)?.state, "approved");
+});

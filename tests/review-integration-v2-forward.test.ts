@@ -6,6 +6,7 @@ import {
 	decodeReviewCapabilitiesV2,
 	decodeReviewConsentV2,
 	decodeReviewConsentV3,
+	decodeReviewFailureV2,
 	decodeReviewOperationV2,
 	decodeReviewResultArtifactV2,
 	decodeReviewStartV3,
@@ -590,4 +591,41 @@ test("result artifact identities never cross-decode", () => {
 		captured: true,
 	}));
 	assert.throws(() => decodeReviewResultArtifactV2(v2Fixture("status.fixture.json")));
+});
+
+// Fixture provenance:
+// - failure-v2-capture-evidence.captured.json was captured 2026-08-16 from a
+//   binary built at gentle-ai commit a2d57117 (branch
+//   fix/capture-evidence-typed-refusal, `go build ./cmd/gentle-ai`, version
+//   banner "gentle-ai dev"), in a scratch git repository driven to the
+//   correction evidence-pending state (medium start with consent granted,
+//   one deterministic BLOCKER capture-result, rendered finalize transition,
+//   rendered plan-correction submission, bounded fix edit), then a
+//   deliberately misbound capture:
+//     gentle-ai review capture-evidence --cwd <scratch> --lineage <lineage> \
+//       --target <live workspace identity> --expected-revision <revision> \
+//       --outcome passed --input <evidence file>
+//   The live workspace identity instead of the slot's fix-diff --target is
+//   the exact fambig misbinding shape; the branch answers it with the typed
+//   failure/v2 envelope on stdout (operation review.capture-evidence, code
+//   verification_evidence_binding_mismatch, mutation_outcome not_started)
+//   instead of a bare stderr line.
+// - The other three capture-verb operations are constructed from the same
+//   captured envelope, grounded in that branch's
+//   contracts/review-integration/v2/schemas/failure.schema.json 12-value
+//   operation enum; no cheap live flow provokes them individually.
+test("failure/v2 decodes the four collect-capture operations the typed-refusal branch emits", () => {
+	const captured = JSON.parse(readFileSync(join(process.cwd(), "tests", "fixtures", "devbinary", "failure-v2-capture-evidence.captured.json"), "utf8")) as Record<string, unknown>;
+	const decoded = decodeReviewFailureV2(captured);
+	assert.equal(decoded.operation, "review.capture-evidence");
+	assert.equal(decoded.code, "verification_evidence_binding_mismatch");
+	assert.equal(decoded.mutationOutcome, "not_started");
+	assert.equal(decoded.nextAction, "review.status");
+	for (const operation of ["review.capture-result", "review.capture-refuter", "review.capture-validation"]) {
+		assert.equal(decodeReviewFailureV2({ ...captured, operation }).operation, operation, operation);
+	}
+	// Cross-pinned rejection preserved: an operation outside the published
+	// 12-value enum never decodes.
+	assert.throws(() => decodeReviewFailureV2({ ...captured, operation: "review.capture-bogus" }), /failure\.operation/);
+	assert.throws(() => decodeReviewFailureV2({ ...captured, operation: "review.recover" }), /failure\.operation/);
 });

@@ -94,6 +94,18 @@ export const REVIEW_STATUS_ACTION_DISPOSITION = {
 
 const RECEIPT_STATUSES = ["expected_missing", "present", "publication_pending", "not_applicable"]         ;
 const REQUIRED_OPERATIONS = Object.freeze(Object.values(REVIEW_INTEGRATION_OPERATION));
+// failure/v2 operations: the capability floor plus the four collect-capture
+// verbs that emit typed refusals on the gentle-ai main line (commit a2d57117,
+// fix/capture-evidence-typed-refusal; exact strings from that branch's
+// published failure.schema.json 12-value operation enum). Additive forward
+// surface: every operation outside the published enum still rejects.
+const FAILURE_OPERATIONS = Object.freeze([
+	...REQUIRED_OPERATIONS,
+	"review.capture-result",
+	"review.capture-evidence",
+	"review.capture-refuter",
+	"review.capture-validation",
+]         );
 const REQUIRED_GATES = Object.freeze(["post-apply", "pre-commit", "pre-push", "pre-pr", "release"]         );
 const REQUIRED_PROJECTIONS = Object.freeze(Object.values(REVIEW_PROJECTION));
 // The schema floor shared by every accepted capabilities identity. Each minor
@@ -586,6 +598,8 @@ const FAILURE_NEXT_ACTIONS = ["correct_request", "retry", "retry_with_bounded_ba
 // cause_category is diagnostic metadata (nothing routes on it), so unknown
 // snake_case values are tolerated for forward compatibility.
 const FAILURE_CAUSE_CATEGORIES = ["inventory_io_or_layout", "lock_ambiguous", "reset_residue", "record_or_graph_invalid", "inventory_incomplete", "incomplete_store_entry"]         ;
+
+
 
 
 
@@ -1832,7 +1846,7 @@ export function decodeReviewFailureV2(value         )                  {
 		"schema", "contract", "operation", "phase", "code", "message", "mutation_outcome", "authority_applicability", "retry_safe", "replayability", "required_inputs", "next_action",
 	], ["lineage_id", "request_digest", "progress_identity", "cause_category", "cause", "context"]);
 	requireIdentity(body, "gentle-ai.review-integration.failure/v2");
-	const operation = enumeration(body.operation, REQUIRED_OPERATIONS, "failure.operation");
+	const operation = enumeration(body.operation, FAILURE_OPERATIONS, "failure.operation");
 
 	if (body.progress_identity !== undefined) {
 		if (body.lineage_id === undefined || body.request_digest === undefined) throw new TypeError("failure.progress_identity requires lineage_id and request_digest");

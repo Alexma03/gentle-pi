@@ -150,6 +150,14 @@ export const NATIVE_SDD_ARTIFACT_STATE = {
 
 
 
+
+
+
+
+
+
+
+
 	                                                       
 
 
@@ -428,6 +436,27 @@ export const NATIVE_REVIEW_PROVIDER_ROLE_CAPTURE_SCHEMA = "gentle-ai.review-prov
 
 
 
+// Field defect (fambig, 2026-08-16): the evidence collect slot renders the
+// exact submission tokens native admits — fix-diff `--target`,
+// `--expected-revision`, and an opaque cwd-independent `--repository-context` —
+// with `{{outcome}}`/`{{input}}` substitution slots. Satisfying the slot means
+// executing those tokens verbatim with only the two slot substitutions, the
+// same discipline captureResult uses; identities are never reconstructed from
+// top-level status fields.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -480,6 +509,24 @@ export const NATIVE_REVIEW_CONSENT_ANSWER = { GRANTED: "granted", DECLINED: "dec
 // exact rendered tokens of one provider-returned `review.finalize` execute
 // transition (e.g. `--lineage=<id> --captured-results=true`), passed through
 // verbatim and never synthesized or reordered by the host.
+
+
+
+
+
+
+// The provider-rendered `finalize` submission descriptor forms (status/v5):
+// the correction PLAN slot substitutes a positive line-count literal into its
+// {{value}} token; the TARGETED VALIDATION slot substitutes a staged validator
+// artifact path. The tokens are self-contained and execute verbatim.
+
+
+
+
+
+
+
+
 
 
 
@@ -2473,6 +2520,49 @@ export class NativeReviewCliV216                            {
 			"review", "finalize",
 			...request.argumentTokens,
 		], true, request.signal);
+		return this.decodeFinalizeTransitionExecution(execution);
+	}
+
+	// Same misbinding class as capture-evidence (live smoke, 2026-08-16): the
+	// correction PLAN and TARGETED VALIDATION collect slots render `finalize`
+	// submission descriptors whose tokens are self-contained (--contract,
+	// --lineage, --expected-revision, --target, --request-hash,
+	// --repository-context) plus exactly one {{value}} slot. Executing anything
+	// other than those rendered tokens fails the live emitter's committed-
+	// intent reconciliation, so the tokens pass through verbatim with only the
+	// {{value}} substitution: a literal for correction_lines, a staged 0o600
+	// artifact path for a validation document.
+	async finalizeSubmission(request                                       )                                {
+		if (request.argumentTokens.length === 0) throw new TypeError("Native FINALIZE submission requires the provider-rendered argument tokens");
+		if (request.argumentTokens.some((token) => typeof token !== "string" || token.length === 0)) throw new TypeError("Native FINALIZE submission argument tokens must all be non-empty strings");
+		if ((request.valueLiteral === undefined) === (request.valueDocument === undefined)) throw new TypeError("Native FINALIZE submission takes exactly one of valueLiteral or valueDocument");
+		const valueToken = request.argumentTokens[request.valueSubstitutionLocation];
+		if (valueToken === undefined || !valueToken.includes("{{value}}")) throw new TypeError("Native FINALIZE submission must render exactly one {{value}} slot token");
+		if (request.valueDocument !== undefined && request.valueDocument.length === 0) throw new TypeError("Native FINALIZE submission value document must contain at least one byte");
+		const directory = request.valueDocument === undefined ? undefined : await mkdtemp(join(tmpdir(), "gentle-ai-finalize-submission-"));
+		try {
+			let substituted        ;
+			if (directory !== undefined) {
+				await chmod(directory, 0o700);
+				const valueFile = join(directory, "value.json");
+				await writeFile(valueFile, request.valueDocument , { encoding: "utf8", mode: 0o600 });
+				await chmod(valueFile, 0o600);
+				substituted = valueFile;
+			} else {
+				substituted = request.valueLiteral ;
+			}
+			const resolved = request.argumentTokens.map((token, index) => index === request.valueSubstitutionLocation ? token.replaceAll("{{value}}", substituted) : token);
+			const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.FINALIZE, request.cwd, [
+				"review", "finalize",
+				...resolved,
+			], true, request.signal);
+			return this.decodeFinalizeTransitionExecution(execution);
+		} finally {
+			if (directory !== undefined) await this.cleanupDirectory(directory).catch(() => undefined);
+		}
+	}
+
+	        decodeFinalizeTransitionExecution(execution                   )                       {
 		return decode(NATIVE_REVIEW_OPERATION.FINALIZE, true, () => {
 			const body = object(execution.body);
 			// A transition rendered with `--contract` answers with the negotiated
@@ -2522,6 +2612,45 @@ export class NativeReviewCliV216                            {
 				"--expected-revision", request.expectedRevision,
 				"--outcome", request.outcome,
 				"--input", evidenceFile,
+			], true, request.signal);
+			return decode(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, true, () => decodeNativeReviewVerificationEvidence(execution.body));
+		} finally {
+			await this.cleanupDirectory(directory).catch(() => undefined);
+		}
+	}
+
+	// Field defect (fambig, 2026-08-16): at every evidence-pending sub-state
+	// the collect slot renders the identity native demands — for a correction
+	// that is the fix-diff `--target`, not the live workspace snapshot — so the
+	// slot's rendered submission tokens execute verbatim, with only the
+	// {{outcome}} and {{input}} slots substituted. Same verbatim-token
+	// discipline as captureResult; --repository-context is authoritative and
+	// mutually exclusive with a path.
+	async captureEvidenceSubmission(request                                              )                                              {
+		if (!(NATIVE_REVIEW_CAPTURE_OUTCOME                     ).includes(request.outcome)) throw new TypeError("Native CAPTURE_EVIDENCE outcome must be passed, verification_failed, or procedural_tooling_failed");
+		if (request.evidenceDocument.length === 0) throw new TypeError("Native CAPTURE_EVIDENCE evidence must contain at least one byte");
+		if (request.argumentTokens.length === 0) throw new TypeError("Native CAPTURE_EVIDENCE submission requires the provider-rendered argument tokens");
+		if (request.argumentTokens.some((token) => typeof token !== "string" || token.length === 0)) throw new TypeError("Native CAPTURE_EVIDENCE submission argument tokens must all be non-empty strings");
+		const outcomeToken = request.argumentTokens[request.outcomeSubstitutionLocation];
+		const inputToken = request.argumentTokens[request.inputSubstitutionLocation];
+		if (request.outcomeSubstitutionLocation === request.inputSubstitutionLocation || outcomeToken === undefined || !outcomeToken.includes("{{outcome}}")) throw new TypeError("Native CAPTURE_EVIDENCE submission must render exactly one {{outcome}} slot token");
+		if (inputToken === undefined || !inputToken.includes("{{input}}")) throw new TypeError("Native CAPTURE_EVIDENCE submission must render exactly one {{input}} slot token");
+		const carriesContext = request.argumentTokens.some((token) => token === "--repository-context" || token.startsWith("--repository-context="));
+		if (carriesContext && request.cwd !== undefined) throw new TypeError("Native CAPTURE_EVIDENCE submission takes a repository context or --cwd, never both");
+		const directory = await mkdtemp(join(tmpdir(), "gentle-ai-capture-evidence-"));
+		try {
+			await chmod(directory, 0o700);
+			const evidenceFile = await this.stageEvidence(directory, request.evidenceDocument);
+			const resolved = request.argumentTokens.map((token, index) =>
+				index === request.outcomeSubstitutionLocation
+					? token.replaceAll("{{outcome}}", request.outcome)
+					: index === request.inputSubstitutionLocation
+						? token.replaceAll("{{input}}", evidenceFile)
+						: token);
+			const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, request.cwd ?? process.cwd(), [
+				"review", "capture-evidence",
+				...resolved,
+				...(carriesContext || request.cwd === undefined ? [] : ["--cwd", request.cwd]),
 			], true, request.signal);
 			return decode(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, true, () => decodeNativeReviewVerificationEvidence(execution.body));
 		} finally {

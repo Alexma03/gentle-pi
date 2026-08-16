@@ -1091,3 +1091,136 @@ test("finalizeTransition runs the provider-rendered tokens verbatim and decodes 
 	assert.equal(negotiated.storeRevision, `sha256:${"f".repeat(64)}`);
 	await assert.rejects(cli.finalizeTransition({ cwd: "/repo", argumentTokens: [] }), /requires the provider-rendered argument tokens/);
 });
+
+// Field defect (fambig, 2026-08-16): the evidence collect slot renders the
+// exact `review capture-evidence` submission tokens — fix-diff `--target`,
+// `--expected-revision`, and an opaque cwd-independent `--repository-context` —
+// with `{{outcome}}`/`{{input}}` slots. Satisfying the slot means executing
+// those tokens verbatim with only the two slot substitutions, exactly like
+// captureResult; identities are never reconstructed on the client.
+test("captureEvidenceSubmission executes the provider-rendered submission tokens verbatim with slot substitution", async (t) => {
+	t.after(() => clearNativeReviewCapabilitiesCacheForTesting());
+	const capabilities = v2Fixture<Record<string, unknown>>("capabilities.fixture.json");
+	const capabilitiesBody = { ...capabilities, package: { ...(capabilities.package as Record<string, unknown>), version: GENTLE_AI_VERSION } };
+	const record = {
+		schema: "gentle-ai.review-verification-evidence/v2",
+		version: 2,
+		lineage_id: "review-evidence-lineage",
+		authority_revision: `sha256:${"a".repeat(64)}`,
+		target_identity: `sha256:${"b".repeat(64)}`,
+		candidate_tree: "c".repeat(40),
+		paths_digest: `sha256:${"d".repeat(64)}`,
+		paths: ["calc.go"],
+		ledger_ids: ["R3-1"],
+		raw_payload_sha256: `sha256:${"e".repeat(64)}`,
+		raw_payload_bytes: 24,
+		outcome: "passed",
+		record_digest: `sha256:${"f".repeat(64)}`,
+	};
+	const argumentTokens = [
+		`--lineage=${record.lineage_id}`,
+		`--expected-revision=${record.authority_revision}`,
+		`--target=${record.target_identity}`,
+		`--repository-context=rctx1_${"e".repeat(64)}`,
+		"--outcome={{outcome}}",
+		"--input={{input}}",
+	];
+	let staged = "";
+	const calls: Array<{ arguments: readonly string[] }> = [];
+	const cli = new NativeReviewCliV216(async (request) => {
+		calls.push({ arguments: request.arguments });
+		if (request.arguments[1] === "capabilities") return { stdout: JSON.stringify(capabilitiesBody), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+		const inputToken = request.arguments.find((token) => token.startsWith("--input="));
+		assert.ok(inputToken !== undefined);
+		staged = readFileSync(inputToken.slice("--input=".length), "utf8");
+		return { stdout: JSON.stringify(record), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+	}, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
+	const evidence = "verification: go test ./... passed\n";
+	const captured = await cli.captureEvidenceSubmission({
+		argumentTokens,
+		outcomeSubstitutionLocation: 4,
+		inputSubstitutionLocation: 5,
+		outcome: "passed",
+		evidenceDocument: evidence,
+	});
+	assert.equal(staged, evidence, "the evidence bytes must be staged exactly");
+	assert.equal(captured.recordDigest, record.record_digest);
+	assert.equal(captured.targetIdentity, record.target_identity);
+	const argv = calls[1]!.arguments;
+	assert.deepEqual(argv.slice(0, 2), ["review", "capture-evidence"]);
+	assert.deepEqual(argv.slice(2, 6), argumentTokens.slice(0, 4), "the identity-bearing tokens must pass through verbatim, in provider order");
+	assert.equal(argv[6], "--outcome=passed");
+	assert.match(String(argv[7]), /^--input=./);
+	assert.equal(argv.length, 8);
+	assert.equal(argv.includes("--cwd"), false, "the repository context is authoritative and cwd-independent");
+	assert.equal(argv.includes("--contract"), false);
+	await assert.rejects(
+		cli.captureEvidenceSubmission({ cwd: "/repo", argumentTokens, outcomeSubstitutionLocation: 4, inputSubstitutionLocation: 5, outcome: "passed", evidenceDocument: evidence }),
+		/repository context or --cwd, never both/,
+	);
+	await assert.rejects(
+		cli.captureEvidenceSubmission({ argumentTokens, outcomeSubstitutionLocation: 4, inputSubstitutionLocation: 5, outcome: "failed" as never, evidenceDocument: evidence }),
+		/outcome must be passed, verification_failed, or procedural_tooling_failed/,
+	);
+	await assert.rejects(
+		cli.captureEvidenceSubmission({ argumentTokens: argumentTokens.slice(0, 4), outcomeSubstitutionLocation: 0, inputSubstitutionLocation: 1, outcome: "passed", evidenceDocument: evidence }),
+		/\{\{outcome\}\}/,
+	);
+	assert.equal(calls.length, 2, "every rejected submission must fail before another native launch");
+});
+
+test("finalizeSubmission executes the rendered finalize submission tokens verbatim with the {{value}} substitution", async (t) => {
+	t.after(() => clearNativeReviewCapabilitiesCacheForTesting());
+	const capabilities = v2Fixture<Record<string, unknown>>("capabilities.fixture.json");
+	const capabilitiesBody = { ...capabilities, package: { ...(capabilities.package as Record<string, unknown>), version: GENTLE_AI_VERSION } };
+	const finalizeBody = {
+		schema: "gentle-ai.review-integration.operation/v2",
+		contract: "gentle-ai.review-integration/v2",
+		operation: "review.finalize",
+		result: { operation: "review/finalize", lineage_id: "review-1d5aadacc600e167", state: "correction_required", action: "continue the current review state", store_revision: `sha256:${"f".repeat(64)}` },
+	};
+	const planTokens = [
+		"--contract=gentle-ai.review-integration/v2",
+		"--lineage=review-1d5aadacc600e167",
+		`--expected-revision=sha256:${"a".repeat(64)}`,
+		`--target=sha256:${"b".repeat(64)}`,
+		`--request-hash=sha256:${"c".repeat(64)}`,
+		`--repository-context=rctx1_${"e".repeat(64)}`,
+		"--correction-lines={{value}}",
+	];
+	const calls: Array<{ arguments: readonly string[] }> = [];
+	let staged: string | undefined;
+	const cli = new NativeReviewCliV216(async (request) => {
+		calls.push({ arguments: request.arguments });
+		if (request.arguments[1] === "capabilities") return { stdout: JSON.stringify(capabilitiesBody), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+		const validationToken = request.arguments.find((token) => token.startsWith("--validation="));
+		if (validationToken !== undefined) staged = readFileSync(validationToken.slice("--validation=".length), "utf8");
+		return { stdout: JSON.stringify(finalizeBody), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+	}, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
+
+	// Plan form: literal substitution, every other token verbatim.
+	const planned = await cli.finalizeSubmission({ cwd: "/repo", argumentTokens: planTokens, valueSubstitutionLocation: 6, valueLiteral: "2" });
+	assert.equal(planned.state, "correction_required");
+	const planArgv = calls[1]!.arguments;
+	assert.deepEqual(planArgv.slice(0, 2), ["review", "finalize"]);
+	assert.deepEqual(planArgv.slice(2, 8), planTokens.slice(0, 6), "identity-bearing tokens must pass through verbatim, in provider order");
+	assert.equal(planArgv[8], "--correction-lines=2");
+	assert.equal(planArgv.length, 9);
+
+	// Validation form: the document is staged to a 0o600 artifact whose path substitutes {{value}}.
+	const validationTokens = [...planTokens.slice(0, 6), "--validation={{value}}"];
+	const document = JSON.stringify({ targeted_validation_request_hash: `sha256:${"9".repeat(64)}`, original_criteria: { passed: true, evidence: ["ok"] } });
+	await cli.finalizeSubmission({ cwd: "/repo", argumentTokens: validationTokens, valueSubstitutionLocation: 6, valueDocument: document });
+	assert.equal(staged, document, "the validation document must be staged byte-exact");
+
+	// Guards: exactly one substitution form, and a real {{value}} slot.
+	await assert.rejects(
+		cli.finalizeSubmission({ cwd: "/repo", argumentTokens: planTokens, valueSubstitutionLocation: 6, valueLiteral: "2", valueDocument: document }),
+		/exactly one of valueLiteral or valueDocument/,
+	);
+	await assert.rejects(
+		cli.finalizeSubmission({ cwd: "/repo", argumentTokens: planTokens.slice(0, 6), valueSubstitutionLocation: 0, valueLiteral: "2" }),
+		/\{\{value\}\}/,
+	);
+	assert.equal(calls.length, 3, "rejected submissions must fail before another native launch");
+});
