@@ -509,6 +509,13 @@ export const REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS = Object.freeze(Object.valu
 
 
 
+	                      
+
+
+
+
+
+
 
 
 
@@ -1523,7 +1530,7 @@ export function decodeReviewStatusV3(value         )                 {
 	const v5 = typeof value === "object" && value !== null && (value                           ).schema === "gentle-ai.review-integration.status/v5";
 	const body = exactRecord(value, "status", [
 		"schema", "contract", "operation", "applicability", "receipt", "action", "replayability", "target_identity", "projection", "repair", "candidates",
-	], ["authority", "frozen", "reconciliation", "action_disposition", "eligibility", "next_transition", "authority_target_identity", "validation_request", "final_verification_retry", ...(v5 ? ["forecast"] : [])]);
+	], ["authority", "frozen", "reconciliation", "action_disposition", "eligibility", "next_transition", "authority_target_identity", "validation_request", "final_verification_retry", ...(v5 ? ["forecast", "repository_context"] : [])]);
 	requireIdentity(body, v5 ? "gentle-ai.review-integration.status/v5" : "gentle-ai.review-integration.status/v3", REVIEW_INTEGRATION_OPERATION.STATUS);
 
 	const applicability = enumeration(body.applicability, ["current_target", "unrelated", "ambiguous", "corrupted"]         , "status.applicability");
@@ -1604,6 +1611,24 @@ export function decodeReviewStatusV3(value         )                 {
 		throw new TypeError("status.final_verification_retry is only valid for the retry_final_verification action");
 	}
 
+	// status/v5 additive top-level repository context reference (captured
+	// 2026-08-16 from 2.4.0-main.b1afef46; missing from the published
+	// status-v5.schema.json, so the live capture is authoritative). Same
+	// reference shape as start/v3's repository_context.
+	let repositoryContext                                       ;
+	if (body.repository_context !== undefined) {
+		const source = exactRecord(body.repository_context, "status.repository_context", ["capability", "handle", "revision", "target_identity"], ["event_id", "outcome"]);
+		if (source.capability !== "review.opaque_repository_context") throw new TypeError("status.repository_context.capability is unsupported");
+		repositoryContext = {
+			capability: "review.opaque_repository_context",
+			handle: text(source.handle, "status.repository_context.handle", { pattern: /^rctx1_[0-9a-f]{64}$/ }),
+			revision: sha256(source.revision, "status.repository_context.revision"),
+			targetIdentity: sha256(source.target_identity, "status.repository_context.target_identity"),
+			...(source.event_id === undefined ? {} : { eventId: sha256(source.event_id, "status.repository_context.event_id") }),
+			...(source.outcome === undefined ? {} : { outcome: enumeration(source.outcome, REPOSITORY_CONTEXT_OUTCOMES, "status.repository_context.outcome") }),
+		};
+	}
+
 	return {
 		contract: REVIEW_INTEGRATION_CONTRACT,
 		applicability,
@@ -1623,6 +1648,7 @@ export function decodeReviewStatusV3(value         )                 {
 		...(validationRequest === undefined ? {} : { validationRequest }),
 		...(finalVerificationRetry === undefined ? {} : { finalVerificationRetry }),
 		...(forecast === undefined ? {} : { forecast }),
+		...(repositoryContext === undefined ? {} : { repositoryContext }),
 		raw: body,
 	};
 }

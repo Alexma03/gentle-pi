@@ -48,6 +48,18 @@ import {
 //   --agent token even though the envelope pins agent: claude-code — the
 //   published consent-v3.schema.json invocation pattern is narrower than the
 //   emitter, so the capture is authoritative (parity playbook, known traps).
+// - status-v5-repository-context.captured.json was captured 2026-08-16 from
+//   the real binary at /home/gentleman/.cargo/bin/gentle-ai reporting
+//   "gentle-ai 2.4.0-main.b1afef46", in a scratch git repository with one
+//   medium-tier lineage in state `reviewing` whose single reviewer result was
+//   already admitted (consent granted start, then review capture-result):
+//     gentle-ai review status --contract gentle-ai.review-integration/v2 \
+//       --cwd <scratch> --agent claude-code --lineage <lineage> \
+//       --projection workspace --next-transition
+//   The top-level `repository_context` reference it carries is emitted by the
+//   live binary but MISSING from the published status-v5.schema.json
+//   (additionalProperties: false) at the same commit — the capture is
+//   authoritative (parity playbook, known traps).
 
 const fixtureRoot = join(import.meta.dirname, "fixtures", "devbinary");
 const fixture = <T = Record<string, unknown>>(name: string): T => JSON.parse(readFileSync(join(fixtureRoot, name), "utf8")) as T;
@@ -110,6 +122,24 @@ test("the captured status/v5 payload decodes with its forecast and base-ref coll
 test("the pinned status/v3 fixture still decodes unchanged", () => {
 	const status = decodeReviewStatusV3(v2Fixture("status.fixture.json"));
 	assert.equal(status.contract, "gentle-ai.review-integration/v2");
+});
+
+test("the captured status/v5 payload decodes its top-level repository context reference", () => {
+	const status = decodeReviewStatusV3(fixture("status-v5-repository-context.captured.json"));
+	assert.equal(status.authority?.state, "reviewing");
+	assert.equal(status.repositoryContext?.capability, "review.opaque_repository_context");
+	assert.match(status.repositoryContext?.handle ?? "", /^rctx1_[0-9a-f]{64}$/);
+	assert.equal(status.repositoryContext?.revision, status.authority?.revision);
+	assert.equal(status.repositoryContext?.targetIdentity, status.targetIdentity);
+	assert.equal(status.repositoryContext?.outcome, "applied");
+});
+
+test("a status/v3 payload never carries a top-level repository context", () => {
+	const v5 = fixture<JsonObject>("status-v5-repository-context.captured.json");
+	const downgraded = clone(v5);
+	downgraded.schema = "gentle-ai.review-integration.status/v3";
+	delete downgraded.forecast; // forecast is rejected first; isolate the field under test
+	assert.throws(() => decodeReviewStatusV3(downgraded), /repository_context/);
 });
 
 test("a status/v3 payload never carries v5 fields", () => {

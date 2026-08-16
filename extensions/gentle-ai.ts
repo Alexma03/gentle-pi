@@ -5129,7 +5129,13 @@ function isTargetedValidationCollectInput(input: { captureOperation: string }): 
 
 function requireEvidenceCollection(status: ReviewStatusV3): void {
 	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
-	if (status.validationRequest !== undefined || inputs.some(isTargetedValidationCollectInput)) {
+	// An offered validation STEP is a targeted-validation collect input. The
+	// bare `validation_request` field is descriptive context both live
+	// emitters (pinned 2.2.3 and 2.4.0-main, probed 2026-08-16) publish
+	// alongside the evidence collect at `correction_required`; treating it as
+	// an offered step made the controller demand its validation phase before
+	// capturing the evidence the state itself demanded (field defect).
+	if (inputs.some(isTargetedValidationCollectInput)) {
 		throw new CandidateViewError("targeted validation was offered before correction evidence was captured", "evidence-first-ordering");
 	}
 	if (inputs.filter((input) => input.captureOperation === "review.capture-evidence").length !== 1) {
@@ -5142,7 +5148,10 @@ function requireTargetedValidationAfterEvidence(status: ReviewStatusV3): NonNull
 	const targeted = inputs.filter(isTargetedValidationCollectInput);
 	const request = status.validationRequest;
 	if (
-		status.authority?.state !== "validating" || targeted.length !== 1 || targeted[0]?.validationRequest === undefined || request === undefined ||
+		// Both live emitters (pinned 2.2.3 and 2.4.0-main, probed 2026-08-16)
+		// keep the post-evidence authority state at `correction_required`;
+		// `validating` is retained for pre-existing fixture compatibility.
+		(status.authority?.state !== "validating" && status.authority?.state !== "correction_required") || targeted.length !== 1 || targeted[0]?.validationRequest === undefined || request === undefined ||
 		JSON.stringify(targeted[0].validationRequest) !== JSON.stringify(request) || request.lineageId !== status.authority.lineageId ||
 		request.expectedRevision !== status.authority.revision || request.targetIdentity !== status.targetIdentity ||
 		request.correctionCandidateTree !== status.projection.currentCandidateTree ||
@@ -5156,7 +5165,10 @@ function requireTargetedValidationAfterEvidence(status: ReviewStatusV3): NonNull
 
 function assertNoTargetedValidation(status: ReviewStatusV3): void {
 	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
-	if (status.validationRequest !== undefined || inputs.some(isTargetedValidationCollectInput)) {
+	// Same rule as requireEvidenceCollection: only an offered targeted-
+	// validation collect input counts; the descriptive `validation_request`
+	// context rides along on non-passing outcomes too.
+	if (inputs.some(isTargetedValidationCollectInput)) {
 		throw new CandidateViewError("non-passing evidence unexpectedly unlocked targeted validation", "evidence-first-ordering");
 	}
 }
@@ -5743,7 +5755,7 @@ async function executeReviewControllerOperation(
 			let negotiatedStatus: ReviewStatusV3 | undefined;
 			let candidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			let provisionalCandidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
-			let nativeResult: NativeFinalizeResult;
+			let nativeResult: NativeFinalizeResult | undefined;
 			let correctionStep: CorrectionStep | undefined;
 			try {
 				if (parameters.lineageId === undefined) throw new CandidateViewError("Native FINALIZE requires an explicit lineage");
@@ -5794,7 +5806,23 @@ async function executeReviewControllerOperation(
 				if (roleVectorSlots.length > 0 && input.final_evidence === undefined && input.correction_line_forecast === undefined && input.validation === undefined) {
 					return await executeProviderRoleVectorCollection(parameters.operation, parameters.lineageId, roleVectorSlots, nativeReviewCli, defaultCwd, signal);
 				}
-				if (candidateViews && !candidateViews.hasProjection(parameters.lineageId)) {
+				// Ordinary final verification (field defect, 2026-08-16): at
+				// native state `validating` the provider collects one final
+				// `review.capture-evidence` record and then offers exactly one
+				// execute `review.finalize --captured-evidence` transition. This
+				// lane is provider-owned end to end: it is not a correction
+				// transaction, no targeted validation exists in it, and no
+				// candidate view is materialized — the workspace root IS the
+				// unchanged frozen candidate, native FINALIZE validates the live
+				// snapshot itself, and the provider binds its repository-context
+				// effects to the root the lifecycle runs from. The correction
+				// lane keeps its pre-capture state `correction_required` and
+				// stays byte-identical below.
+				const ordinaryFinalVerification = validationAttempt &&
+					negotiatedStatus.authority?.state === "validating" &&
+					negotiatedStatus.validationRequest === undefined &&
+					!(negotiatedStatus.nextTransition?.kind === "collect" && (negotiatedStatus.nextTransition.collect?.inputs ?? []).some(isTargetedValidationCollectInput));
+				if (candidateViews && !ordinaryFinalVerification && !candidateViews.hasProjection(parameters.lineageId)) {
 					const projection = negotiatedStatus.projection;
 					candidateView = validationAttempt
 						? (candidateViews.restoreProjectionFromNative(parameters.lineageId, defaultCwd, projection), undefined)
@@ -5803,9 +5831,80 @@ async function executeReviewControllerOperation(
 				// Fail closed before any native mutation when the frozen projection
 				// belongs to a different worktree than the requested workspace (#169).
 				if (candidateViews && parameters.lineageId && candidateViews.hasProjection(parameters.lineageId)) candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
-				candidateView ??= candidateViews && parameters.lineageId ? (correctionCompletion || validationAttempt) ? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey) : candidateViews.resolveForFinalize(parameters.lineageId) : undefined;
+				candidateView ??= candidateViews && parameters.lineageId && !ordinaryFinalVerification ? (correctionCompletion || validationAttempt) ? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey) : candidateViews.resolveForFinalize(parameters.lineageId) : undefined;
 				if (candidateView !== undefined) assertNativeFinalizeCandidateBinding(candidateView, negotiatedStatus);
-				if (validationAttempt && candidateView && parameters.lineageId) {
+				if (ordinaryFinalVerification && parameters.lineageId) {
+					// A projection held by this process routes the top-of-try path
+					// through createCorrected before the lane is known; that view
+					// is unused here — the lifecycle runs from the workspace root.
+					if (candidateView !== undefined && candidateViews) {
+						candidateViews.cleanup(candidateView.token);
+						candidateView = undefined;
+					}
+					if (nativeReviewCli.captureEvidence === undefined) throw new CandidateViewError("native final verification evidence capture is unavailable", "final-verification-provider-owned");
+					const outcome = correctionOutcome(input);
+					if (outcome === undefined || negotiatedStatus.authority === undefined) throw new CandidateViewError("native final verification evidence requires one authoritative outcome-bound status", "final-verification-provider-owned");
+					if (input.validation !== undefined) {
+						throw new CandidateViewError("native final verification is provider-owned; a targeted validation document is not admissible at state validating", "final-verification-provider-owned");
+					}
+					requireEvidenceCollection(negotiatedStatus);
+					const captured = await nativeReviewCli.captureEvidence({
+						cwd: defaultCwd,
+						lineageId: parameters.lineageId,
+						targetIdentity: negotiatedStatus.targetIdentity,
+						expectedRevision: negotiatedStatus.authority.revision,
+						outcome,
+						evidenceDocument: input.final_evidence!,
+						...(signal === undefined ? {} : { signal }),
+					});
+					if (
+						captured.lineageId !== parameters.lineageId || captured.authorityRevision !== negotiatedStatus.authority.revision ||
+						captured.targetIdentity !== negotiatedStatus.targetIdentity || captured.candidateTree !== negotiatedStatus.projection.currentCandidateTree ||
+						captured.pathsDigest !== negotiatedStatus.projection.pathsDigest || JSON.stringify([...captured.paths].sort()) !== JSON.stringify([...negotiatedStatus.projection.paths].sort()) ||
+						captured.outcome !== outcome
+					) {
+						throw new CandidateViewError("captured final verification evidence does not match the requested lineage, target, and outcome", "correction-evidence-binding-drift");
+					}
+					// Follow the provider transition faithfully: re-query
+					// negotiated STATUS and execute only the exact rendered
+					// `review.finalize` transition it offers for the captured
+					// evidence. Never demand targeted validation here and never
+					// substitute the validate gate.
+					const afterEvidence = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+					if (afterEvidence.authority?.lineageId !== parameters.lineageId) throw new CandidateViewError("post-evidence status lost the final-verification lineage", "correction-evidence-binding-drift");
+					if (afterEvidence.validationRequest !== undefined || (afterEvidence.nextTransition?.kind === "collect" && (afterEvidence.nextTransition.collect?.inputs ?? []).some(isTargetedValidationCollectInput))) {
+						throw new CandidateViewError("final verification evidence unexpectedly unlocked targeted validation", "final-verification-provider-owned");
+					}
+					const evidenceTransition = afterEvidence.nextTransition?.kind === "execute" && afterEvidence.nextTransition.execute?.operation === "review.finalize"
+						? afterEvidence.nextTransition.execute
+						: undefined;
+					if (evidenceTransition === undefined || nativeReviewCli.finalizeTransition === undefined) {
+						// Fail closed on an unrecognized transition: report the
+						// committed capture and the provider's own status verbatim.
+						return {
+							...mapNativeTargetStatus(parameters.operation, afterEvidence, parameters.lineageId),
+							outcome: "final-verification-transition-unavailable",
+							verification_evidence: { outcome: captured.outcome, record_digest: captured.recordDigest },
+							mutation_performed: true,
+							mutation_outcome: "committed",
+						};
+					}
+					if (evidenceTransition.binding.lineageId !== undefined && evidenceTransition.binding.lineageId !== parameters.lineageId) {
+						throw new CandidateViewError("provider finalize transition is bound to a different lineage", "finalize-transition-binding-drift");
+					}
+					nativeResult = await nativeReviewCli.finalizeTransition({
+						cwd: defaultCwd,
+						// The exact rendered tokens, verbatim and in provider
+						// order; the hyphenated fallback mirrors the provider's
+						// published rendering rule for older payloads.
+						argumentTokens: evidenceTransition.arguments.map((argument) => argument.token ?? `--${argument.name.replaceAll("_", "-")}=${argument.value}`),
+						...(signal === undefined ? {} : { signal }),
+					});
+					if (nativeResult.lineageId !== parameters.lineageId) {
+						throw new CandidateViewError("provider finalize transition answered for a different lineage", "finalize-transition-binding-drift");
+					}
+				}
+				if (validationAttempt && !ordinaryFinalVerification && candidateView && parameters.lineageId) {
 					if (nativeReviewCli.captureEvidence === undefined) throw new CandidateViewError("native correction evidence capture is unavailable", "evidence-first-ordering");
 					const outcome = correctionOutcome(input);
 					if (outcome === undefined || negotiatedStatus.authority === undefined) throw new CandidateViewError("native correction evidence requires one authoritative outcome-bound status", "evidence-first-ordering");
@@ -5913,6 +6012,7 @@ async function executeReviewControllerOperation(
 					? negotiatedStatus.nextTransition.execute
 					: undefined;
 				if (
+					nativeResult === undefined &&
 					finalizeTransition !== undefined && nativeReviewCli.finalizeTransition !== undefined &&
 					input.validation === undefined && input.final_evidence === undefined && input.correction_line_forecast === undefined
 				) {
@@ -5931,7 +6031,7 @@ async function executeReviewControllerOperation(
 					if (parameters.lineageId !== undefined && nativeResult.lineageId !== parameters.lineageId) {
 						throw new CandidateViewError("provider finalize transition answered for a different lineage", "finalize-transition-binding-drift");
 					}
-				} else {
+				} else if (nativeResult === undefined) {
 					nativeResult = await nativeReviewCli.finalize({
 						cwd: candidateView?.root ?? defaultCwd,
 						...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
