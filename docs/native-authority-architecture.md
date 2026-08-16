@@ -8,7 +8,7 @@ U8 closed the U1-U7 slimming work. Issue [#191](https://github.com/Gentleman-Pro
 
 | Surface | Owner after #191 |
 | --- | --- |
-| Ordinary START, FINALIZE, target status, validation, SDD binding, recovery, and reconciliation | Package-local Gentle AI v2.2.1 through `gentle-ai.review-integration/v1` (migrating to `/v2`, see below) |
+| Ordinary START, FINALIZE, target status, validation, SDD binding, recovery, and reconciliation | Package-local Gentle AI v2.2.3 through `gentle-ai.review-integration/v2` (migration complete, see below) |
 | Canonical consumer identities | Permanent Pi module `lib/review-canonical.ts` |
 | Git common-directory and repository identity | Permanent Pi module `lib/review-repository.ts` |
 | Immutable reviewer candidate views | Permanent Pi module `lib/review-candidate-view.ts` |
@@ -94,7 +94,7 @@ The packaged `contracts/review-integration/v1/` schemas and fixtures plus `docs/
 
 ## Published Maintenance Boundary
 
-Gentle AI has exposed explicit, audited maintenance commands outside negotiated ordinary review since v2.1.11; the currently pinned v2.2.1 keeps them available under the same legacy version table. Pi invokes `review abandon`, `review quarantine-legacy`, and `review reconcile-authority` only after fresh interactive approval of exact LF-only authorization text; headless execution and absent, malformed, or stale bindings fail closed.
+Gentle AI has exposed explicit, audited maintenance commands outside negotiated ordinary review since v2.1.11; the currently pinned v2.2.3 keeps them available under the same legacy version table. Pi invokes `review abandon`, `review quarantine-legacy`, and `review reconcile-authority` only after fresh interactive approval of exact LF-only authorization text; headless execution and absent, malformed, or stale bindings fail closed.
 
 `abandon` is restricted by native re-derivation to a caller-named non-terminal compact-v2 lineage; its `gentle-ai.review-abandon-authorization/v2` binding additionally names the exact discarded work (captured lens results, findings presence, evidence-record presence) that the native gate re-derives before accepting. `quarantine-legacy` accepts only the published malformed freeze-findings diagnostic and disposition. Reconciliation accepts the exact dual anomaly suffix `anomalies=unchanged_target,malformed_recovery_authorization` only in that order. `repair-legacy-alias` derives repository, revision, diagnostic, and disposition from freshly read native inventory before its own approval and can only quarantine one qualified historical alias chain. `review dispose-result` remains unexposed pending design. Recovery routes only the provider-selected negotiated `action_disposition`.
 
