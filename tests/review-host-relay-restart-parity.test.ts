@@ -138,6 +138,12 @@ function repository(t) {
 	return cwd;
 }
 
+// Escape regex metacharacters in a literal path so it can be anchored safely
+// inside a RegExp that asserts the candidate-views root lives under cwd.
+function escapeRegex(value) {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function runWorker(t, cwd, statuses, mode) {
 	const scratch = mkdtempSync(join(tmpdir(), "gentle-pi-relay-restart-run-"));
 	t.after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -181,6 +187,8 @@ test("INSPECT after a transport failure reoffers the exact pending binding; FINA
 	assert.equal(failure.error, undefined, `failure run threw: ${JSON.stringify(failure.error)}`);
 	assert.equal(failure.relayRequests.length, 1, "Process A observed exactly one pending slot");
 	assert.equal(failure.statusCalls.length, 1, "no automatic STATUS re-query after transport failure");
+	assert.equal(failure.statusCalls[0].lineageId, LINEAGE, "Process A STATUS carried the relay lineage selector");
+	assert.match(failure.statusCalls[0].cwd, new RegExp(`^${escapeRegex(cwd)}/\\.git/gentle-ai/candidate-views/`), "Process A STATUS targeted the candidate-views root under cwd");
 	assert.equal(failure.finalizeCalls, 0, "transport failure never invokes native finalize");
 	const failedResult = failure.result;
 	assert.equal(failedResult.status, "blocked");
@@ -216,6 +224,8 @@ test("INSPECT after a transport failure reoffers the exact pending binding; FINA
 	assert.equal(relaunch.error, undefined, `relaunch threw: ${JSON.stringify(relaunch.error)}`);
 	assert.equal(relaunch.relayRequests.length, 1, "Process C launched the relay exactly once from the fresh reoffer");
 	assert.equal(relaunch.statusCalls.length, 2, "Process C re-queried STATUS after the capture");
+	assert.equal(relaunch.statusCalls[0].lineageId, LINEAGE, "Process C first STATUS carried the relay lineage selector");
+	assert.match(relaunch.statusCalls[0].cwd, new RegExp(`^${escapeRegex(cwd)}/\\.git/gentle-ai/candidate-views/`), "Process C first STATUS targeted the candidate-views root under cwd");
 	assert.deepEqual(relaunch.statusCalls[1], { cwd, lineageId: LINEAGE });
 	// The relaunch came from the fresh reoffered binding, byte-for-byte /
 	// deep-equal to the binding the failed process observed.

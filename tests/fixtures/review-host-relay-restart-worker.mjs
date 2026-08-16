@@ -72,6 +72,15 @@ const nativeReviewCli = {
 	sddStatus: async () => ({ ready: false, artifactStore: "none", artifacts: {}, nextRecommended: "" }),
 	reviewStatus: async () => { throw new Error("unexpected reviewStatus"); },
 	targetStatus: async (request) => {
+		// In non-inspect modes the production FINALIZE path always carries
+		// the relay lineage selector. The read-only INSPECT operation
+		// intentionally has no lineage selector. Reject any non-inspect call
+		// missing the relay lineage before consuming the status queue, so a
+		// regression that drops the selector cannot slip through on a
+		// stubbed provider response.
+		if (mode !== "inspect" && request.lineageId !== "relay-lineage") {
+			throw new Error(`unexpected targetStatus lineageId in non-inspect mode: ${String(request.lineageId)}`);
+		}
 		statusCalls.push({ cwd: request.cwd, ...(request.lineageId === undefined ? {} : { lineageId: request.lineageId }) });
 		const next = statusQueue.shift();
 		if (next === undefined) throw new Error("status queue exhausted");
