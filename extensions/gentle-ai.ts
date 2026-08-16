@@ -142,7 +142,7 @@ import {
 	type NativeStartResult,
 	type NativeValidateResult,
 } from "../lib/native-review-cli.ts";
-import type { ReviewConsentV2, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
+import type { ReviewConsentEnvelope, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 import { assertDistinctCorrectionEvidence, resolveCorrectionStep, type CorrectionEvidence, type CorrectionOutcome, type CorrectionStep } from "../lib/review-correction-lifecycle.ts";
 import { recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
 
@@ -4821,7 +4821,7 @@ interface PendingReviewConsent {
 	repositoryCwd: string;
 	authorityCwd: string;
 	candidateView: CandidateView;
-	consent: ReviewConsentV2;
+	consent: ReviewConsentEnvelope;
 	consentDigest: string;
 	expiresAt: number;
 	expiry?: ReturnType<typeof setTimeout>;
@@ -4856,7 +4856,7 @@ function pruneExpiredReviewConsents(pendingReviewConsents: Map<string, PendingRe
 	}
 }
 
-function reviewConsentDigest(consent: ReviewConsentV2): string {
+function reviewConsentDigest(consent: ReviewConsentEnvelope): string {
 	return createHash("sha256").update(JSON.stringify(consent)).digest("hex");
 }
 

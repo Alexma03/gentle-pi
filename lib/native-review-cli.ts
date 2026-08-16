@@ -11,13 +11,14 @@ import {
 	REVIEW_INTEGRATION_CONTRACT,
 	decodeReviewCapabilitiesV2,
 	decodeReviewConsentV2,
+	decodeReviewConsentV3,
 	decodeReviewFailureV2,
 	decodeReviewOperationV2,
 	decodeReviewRepairV2,
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
 	type ReviewCapabilitiesV2,
-	type ReviewConsentV2,
+	type ReviewConsentEnvelope,
 	type ReviewFailureV2,
 	type ReviewRepairV2,
 	type ReviewStartState,
@@ -444,7 +445,7 @@ export interface NativeReviewVerificationEvidenceV2 {
 export interface NativeStartRequest { cwd: string; baseRef?: string; committedOnly?: boolean; lineageId?: string; policyPath?: string; focus?: string; targetIdentity?: string; projection?: "workspace" | "staged"; signal?: AbortSignal; }
 export const NATIVE_REVIEW_CONSENT_ANSWER = { GRANTED: "granted", DECLINED: "declined" } as const;
 export type NativeReviewConsentAnswer = (typeof NATIVE_REVIEW_CONSENT_ANSWER)[keyof typeof NATIVE_REVIEW_CONSENT_ANSWER];
-export interface NativeReviewConsentAnswerRequest { cwd: string; consent: ReviewConsentV2; answer: NativeReviewConsentAnswer; signal?: AbortSignal; }
+export interface NativeReviewConsentAnswerRequest { cwd: string; consent: ReviewConsentEnvelope; answer: NativeReviewConsentAnswer; signal?: AbortSignal; }
 export interface NativeReviewConsentDeclinedResult {
 	kind: "declined";
 	targetIdentity: string;
@@ -1795,15 +1796,16 @@ export class NativeReviewIntegrationError extends Error {
 	}
 }
 
-// Raised when negotiated START answers `consent/v2` (action:
+// Raised when negotiated START answers a consent question (`consent/v2` from
+// the pinned line, `consent/v3` from gentle-ai >= 2.3.0; action:
 // "consent_required") instead of `start/v3`. The provider has frozen no
 // authority yet: Pi must relay this complete candidate-scoped question and may
 // answer only through one of the exact invocations carried by the envelope.
 export class NativeReviewConsentRequiredError extends Error {
-	readonly consent: ReviewConsentV2;
+	readonly consent: ReviewConsentEnvelope;
 	readonly launchAttempted = true;
 	readonly mutationOutcome = "none";
-	constructor(consent: ReviewConsentV2) {
+	constructor(consent: ReviewConsentEnvelope) {
 		super(consent.headline);
 		this.name = "NativeReviewConsentRequiredError";
 		this.consent = consent;
@@ -2188,12 +2190,20 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			...(request.focus === undefined ? [] : ["--focus", request.focus]),
 			"--consent", "relay",
 		], true, request.signal);
-		// A negotiated v2 START may answer `consent/v2` (action:
+		// A negotiated v2 START may answer a consent question (action:
 		// "consent_required") instead of `start/v3` when the provider needs an
 		// explicit answer it cannot infer. Discriminate before decode and surface
-		// the complete envelope; only the caller can map a human answer.
+		// the complete envelope; only the caller can map a human answer. The
+		// body's own schema string selects the identity-exact decoder: the
+		// pinned 2.2.x line emits consent/v2, gentle-ai >= 2.3.0 (capabilities
+		// v2.1+) emits consent/v3, and any other identity fails closed inside
+		// the v3 decoder's exact identity gate.
 		if (execution.body.action === "consent_required") {
-			const consent = decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeReviewConsentV2(execution.body));
+			const consent = decode(NATIVE_REVIEW_OPERATION.START, true, () => (
+				execution.body.schema === "gentle-ai.review-integration.consent/v2"
+					? decodeReviewConsentV2(execution.body)
+					: decodeReviewConsentV3(execution.body)
+			));
 			if (consent.targetIdentity !== targetIdentity || consent.projection !== projection) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native consent target binding mismatch");
 			throw new NativeReviewConsentRequiredError(consent);
 		}
