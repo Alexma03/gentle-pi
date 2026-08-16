@@ -1969,3 +1969,54 @@ export function decodeReviewRepairV2(value: unknown): ReviewRepairV2 {
 		raw: body,
 	};
 }
+
+// ---------------------------------------------------------------------------
+// result-artifact/v2 — the `review capture-result` admission answer
+// ---------------------------------------------------------------------------
+
+// The provider's admitted-reviewer-result envelope, printed by `review
+// capture-result` when a reviewer result is admitted and re-discovered by
+// STATUS artifact discovery. Unlike the negotiated envelopes above it carries
+// no `contract`/`operation` identity pair — the schema constant plus the
+// capability constant are its complete identity (vendored ground truth:
+// contracts/review-integration/v1/schemas/result-artifact-v2.schema.json,
+// confirmed against a live 2.4.0-main capture; the v2.2.3 pinned emitter
+// shares the exact same struct). Exactly one locator is present: a
+// provider-owned store `path`, or the opaque `rart1_` `reference` minted for
+// repository-context captures.
+export interface ReviewResultArtifactV2 {
+	schema: "gentle-ai.review-result-artifact/v2";
+	capability: "review.native_result_artifact";
+	sha256: string;
+	lineageId: string;
+	targetIdentity: string;
+	lens: (typeof REVIEW_LENSES)[number];
+	selectedOrder: number;
+	subjectHash: string;
+	admissionDecision: "completed";
+	path?: string;
+	reference?: string;
+	raw: Record<string, unknown>;
+}
+
+export function decodeReviewResultArtifactV2(value: unknown): ReviewResultArtifactV2 {
+	const body = exactRecord(value, "result_artifact", ["schema", "capability", "sha256", "lineage_id", "target_identity", "lens", "selected_order", "subject_hash", "admission_decision"], ["path", "reference"]);
+	if (body.schema !== "gentle-ai.review-result-artifact/v2") throw new TypeError("result_artifact.schema must be gentle-ai.review-result-artifact/v2");
+	if (body.capability !== "review.native_result_artifact") throw new TypeError("result_artifact.capability must be review.native_result_artifact");
+	if (body.admission_decision !== "completed") throw new TypeError("result_artifact.admission_decision must be completed");
+	if ((body.path === undefined) === (body.reference === undefined)) throw new TypeError("result_artifact must carry exactly one of path or reference");
+	return {
+		schema: "gentle-ai.review-result-artifact/v2",
+		capability: "review.native_result_artifact",
+		sha256: sha256(body.sha256, "result_artifact.sha256"),
+		lineageId: lineage(body.lineage_id, "result_artifact.lineage_id"),
+		targetIdentity: sha256(body.target_identity, "result_artifact.target_identity"),
+		lens: enumeration(body.lens, REVIEW_LENSES, "result_artifact.lens"),
+		selectedOrder: integer(body.selected_order, "result_artifact.selected_order", 0, 3),
+		subjectHash: sha256(body.subject_hash, "result_artifact.subject_hash"),
+		admissionDecision: "completed",
+		...(body.path === undefined ? {} : { path: nonempty(body.path, "result_artifact.path") }),
+		...(body.reference === undefined ? {} : { reference: text(body.reference, "result_artifact.reference", { pattern: /^rart1_[0-9a-f]{64}$/ }) }),
+		raw: body,
+	};
+}

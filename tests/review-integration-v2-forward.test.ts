@@ -6,6 +6,8 @@ import {
 	decodeReviewCapabilitiesV2,
 	decodeReviewConsentV2,
 	decodeReviewConsentV3,
+	decodeReviewOperationV2,
+	decodeReviewResultArtifactV2,
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
 } from "../lib/review-integration-v2.ts";
@@ -60,6 +62,18 @@ import {
 //   live binary but MISSING from the published status-v5.schema.json
 //   (additionalProperties: false) at the same commit — the capture is
 //   authoritative (parity playbook, known traps).
+// - result-artifact-v2.captured.json and result-artifact-v2-path.captured.json
+//   were captured 2026-08-16 from the real binary at
+//   /home/gentleman/.cargo/bin/gentle-ai reporting
+//   "gentle-ai 2.4.0-main.b1afef46", in a scratch git repository holding a
+//   committed src/greet.js baseline plus an uncommitted shout() helper
+//   (medium tier, one review-reliability lens): consent-granted START, then
+//   the STATUS transition's exact `review capture-result` collect arguments
+//   with a completed reviewer input document. The reference form is the
+//   stdout of the --repository-context invocation (opaque rart1_ locator);
+//   the path form re-ran the exact same admitted slot with --cwd instead,
+//   which discovers the identical canonical bytes and answers with the
+//   provider-owned store path. Both agree on every binding field.
 
 const fixtureRoot = join(import.meta.dirname, "fixtures", "devbinary");
 const fixture = <T = Record<string, unknown>>(name: string): T => JSON.parse(readFileSync(join(fixtureRoot, name), "utf8")) as T;
@@ -418,4 +432,81 @@ test("start/v3 repository context event fields stay optional and exact", () => {
 	const extraKey = clone(base);
 	(extraKey.repository_context as JsonObject).unadvertised = true;
 	assert.throws(() => decodeReviewStartV3(extraKey), /not allowed/);
+});
+
+// --- result-artifact/v2: the `review capture-result` admission envelope ---
+
+test("the captured reference-form result artifact decodes with its rart1 locator", () => {
+	const artifact = decodeReviewResultArtifactV2(fixture("result-artifact-v2.captured.json"));
+	assert.equal(artifact.schema, "gentle-ai.review-result-artifact/v2");
+	assert.equal(artifact.capability, "review.native_result_artifact");
+	assert.match(artifact.reference ?? "", /^rart1_[0-9a-f]{64}$/);
+	assert.equal(artifact.path, undefined);
+	assert.equal(artifact.lineageId, "review-ceeb2b862bd39709");
+	assert.equal(artifact.lens, "review-reliability");
+	assert.equal(artifact.selectedOrder, 0);
+	assert.equal(artifact.admissionDecision, "completed");
+	assert.match(artifact.sha256, /^sha256:[0-9a-f]{64}$/);
+	assert.match(artifact.subjectHash, /^sha256:[0-9a-f]{64}$/);
+	assert.match(artifact.targetIdentity, /^sha256:[0-9a-f]{64}$/);
+});
+
+test("the captured path-form result artifact decodes with its provider-owned path", () => {
+	const artifact = decodeReviewResultArtifactV2(fixture("result-artifact-v2-path.captured.json"));
+	assert.equal(artifact.reference, undefined);
+	assert.match(artifact.path ?? "", /reviewer-results\/00-review-reliability\.json$/);
+	// Same admitted slot through both locator forms: every binding agrees.
+	const reference = decodeReviewResultArtifactV2(fixture("result-artifact-v2.captured.json"));
+	assert.equal(artifact.sha256, reference.sha256);
+	assert.equal(artifact.subjectHash, reference.subjectHash);
+	assert.equal(artifact.lineageId, reference.lineageId);
+	assert.equal(artifact.targetIdentity, reference.targetIdentity);
+});
+
+test("a result artifact carries exactly one locator", () => {
+	const base = fixture<JsonObject>("result-artifact-v2.captured.json");
+	const both = clone(base);
+	both.path = "/store/reviewer-results/00-review-reliability.json";
+	assert.throws(() => decodeReviewResultArtifactV2(both), /exactly one/);
+	const neither = clone(base);
+	delete neither.reference;
+	assert.throws(() => decodeReviewResultArtifactV2(neither), /exactly one/);
+});
+
+test("a result artifact rejects unknown keys and weakened bindings", () => {
+	const base = fixture<JsonObject>("result-artifact-v2.captured.json");
+	const extra = clone(base);
+	extra.unadvertised = true;
+	assert.throws(() => decodeReviewResultArtifactV2(extra), /not allowed/);
+	const wrongCapability = clone(base);
+	wrongCapability.capability = "review.result_artifact";
+	assert.throws(() => decodeReviewResultArtifactV2(wrongCapability), /capability/);
+	const unadmitted = clone(base);
+	unadmitted.admission_decision = "quarantined";
+	assert.throws(() => decodeReviewResultArtifactV2(unadmitted), /admission_decision/);
+	const foreignLocator = clone(base);
+	foreignLocator.reference = `rref1_${"b".repeat(64)}`;
+	assert.throws(() => decodeReviewResultArtifactV2(foreignLocator), /reference/);
+	const outOfRange = clone(base);
+	outOfRange.selected_order = 4;
+	assert.throws(() => decodeReviewResultArtifactV2(outOfRange), /selected_order/);
+});
+
+test("result artifact identities never cross-decode", () => {
+	// A prior identity rejects the new surface (it carries no negotiated
+	// contract/operation identity pair at all)...
+	assert.throws(() => decodeReviewOperationV2(fixture("result-artifact-v2.captured.json")), /contract|schema/);
+	// ...the new decoder pins its own exact identity...
+	const downgraded = clone(fixture<JsonObject>("result-artifact-v2.captured.json"));
+	downgraded.schema = "gentle-ai.review-result-artifact/v1";
+	assert.throws(() => decodeReviewResultArtifactV2(downgraded), /schema/);
+	// ...and rejects prior surfaces wholesale.
+	assert.throws(() => decodeReviewResultArtifactV2({
+		schema: "gentle-ai.review-provider-role-capture/v1",
+		lineage_id: "review-1d5aadacc600e167",
+		target_identity: `sha256:${"9".repeat(64)}`,
+		role: "targeted-validator",
+		captured: true,
+	}));
+	assert.throws(() => decodeReviewResultArtifactV2(v2Fixture("status.fixture.json")));
 });

@@ -39,6 +39,7 @@ import {
 	decodeReviewCapabilitiesV2,
 	decodeReviewConsentV3,
 	decodeReviewOperationV2,
+	decodeReviewResultArtifactV2,
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
 } from "../../runtime/review-integration-v2.mjs";
@@ -456,6 +457,8 @@ function decoderFor(schema, binaryDigest) {
 			return (body) => decodeReviewConsentV3(body);
 		case "gentle-ai.review-integration.operation/v2":
 			return (body) => decodeReviewOperationV2(body);
+		case "gentle-ai.review-result-artifact/v2":
+			return (body) => decodeReviewResultArtifactV2(body);
 		case "gentle-ai.review-integration.capabilities/v2":
 		case "gentle-ai.review-integration.capabilities/v2.1":
 		case "gentle-ai.review-integration.capabilities/v2.2":

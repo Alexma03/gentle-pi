@@ -15,6 +15,7 @@ import {
 	decodeReviewFailureV2,
 	decodeReviewOperationV2,
 	decodeReviewRepairV2,
+	decodeReviewResultArtifactV2,
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
 	type ReviewCapabilitiesV2,
@@ -1973,27 +1974,19 @@ interface NegotiatedExecution {
 }
 
 function decodeNativeAdmittedResultManifest(value: unknown): NativeReviewAdmittedResultManifest {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("native capture-result manifest must be an object");
-	const body = value as Record<string, unknown>;
-	const text = (key: string): string => {
-		const found = body[key];
-		if (typeof found !== "string" || found.trim() !== found || found.length === 0) throw new TypeError(`native capture-result manifest ${key} must be a non-empty trimmed string`);
-		return found;
-	};
-	const schema = text("schema");
-	if (schema !== "gentle-ai.review-result-artifact/v2") throw new TypeError(`native capture-result manifest schema must be gentle-ai.review-result-artifact/v2, received ${schema}`);
-	const admission = text("admission_decision");
-	if (admission !== "completed") throw new TypeError(`native capture-result manifest admission_decision must be completed, received ${admission}`);
-	// Exactly one locator: a provider-owned path OR an opaque reference. Both or
-	// neither means the manifest cannot be handed to FINALIZE.
-	const hasPath = body.path !== undefined, hasReference = body.reference !== undefined;
-	if (hasPath === hasReference) throw new TypeError("native capture-result manifest must carry exactly one of path or reference");
+	// The admission answer routes through the exact-identity forward decoder
+	// (decoder-freshness discipline): the complete live envelope — identity
+	// constants, binding fields, and the exactly-one-locator rule — is
+	// validated before anything is handed to FINALIZE, and an unknown field
+	// grown by gentle-ai main is rejected instead of silently dropped.
+	const artifact = decodeReviewResultArtifactV2(value);
 	return Object.freeze({
-		schema,
-		subjectHash: text("subject_hash"),
-		admissionDecision: admission,
-		...(body.lens === undefined ? {} : { lens: text("lens") }),
-		...(hasPath ? { path: text("path") } : { reference: text("reference") }),
+		schema: artifact.schema,
+		subjectHash: artifact.subjectHash,
+		admissionDecision: artifact.admissionDecision,
+		lens: artifact.lens,
+		...(artifact.path === undefined ? {} : { path: artifact.path }),
+		...(artifact.reference === undefined ? {} : { reference: artifact.reference }),
 	});
 }
 
