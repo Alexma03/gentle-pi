@@ -4999,6 +4999,7 @@ async function reconcileNativeMutationFailure(
 	error: unknown,
 	nativeReviewCli: NativeReviewCli,
 	target: { cwd: string; lineageId?: string; baseRef?: string; projection?: "workspace" | "staged" },
+	preOperationRevision?: string,
 ): Promise<Record<string, unknown>> {
 	const failure = nativeOperationFailure(operation, error);
 	if (!nativeMutationRequiresStatus(error)) return failure;
@@ -5022,6 +5023,28 @@ async function reconcileNativeMutationFailure(
 				reconciliation: status.raw,
 				authority_applicability: status.applicability,
 				...reconcileFinalizeRouting(status, target.lineageId, operation === REVIEW_CONTROLLER_OPERATION.FINALIZE),
+			};
+		}
+		// Field defect (fambig, 2026-08-16): an envelope-less mutating failure
+		// is stamped mutationOutcome "unknown", but a reconciled authority
+		// revision identical to the pre-operation revision PROVES the failed
+		// call never mutated. Report that proof as mutation_outcome none and
+		// claim no replay prohibition for it. Every genuinely ambiguous result
+		// — revision moved, no pre-operation revision held, or STATUS
+		// unavailable — stays fail-closed exactly as before.
+		if (preOperationRevision !== undefined && status.authority?.revision === preOperationRevision) {
+			const { replayability: staleReplayability, ...provenBase } = reconciledBase;
+			void staleReplayability;
+			return {
+				...provenBase,
+				outcome: "native-mutation-status-reconciled",
+				reconciliation: status.raw,
+				authority_applicability: status.applicability,
+				provider_action: status.action,
+				mutation_performed: false,
+				mutation_outcome: "none",
+				mutation_outcome_reason: `authority revision unchanged across reconciliation (${preOperationRevision}); the failed operation provably did not mutate`,
+				next_action: status.action,
 			};
 		}
 		return {
@@ -6235,7 +6258,7 @@ async function executeReviewControllerOperation(
 					cwd: candidateView?.root ?? defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					projection: "workspace",
-				});
+				}, negotiatedStatus?.authority?.revision);
 			}
 			try {
 				if (correctionCompletion && candidateViews && parameters.lineageId) candidateViews.promoteCorrected(parameters.lineageId, candidateView!.token);

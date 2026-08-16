@@ -5404,6 +5404,54 @@ test("ordinary final verification at validating captures evidence through the sl
 	assert.equal((details.result as { state?: string } | undefined)?.state, "approved");
 });
 
+// Field defect amplifier (fambig, 2026-08-16): an envelope-less mutating
+// failure is stamped mutationOutcome "unknown", and the reconciler KEPT
+// "unknown" even after fresh STATUS proved the authority revision identical to
+// the pre-operation revision — reporting a replay prohibition for an operation
+// that provably never mutated. A proven non-mutation must be reported as
+// mutation_outcome none with the proof named; a genuinely ambiguous result
+// (revision moved, or STATUS unavailable) stays fail-closed unknown.
+test("finalize reconciliation downgrades an envelope-less unknown to proven non-mutation when the authority revision is unchanged", async (t) => {
+	const cwd = repository(t);
+	let statuses = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statuses += 1;
+			return targetStatusFixture({ lineageId: "unchanged-revision" });
+		},
+		finalize: async () => {
+			throw Object.assign(new Error("stderr-only native failure without a typed envelope"), { mutationOutcome: "unknown", nextAction: "review.status" });
+		},
+	}));
+	const details = (await controller.execute("proven-none", { operation: "finalize", lineageId: "unchanged-revision", input: "{}" }, undefined, undefined, context(cwd))).details as Record<string, unknown>;
+	assert.equal(details.outcome, "native-mutation-status-reconciled");
+	assert.equal(details.mutation_performed, false, "a reconciled unchanged revision proves the operation did not mutate");
+	assert.equal(details.mutation_outcome, "none");
+	assert.match(String(details.mutation_outcome_reason), /revision unchanged/i, "the downgrade must name its proof");
+	assert.equal("replayability" in details, false, "a proven non-mutation must not claim replay prohibition");
+	assert.equal(details.next_action, "finalize");
+	assert.equal(statuses, 2);
+});
+
+test("finalize reconciliation preserves fail-closed unknown when the reconciled authority revision moved", async (t) => {
+	const cwd = repository(t);
+	const moved = targetStatusFixture({ lineageId: "moved-revision" });
+	moved.authority!.revision = `sha256:${"b".repeat(64)}`;
+	let statuses = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statuses += 1;
+			return statuses === 1 ? targetStatusFixture({ lineageId: "moved-revision" }) : moved;
+		},
+		finalize: async () => {
+			throw Object.assign(new Error("stderr-only native failure without a typed envelope"), { mutationOutcome: "unknown", nextAction: "review.status" });
+		},
+	}));
+	const details = (await controller.execute("kept-unknown", { operation: "finalize", lineageId: "moved-revision", input: "{}" }, undefined, undefined, context(cwd))).details as Record<string, unknown>;
+	assert.equal(details.outcome, "native-mutation-status-reconciled");
+	assert.equal(details.mutation_outcome, "unknown", "a moved revision is genuinely ambiguous and must stay fail-closed");
+	assert.equal(details.replayability, "not_replayable");
+});
 
 // Same misbinding class, remaining finalize-form slots (live smoke,
 // 2026-08-16, dev binary 2.4.0-main): the correction PLAN and TARGETED
