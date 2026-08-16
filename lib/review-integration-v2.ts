@@ -93,6 +93,18 @@ export const REVIEW_STATUS_ACTION_DISPOSITION = {
 export type ReviewStatusActionDisposition = (typeof REVIEW_STATUS_ACTION_DISPOSITION)[keyof typeof REVIEW_STATUS_ACTION_DISPOSITION];
 const RECEIPT_STATUSES = ["expected_missing", "present", "publication_pending", "not_applicable"] as const;
 const REQUIRED_OPERATIONS = Object.freeze(Object.values(REVIEW_INTEGRATION_OPERATION));
+// failure/v2 operations: the capability floor plus the four collect-capture
+// verbs that emit typed refusals on the gentle-ai main line (commit a2d57117,
+// fix/capture-evidence-typed-refusal; exact strings from that branch's
+// published failure.schema.json 12-value operation enum). Additive forward
+// surface: every operation outside the published enum still rejects.
+const FAILURE_OPERATIONS = Object.freeze([
+	...REQUIRED_OPERATIONS,
+	"review.capture-result",
+	"review.capture-evidence",
+	"review.capture-refuter",
+	"review.capture-validation",
+] as const);
 const REQUIRED_GATES = Object.freeze(["post-apply", "pre-commit", "pre-push", "pre-pr", "release"] as const);
 const REQUIRED_PROJECTIONS = Object.freeze(Object.values(REVIEW_PROJECTION));
 // The schema floor shared by every accepted capabilities identity. Each minor
@@ -613,10 +625,12 @@ export interface ReviewFailureContextV2 {
 	bindingRevision?: ReviewFailureBindingRevisionV1;
 }
 
+export type ReviewFailureOperation = ReviewIntegrationOperation | "review.capture-result" | "review.capture-evidence" | "review.capture-refuter" | "review.capture-validation";
+
 export interface ReviewFailureV2 {
 	schema: "gentle-ai.review-integration.failure/v2";
 	contract: typeof REVIEW_INTEGRATION_CONTRACT;
-	operation: ReviewIntegrationOperation;
+	operation: ReviewFailureOperation;
 	phase: "preflight" | "pre_native" | "native_running" | "native_committed" | "reconciliation";
 	code: string;
 	message: string;
@@ -1831,7 +1845,7 @@ export function decodeReviewFailureV2(value: unknown): ReviewFailureV2 {
 		"schema", "contract", "operation", "phase", "code", "message", "mutation_outcome", "authority_applicability", "retry_safe", "replayability", "required_inputs", "next_action",
 	], ["lineage_id", "request_digest", "progress_identity", "cause_category", "cause", "context"]);
 	requireIdentity(body, "gentle-ai.review-integration.failure/v2");
-	const operation = enumeration(body.operation, REQUIRED_OPERATIONS, "failure.operation");
+	const operation = enumeration(body.operation, FAILURE_OPERATIONS, "failure.operation");
 
 	if (body.progress_identity !== undefined) {
 		if (body.lineage_id === undefined || body.request_digest === undefined) throw new TypeError("failure.progress_identity requires lineage_id and request_digest");
