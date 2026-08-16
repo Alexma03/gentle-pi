@@ -4,6 +4,9 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	decodeReviewCapabilitiesV2,
+	decodeReviewConsentV2,
+	decodeReviewConsentV3,
+	decodeReviewStartV3,
 	decodeReviewStatusV3,
 } from "../lib/review-integration-v2.ts";
 
@@ -27,6 +30,24 @@ import {
 //   submission descriptor forms) are constructed from gentle-ai origin/main
 //   contracts/review-integration/v2/schemas/status-v5.schema.json and
 //   contracts/review-integration/v1/schemas/correction-plan-request.schema.json.
+// - consent-v3.captured.json, start-v3-consent-granted.captured.json, and
+//   start-v3-consent-declined.captured.json were captured 2026-08-16 from the
+//   real binary at /home/gentleman/.cargo/bin/gentle-ai reporting
+//   "gentle-ai 2.4.0-main.b1afef46", in a scratch git repository holding a
+//   committed internal/runner/{runner.go,runner_test.go} baseline plus 12
+//   uncommitted changed lines that add a process-starting helper (risk signal
+//   shell_process, high tier):
+//     gentle-ai review status --contract gentle-ai.review-integration/v2 \
+//       --cwd <scratch> --projection workspace --next-transition   # target source
+//     gentle-ai review start --contract gentle-ai.review-integration/v2 \
+//       --cwd <scratch> --target <identity> --projection workspace \
+//       --consent relay                                            # consent-v3
+//   then the envelope's exact declined invocation (declined capture, which
+//   persists nothing) followed by its exact granted invocation (granted
+//   start/v3 capture). Note: the live granted/declined invocations carry no
+//   --agent token even though the envelope pins agent: claude-code — the
+//   published consent-v3.schema.json invocation pattern is narrower than the
+//   emitter, so the capture is authoritative (parity playbook, known traps).
 
 const fixtureRoot = join(import.meta.dirname, "fixtures", "devbinary");
 const fixture = <T = Record<string, unknown>>(name: string): T => JSON.parse(readFileSync(join(fixtureRoot, name), "utf8")) as T;
@@ -273,4 +294,98 @@ test("the v3 next transition keeps rejecting every v5-only surface", () => {
 	assert.throws(() => decodeReviewStatusV3(asV3((transition) => {
 		(((transition.collect as JsonObject).inputs as JsonObject[])[0]!).submission = { operation_token: "finalize", argument_tokens: ["--correction-lines={{value}}"], value: { slot: "correction_lines", domain: "positive_correction_lines", minimum: 1, maximum: 25, substitution_location: 6 } };
 	})), /submission|values/);
+});
+
+// --- consent/v3 — the negotiated v2.1+ consent question (adds `agent`) ---
+
+test("the captured consent/v3 envelope decodes with its fixed agent binding", () => {
+	const consent = decodeReviewConsentV3(fixture("consent-v3.captured.json"));
+	assert.equal(consent.schema, "gentle-ai.review-integration.consent/v3");
+	assert.equal(consent.agent, "claude-code");
+	assert.equal(consent.action, "consent_required");
+	assert.equal(consent.blocking, true);
+	assert.equal(consent.riskLevel, "high");
+	assert.equal(consent.changedFiles, 2);
+	assert.equal(consent.changedLines, 12);
+	assert.equal(consent.choices[0].answer, "granted");
+	assert.equal(consent.choices[1].answer, "declined");
+	for (const choice of consent.choices) {
+		assert.ok(choice.invocation.includes(` --target ${consent.targetIdentity} `));
+	}
+	assert.equal(consent.offPath.command, "gentle-ai review mode disable");
+});
+
+test("consent identities never cross-decode", () => {
+	const v3 = fixture<JsonObject>("consent-v3.captured.json");
+	const v2 = v2Fixture<JsonObject>("consent.fixture.json");
+	// The old identity never accepts the new surface, and vice versa.
+	assert.throws(() => decodeReviewConsentV2(clone(v3)), /agent|schema/);
+	assert.throws(() => decodeReviewConsentV3(clone(v2)), /agent|schema/);
+	// A schema-swapped v3 body keeps its agent key, which the v2 identity
+	// still rejects as an unadvertised surface.
+	const downgraded = clone(v3);
+	downgraded.schema = "gentle-ai.review-integration.consent/v2";
+	assert.throws(() => decodeReviewConsentV2(downgraded), /agent/);
+	// A schema-swapped v2 body is missing the agent key v3 requires.
+	const upgraded = clone(v2);
+	upgraded.schema = "gentle-ai.review-integration.consent/v3";
+	assert.throws(() => decodeReviewConsentV3(upgraded), /agent/);
+});
+
+test("consent/v3 keeps every v2 semantic guard and pins its agent constant", () => {
+	const base = fixture<JsonObject>("consent-v3.captured.json");
+	const wrongAgent = clone(base);
+	wrongAgent.agent = "opencode";
+	assert.throws(() => decodeReviewConsentV3(wrongAgent), /agent/);
+	const swapped = clone(base);
+	swapped.choices = [...(swapped.choices as JsonObject[])].reverse();
+	assert.throws(() => decodeReviewConsentV3(swapped), /answer/);
+	const badInvocation = clone(base);
+	((badInvocation.choices as JsonObject[])[0]!).invocation = "gentle-ai review finalize --consent granted";
+	assert.throws(() => decodeReviewConsentV3(badInvocation), /invocation/);
+	const differentTarget = clone(base);
+	differentTarget.target_identity = sha("d");
+	assert.throws(() => decodeReviewConsentV3(differentTarget), /target|invocation/);
+	const notBlocking = clone(base);
+	notBlocking.blocking = false;
+	assert.throws(() => decodeReviewConsentV3(notBlocking), /blocking/);
+	const extraKey = clone(base);
+	extraKey.unadvertised = true;
+	assert.throws(() => decodeReviewConsentV3(extraKey), /not allowed/);
+});
+
+test("the pinned consent/v2 fixture still decodes unchanged", () => {
+	const consent = decodeReviewConsentV2(v2Fixture("consent.fixture.json"));
+	assert.equal(consent.schema, "gentle-ai.review-integration.consent/v2");
+	assert.equal(consent.action, "consent_required");
+});
+
+// --- start/v3 — main extends repository_context with event_id/outcome ---
+
+test("the captured granted start/v3 decodes with its repository context event binding", () => {
+	const start = decodeReviewStartV3(fixture("start-v3-consent-granted.captured.json"));
+	assert.equal(start.lineageId, "review-377c60e10b852cfc");
+	assert.equal(start.state, "reviewing");
+	assert.equal(start.riskLevel, "high");
+	assert.equal(start.selectedLenses.length, 4);
+	assert.equal(start.correctionBudget, 6);
+	assert.equal(start.repositoryContext?.outcome, "applied");
+	assert.match(start.repositoryContext?.eventId ?? "", /^sha256:[0-9a-f]{64}$/);
+});
+
+test("start/v3 repository context event fields stay optional and exact", () => {
+	// The pinned fixture carries neither field and still decodes unchanged.
+	const pinned = decodeReviewStartV3(v2Fixture("start.fixture.json"));
+	assert.equal(pinned.repositoryContext?.eventId, undefined);
+	assert.equal(pinned.repositoryContext?.outcome, undefined);
+	const base = fixture<JsonObject>("start-v3-consent-granted.captured.json");
+	const badEvent = clone(base);
+	(badEvent.repository_context as JsonObject).event_id = "not-a-digest";
+	assert.throws(() => decodeReviewStartV3(badEvent), /event_id/);
+	const badOutcome = clone(base);
+	(badOutcome.repository_context as JsonObject).outcome = "unheard-of";
+	assert.throws(() => decodeReviewStartV3(badOutcome), /outcome/);
+	const extraKey = clone(base);
+	(extraKey.repository_context as JsonObject).unadvertised = true;
+	assert.throws(() => decodeReviewStartV3(extraKey), /not allowed/);
 });

@@ -263,6 +263,17 @@ const REQUIRED_MANDATORY_FEATURES = Object.freeze(FEATURE_NAMES.filter((name) =>
 
 
 
+const REPOSITORY_CONTEXT_OUTCOMES = ["applied", "pending", "blocked_conflict", "durability_limited"]         ;
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -523,6 +534,19 @@ export const REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS = Object.freeze(Object.valu
 
 
 
+
+
+// consent/v3 (gentle-ai >= 2.3.0, capabilities/v2.1+): the same per-candidate
+// blocking question with one net-new required member, the provider-fixed
+// `agent` runtime binding. Everything shared with v2 keeps its exact shape so
+// consumers of either identity read one structural surface.
+
+
+
+
+
+// Either accepted consent identity. Consumers that relay the envelope (rather
+// than decode it) accept both; each decoder still admits exactly one schema.
 
 
 const FAILURE_REQUIRED_INPUTS = [
@@ -989,13 +1013,15 @@ export function decodeReviewStartV3(value         )                {
 
 	let repositoryContext                                       ;
 	if (body.repository_context !== undefined) {
-		const source = exactRecord(body.repository_context, "start.repository_context", ["capability", "handle", "revision", "target_identity"]);
+		const source = exactRecord(body.repository_context, "start.repository_context", ["capability", "handle", "revision", "target_identity"], ["event_id", "outcome"]);
 		if (source.capability !== "review.opaque_repository_context") throw new TypeError("start.repository_context.capability is unsupported");
 		repositoryContext = {
 			capability: "review.opaque_repository_context",
 			handle: text(source.handle, "start.repository_context.handle", { pattern: /^rctx1_[0-9a-f]{64}$/ }),
 			revision: sha256(source.revision, "start.repository_context.revision"),
 			targetIdentity: sha256(source.target_identity, "start.repository_context.target_identity"),
+			...(source.event_id === undefined ? {} : { eventId: sha256(source.event_id, "start.repository_context.event_id") }),
+			...(source.outcome === undefined ? {} : { outcome: enumeration(source.outcome, REPOSITORY_CONTEXT_OUTCOMES, "start.repository_context.outcome") }),
 		};
 	}
 
@@ -1617,11 +1643,10 @@ function decodeConsentChoice(value         , label        , answer              
 	};
 }
 
-export function decodeReviewConsentV2(value         )                  {
-	const body = exactRecord(value, "consent", [
-		"schema", "contract", "operation", "action", "blocking", "target_identity", "projection", "risk_level", "changed_files", "changed_lines", "headline", "reason", "value", "risk_evidence", "choices", "off_path",
-	]);
-	requireIdentity(body, "gentle-ai.review-integration.consent/v2", "review.start");
+// The semantic surface shared verbatim by both accepted consent identities.
+// Every label and guard predates consent/v3, so the v2 decode stays
+// byte-identical (test-locked) while v3 adds only its own identity gate.
+function decodeConsentSemantics(body                         )                                          {
 	if (body.action !== "consent_required") throw new TypeError("consent.action must be consent_required");
 	if (body.blocking !== true) throw new TypeError("consent.blocking must be true");
 
@@ -1638,7 +1663,6 @@ export function decodeReviewConsentV2(value         )                  {
 	if (offPathSource.command !== "gentle-ai review mode disable") throw new TypeError("consent.off_path.command is unsupported");
 
 	return {
-		schema: "gentle-ai.review-integration.consent/v2",
 		contract: REVIEW_INTEGRATION_CONTRACT,
 		operation: "review.start",
 		action: "consent_required",
@@ -1654,6 +1678,39 @@ export function decodeReviewConsentV2(value         )                  {
 		riskEvidence: stringArray(body.risk_evidence, "consent.risk_evidence"),
 		choices: [granted, declined],
 		offPath: { note: nonempty(offPathSource.note, "consent.off_path.note"), command: "gentle-ai review mode disable" },
+	};
+}
+
+const CONSENT_KEYS_V2 = Object.freeze([
+	"schema", "contract", "operation", "action", "blocking", "target_identity", "projection", "risk_level", "changed_files", "changed_lines", "headline", "reason", "value", "risk_evidence", "choices", "off_path",
+]         );
+
+export function decodeReviewConsentV2(value         )                  {
+	const body = exactRecord(value, "consent", CONSENT_KEYS_V2);
+	requireIdentity(body, "gentle-ai.review-integration.consent/v2", "review.start");
+	return {
+		schema: "gentle-ai.review-integration.consent/v2",
+		...decodeConsentSemantics(body),
+		raw: body,
+	};
+}
+
+// consent/v3 (gentle-ai >= 2.3.0): the v2 surface plus the required, fixed
+// `agent` runtime binding. Ground truth is the captured envelope from a
+// 2.4.0-main binary (tests/fixtures/devbinary/consent-v3.captured.json) plus
+// gentle-ai main contracts/review-integration/v2/schemas/consent-v3.schema.json.
+// The choice-invocation shape deliberately stays the shared v2 pattern: the
+// published v3 schema demands an `--agent claude-code` token that the live
+// emitter omits when the caller declared no --agent, so the capture is
+// authoritative and Pi replays whichever provider-owned invocation arrived.
+export function decodeReviewConsentV3(value         )                  {
+	const body = exactRecord(value, "consent", [...CONSENT_KEYS_V2, "agent"]);
+	requireIdentity(body, "gentle-ai.review-integration.consent/v3", "review.start");
+	if (body.agent !== "claude-code") throw new TypeError("consent.agent must be claude-code");
+	return {
+		schema: "gentle-ai.review-integration.consent/v3",
+		agent: "claude-code",
+		...decodeConsentSemantics(body),
 		raw: body,
 	};
 }
