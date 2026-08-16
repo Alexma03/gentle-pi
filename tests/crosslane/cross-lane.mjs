@@ -44,6 +44,11 @@ import {
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
 } from "../../runtime/review-integration-v2.mjs";
+// The recovered-successor checks drive the CONTROLLER (not just the runtime
+// adapter) against the live binary; Node's default type stripping loads the
+// authored TypeScript directly.
+import { __testing } from "../../extensions/gentle-ai.ts";
+import { CandidateViewRegistry, injectReviewCandidateView } from "../../lib/review-candidate-view.ts";
 
 const WITH_MODEL = process.argv.includes("--with-model");
 const CONTRACT = "gentle-ai.review-integration/v2";
@@ -496,6 +501,138 @@ async function abandonLifecycle(binary, cli, root) {
 	return "adapter-built nine-line v2 binding accepted natively; quarantine record committed; post-abandon status offers only a fresh start";
 }
 
+// recoveredSuccessorLifecycle reproduces the maintainer's live scenario
+// (2026-08-16, Engram #12461/#12466): a lineage recovered EXTERNALLY through
+// the native CLI, then driven by the Pi controller from STATUS alone.
+//   1. approve a low documentation lineage;
+//   2. change the scope with a code edit (medium risk);
+//   3. native `review recover --disposition scope_changed` with the explicit
+//      LF-only gentle-ai.review-recovery-authorization/v1 binding (an ACTIVE
+//      reviewing predecessor refuses recovery, so approval comes first);
+//   4. defect A: the controller's dispatch binding must hydrate from the
+//      STATUS the controller itself decodes — before that STATUS, dispatch
+//      refuses with current-binding-missing;
+//   5. defect B: finalize at reviewer_results_required must surface the
+//      provider-offered review.capture-result step, never the correction
+//      evidence-first-ordering lane;
+//   6. the drive completes to one really captured lens.
+async function recoveredSuccessorLifecycle(binary, cli, root) {
+	const cwd = scratchRepo(root, "pi-recovered");
+	write(cwd, "docs/recover-guide.md", "# Recover guide\n\nline one\n");
+	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\n");
+	commitAll(cwd, "feat: base");
+	write(cwd, "docs/recover-guide.md", "# Recover guide\n\nline one\nline two, purely passive documentation\n");
+
+	// Low predecessor to approval.
+	let raw = rawStatus(binary, cwd);
+	let status = await cli.targetStatus({ cwd });
+	assertOfferedStepMatchesNative("pre-start", status, raw);
+	const start = await cli.start({ cwd, targetIdentity: status.targetIdentity, projection: "workspace" });
+	if (start.riskLevel !== "low" || start.state !== "reviewing") throw new Error(`predecessor start risk=${start.riskLevel} state=${start.state}`);
+	status = await cli.targetStatus({ cwd });
+	if (status.nextTransition?.execute?.operation !== "review.finalize") {
+		throw new Error(`expected review.finalize, got ${summarizeDecoded(status.nextTransition)}`);
+	}
+	const finalize = await cli.finalizeTransition({ cwd, argumentTokens: executeTokens(status.nextTransition) });
+	if (finalize.state !== "approved") throw new Error(`predecessor finalize state=${finalize.state}`);
+
+	// External scope change: code joins the approved documentation change.
+	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\nexport function twice(a) {\n  return a + a;\n}\n");
+	raw = rawStatus(binary, cwd);
+	const successor = "recovered-successor-crosslane";
+	const authorization = [
+		"gentle-ai.review-recovery-authorization/v1",
+		`predecessor_lineage=${finalize.lineageId}`,
+		`predecessor_revision=${finalize.storeRevision}`,
+		`target_identity=${raw.target_identity}`,
+		"actor=cross-lane-battery",
+		"reason=scope changed after approval",
+	].join("\n");
+	rawInvoke(binary, cwd, [
+		"review", "recover", "--cwd", cwd,
+		"--predecessor-lineage", finalize.lineageId,
+		"--expected-predecessor-revision", finalize.storeRevision,
+		"--successor-lineage", successor,
+		"--disposition", "scope_changed",
+		"--actor", "cross-lane-battery",
+		"--reason", "scope changed after approval",
+		"--maintainer-authorization", authorization,
+	]);
+
+	const registry = new CandidateViewRegistry();
+	try {
+		// Defect A: before the controller decodes the successor's STATUS, the
+		// dispatch registry knows nothing — the refusal is the pre-fix shape.
+		let refused = false;
+		try {
+			injectReviewCandidateView({ agent: "review-reliability", task: "probe", mode: "task" }, registry);
+		} catch (error) {
+			refused = /no current controller-owned candidate view lineage binding/.test(String(error instanceof Error ? error.message : error));
+		}
+		if (!refused) throw new Error("pre-STATUS dispatch unexpectedly resolved a binding for the recovered successor");
+		await __testing.executeReviewControllerOperation({ operation: "status", lineageId: successor }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
+		if (!registry.hasCurrentBinding()) {
+			throw new Error("controller STATUS did not hydrate the candidate-view dispatch binding for the recovered successor");
+		}
+		const dispatch = { agent: "review-reliability", task: "review the recovered successor", mode: "task" };
+		injectReviewCandidateView(dispatch, registry);
+		if (!dispatch.task.includes(successor)) throw new Error("hydrated dispatch context is not bound to the recovered successor lineage");
+		pass(
+			"recovered binding: STATUS hydrates controller dispatch",
+			"external scope_changed successor driven from STATUS alone: pre-STATUS dispatch refused, post-STATUS dispatch injected the successor candidate context (a controller without STATUS hydration fails here)",
+		);
+
+		// Defect B: document-free finalize at reviewer_results_required.
+		const finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({}) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
+		if (finalizeEnvelope.status !== "blocked" || finalizeEnvelope.outcome !== "reviewer-results-required" || finalizeEnvelope.mutation_performed !== false) {
+			throw new Error(`finalize routed to ${String(finalizeEnvelope.outcome ?? finalizeEnvelope.status)} instead of the blocked reviewer-results-required step`);
+		}
+		if (!/capture the reviewer result first/i.test(String(finalizeEnvelope.reason)) || !String(finalizeEnvelope.reason).includes("review.capture-result")) {
+			throw new Error("finalize block is missing the actionable review.capture-result direction");
+		}
+		if (JSON.stringify(finalizeEnvelope).includes("evidence-first-ordering")) {
+			throw new Error("finalize still leaked the correction evidence-first-ordering lane");
+		}
+		pass(
+			"recovered routing: finalize offers capture-result, never evidence ordering",
+			"document-free finalize at reviewer_results_required returned the actionable review.capture-result block with zero mutations (a finalize that misroutes into evidence ordering fails here)",
+		);
+
+		// Complete the drive to one really captured lens through the exact
+		// provider collect input.
+		raw = rawStatus(binary, cwd);
+		const input = raw.next_transition?.collect?.inputs?.[0];
+		if (input?.capture_operation !== "review.capture-result") throw new Error(`expected review.capture-result, got ${summarizeRaw(raw.next_transition)}`);
+		const args = rawArgumentValues(input);
+		const reviewerFile = join(root, "pi-recovered-reviewer.json");
+		writeFileSync(reviewerFile, JSON.stringify({
+			subject_hash: args["subject-hash"],
+			inspection: { status: "completed", paths: (input.changed_path_manifest ?? []).map((entry) => entry.path) },
+			evidence: ["twice(a) returns a + a: pure arithmetic introduced by the candidate hunk with no external effects"],
+			findings: [],
+		}));
+		const artifact = rawInvoke(binary, cwd, [
+			"review", "capture-result",
+			"--lineage", args.lineage,
+			"--expected-revision", args["expected-revision"],
+			"--target", args.target,
+			"--repository-context", args["repository-context"],
+			"--lens", args.lens,
+			"--order", args.order,
+			"--subject-hash", args["subject-hash"],
+			"--input", reviewerFile,
+		]);
+		if (artifact?.schema !== "gentle-ai.review-result-artifact/v2") throw new Error(`successor lens capture returned schema=${artifact?.schema}`);
+		return "low predecessor approved -> native scope_changed recover (explicit v1 binding) -> controller drove the successor from STATUS alone to one captured lens";
+	} finally {
+		try {
+			registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);
+		} catch {
+			// No hydrated view to clean when the check failed before binding.
+		}
+	}
+}
+
 async function modelReview(binary, cli, cwd) {
 	const raw = rawStatus(binary, cwd);
 	const input = raw.next_transition?.collect?.inputs?.[0];
@@ -615,6 +752,12 @@ async function main() {
 			pass("audited abandon end-to-end (v2 discarded-work binding)", await abandonLifecycle(binary, cli, root));
 		} catch (error) {
 			fail("audited abandon end-to-end (v2 discarded-work binding)", knownRedParity(describeError(error)));
+		}
+
+		try {
+			pass("external native recover to captured successor lens", await recoveredSuccessorLifecycle(binary, cli, root));
+		} catch (error) {
+			fail("external native recover to captured successor lens", knownRedParity(describeError(error)));
 		}
 
 		if (WITH_MODEL && mediumRepo !== undefined) {
