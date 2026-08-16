@@ -363,8 +363,11 @@ async function sequencingLifecycle(binary, cli, root) {
 	status = await cli.targetStatus({ cwd });
 	assertOfferedStepMatchesNative("post-fix", status, raw);
 	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
+	// An offered validation STEP is a targeted-validation collect input. The
+	// bare `validation_request` field is descriptive context both live
+	// emitters (pinned 2.2.3 and 2.4.0-main, probed 2026-08-16) publish
+	// alongside the evidence collect at `correction_required`.
 	const validationOffered =
-		status.validationRequest !== undefined ||
 		inputs.some((input) => input.captureOperation === "external.run_targeted_validation" || input.captureOperation === "review.capture-validation");
 	const evidenceInputs = inputs.filter((input) => input.captureOperation === "review.capture-evidence");
 	if (validationOffered) {
