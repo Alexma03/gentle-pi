@@ -126,6 +126,7 @@ import {
 	NativeReviewCliError,
 	NativeReviewConsentBindingError,
 	NativeReviewConsentRequiredError,
+	NativeReviewIntegrationError,
 	NATIVE_REVIEW_ERROR_CODE,
 	NATIVE_REVIEW_OPERATION,
 	NATIVE_REVIEW_LEGACY_QUARANTINE,
@@ -135,6 +136,7 @@ import {
 	NATIVE_REVIEW_RECONCILE_ANOMALIES,
 	sanitizeForeignNativeReviewDiagnostics,
 	type NativeReviewCli,
+	type NativeTargetStatusRequest,
 	type NativeFinalizeResult,
 	type NativeReviewVerificationEvidenceV2,
 	type NativeReviewModeOperation,
@@ -5512,6 +5514,60 @@ function pendingReviewerLenses(status: ReviewStatusV3): readonly string[] {
 // through STATUS. It also never fails its caller: STATUS and the blocked
 // FINALIZE envelope stay read-only, and the outcome is returned so the caller
 // can report it instead of swallowing it.
+// Field defect (2026-08-16, third report): the Pi host relay never ran for a
+// real lineage. Measured against the live 2.4.0-main provider on a faithful
+// reproduction — an agent-less `review status` returns a bare capture-result
+// collect input (lineage, expected-revision, target, repository-context, lens,
+// order, subject-hash), while the SAME status with `--agent pi` additionally
+// carries agent=pi, materialize=true and the provider submission. The adapter
+// never named its agent, so reviewHostRelaySlots() saw zero materialize slots,
+// the relay was unreachable, and no lens was ever launched.
+//
+// The agent is PROBED, never assumed: the pinned 2.2.3 provider refuses the
+// flag outright. A typed refusal is remembered per provider instance and the
+// exact provider cause is reported to the user rather than degraded into a
+// generic candidate-view message.
+const REVIEW_HOST_AGENT = "pi" as const;
+const REVIEW_TRANSPORT_REFUSAL_CODES = new Set([
+	"immutable_review_transport_unsupported",
+	"unsupported_agent",
+	"unknown_flag",
+]);
+interface ReviewTransportRefusal { supported: false; code: string; message: string; }
+const reviewTransportRefusalByProvider = new WeakMap<object, ReviewTransportRefusal>();
+
+function clearReviewTransportProbeForTesting(nativeReviewCli: NativeReviewCli | null): void {
+	if (nativeReviewCli !== null) reviewTransportRefusalByProvider.delete(nativeReviewCli as unknown as object);
+}
+
+/**
+ * Queries negotiated STATUS for the pi reviewer transport so the provider
+ * offers its materialize-marked relay slot, probing the agent exactly once per
+ * provider and falling back to the agent-less status on a typed refusal. The
+ * refusal is returned, never swallowed.
+ */
+async function negotiatedStatusForHostTransport(
+	nativeReviewCli: NativeReviewCli,
+	request: NativeTargetStatusRequest,
+): Promise<{ status: ReviewStatusV3; transport?: ReviewTransportRefusal }> {
+	const provider = nativeReviewCli as unknown as object;
+	const remembered = reviewTransportRefusalByProvider.get(provider);
+	if (remembered !== undefined) {
+		return { status: await nativeReviewCli.targetStatus!(request), transport: remembered };
+	}
+	try {
+		return { status: await nativeReviewCli.targetStatus!({ ...request, agent: REVIEW_HOST_AGENT }) };
+	} catch (error) {
+		const code = error instanceof NativeReviewIntegrationError ? error.failureEnvelope.code : undefined;
+		// Only a transport-shaped refusal falls back; every other failure is
+		// the caller's to handle exactly as before.
+		if (code === undefined || !REVIEW_TRANSPORT_REFUSAL_CODES.has(code)) throw error;
+		const refusal: ReviewTransportRefusal = { supported: false, code, message: error.message };
+		reviewTransportRefusalByProvider.set(provider, refusal);
+		return { status: await nativeReviewCli.targetStatus!(request), transport: refusal };
+	}
+}
+
 type DispatchHydrationOutcome =
 	| { hydrated: true; lineage_id: string; lenses: readonly string[] }
 	| { hydrated: false; lineage_id: string; reason: string; message: string }
@@ -5969,6 +6025,7 @@ async function executeReviewControllerOperation(
 			let provisionalCandidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			let nativeResult: NativeFinalizeResult | undefined;
 			let correctionStep: CorrectionStep | undefined;
+			let transportRefusal: ReviewTransportRefusal | undefined;
 			try {
 				if (parameters.lineageId === undefined) throw new CandidateViewError("Native FINALIZE requires an explicit lineage");
 				correctionCompletion = input.validation !== undefined && input.final_evidence !== undefined;
@@ -5985,7 +6042,13 @@ async function executeReviewControllerOperation(
 				}
 				candidateView?.verify();
 				const statusCandidateRoot = candidateView?.root ?? defaultCwd;
-				negotiatedStatus = await nativeReviewCli.targetStatus({ cwd: statusCandidateRoot, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+				// Name the host's reviewer transport so the provider offers its
+				// materialize-marked relay slot; a provider without that
+				// transport answers the agent-less status and its typed refusal
+				// travels with the result.
+				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: statusCandidateRoot, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+				negotiatedStatus = negotiated.status;
+				transportRefusal = negotiated.transport;
 				if (negotiatedStatus.applicability !== "current_target" || negotiatedStatus.authority?.lineageId !== parameters.lineageId || (negotiatedStatus.action !== "finalize" && negotiatedStatus.action !== "reconcile_finalize")) {
 					if (provisionalCandidateView && candidateViews) {
 						candidateViews.cleanup(provisionalCandidateView.token);
@@ -6008,7 +6071,9 @@ async function executeReviewControllerOperation(
 				// the workspace root before executing any rendered payload.
 				// Pinned pre-v5 emitters keep the frozen-view status untouched.
 				if (statusCandidateRoot !== defaultCwd && (negotiatedStatus.raw as { schema?: unknown }).schema === "gentle-ai.review-integration.status/v5") {
-					const workspaceStatus = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+					const rebound = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+					const workspaceStatus = rebound.status;
+					transportRefusal = rebound.transport;
 					if (workspaceStatus.authority?.lineageId !== parameters.lineageId || workspaceStatus.authority.revision !== negotiatedStatus.authority.revision) {
 						throw new CandidateViewError("workspace-root status no longer matches the negotiated lifecycle authority", "workspace-status-rebind-drift");
 					}
@@ -6021,7 +6086,46 @@ async function executeReviewControllerOperation(
 					? reviewHostRelaySlots(negotiatedStatus.nextTransition.collect?.inputs ?? [])
 					: [];
 				if (hostRelaySlots.length > 0 && input.final_evidence === undefined && input.correction_line_forecast === undefined) {
-					return await executeReviewHostRelayCollection(parameters.operation, parameters.lineageId, hostRelaySlots, nativeReviewCli, defaultCwd, signal);
+					// One cost/side-effect forecast BEFORE launch, once per
+					// FINALIZE and never per lens: each host-relay slot runs a
+					// real locked-down `pi` reviewer subprocess against the
+					// user's own model, so an unacknowledged finalize would spend
+					// tokens as a silent side effect of what reads like
+					// bookkeeping. Same acknowledgement shape the adapter already
+					// uses for consequential inputs (committedOnly): the caller
+					// states the cost it accepts, which keeps headless callers
+					// working without an interactive prompt.
+					if (input.reviewer_run_acknowledged !== true) {
+						const forecastLenses = hostRelaySlots.map((slot, index) => slot.lens ?? `slot-${index}`);
+						return {
+							operation: parameters.operation,
+							status: "blocked",
+							outcome: "reviewer-model-run-forecast",
+							reason: `Finalize is about to run ${hostRelaySlots.length} real reviewer model run${hostRelaySlots.length === 1 ? "" : "s"} through the pi host relay (${forecastLenses.join(", ")}), one locked-down pi subprocess per outstanding lens, in the foreground. This spends model tokens on your configured model and provider.`,
+							cost_forecast: {
+								transport: "pi_host_relay",
+								model_runs: hostRelaySlots.length,
+								lenses: forecastLenses,
+								side_effects: [
+									"one locked-down pi subprocess per lens, in an empty scratch directory with every discovery surface disabled",
+									"each captured reviewer result is admitted natively into this lineage's authority",
+									"no candidate file, index, or commit is modified",
+								],
+								model_selection: "user-owned: the relay never sets --model, --provider, or --profile",
+							},
+							mutation_performed: false,
+							mutation_outcome: "none",
+							next_action: "Re-run finalize with {\"reviewer_run_acknowledged\": true} to authorize exactly this reviewer work.",
+						};
+					}
+					// The relay itself needs no candidate view (it consumes only
+					// provider-issued tokens), but a session that dispatches a
+					// reviewer by hand on this same lineage does. Hydrate here too
+					// so both routes work; it is best-effort and never fails the
+					// relay.
+					const relayDispatchBinding = hydrateDispatchBindingFromStatus(candidateViews, defaultCwd, negotiatedStatus);
+					const relayResult = await executeReviewHostRelayCollection(parameters.operation, parameters.lineageId, hostRelaySlots, nativeReviewCli, defaultCwd, signal);
+					return relayDispatchBinding === undefined ? relayResult : { ...relayResult, dispatch_binding: relayDispatchBinding };
 				}
 				// gentle-pi#311 P4-roles: the provider renders the non-lens
 				// adversarial roles as self-contained --execute vectors; each is
@@ -6062,9 +6166,12 @@ async function executeReviewControllerOperation(
 						operation: parameters.operation,
 						status: "blocked",
 						outcome: "reviewer-results-required",
-						reason: "Capture the reviewer result first; the provider offers review.capture-result. Correction evidence and targeted validation are never admissible while reviewer results are outstanding.",
+						reason: transportRefusal === undefined
+							? "Capture the reviewer result first; the provider offers review.capture-result. Correction evidence and targeted validation are never admissible while reviewer results are outstanding."
+							: `Capture the reviewer result first; the provider offers review.capture-result. This provider does not admit the pi reviewer transport (${transportRefusal.code}), so it offers no host-relay slot: ${transportRefusal.message}`,
 						...(outstandingReviewerLenses.length === 0 ? {} : { pending_lenses: outstandingReviewerLenses }),
 						...(dispatchBinding === undefined ? {} : { dispatch_binding: dispatchBinding }),
+						...(transportRefusal === undefined ? {} : { relay_transport: transportRefusal }),
 						result: negotiatedStatus.raw,
 						mutation_performed: false,
 						mutation_outcome: "none",
@@ -6835,6 +6942,7 @@ export const __testing = {
 	nativeStatusUnsupported,
 	executeReviewControllerOperation,
 	setReviewHostRelayRunnerForTesting,
+	clearReviewTransportProbeForTesting,
 	enforceReviewGateAndCommandSafety,
 	renderSddModelPanel: renderSddModelPanelForTesting,
 	getOrchestratorPrompt,
@@ -6961,7 +7069,7 @@ function createGentleAiExtensionForTesting(
 			'Call {"operation":"inspect"} before START. New native ordinary START uses a JSON string such as "{\\"mode\\":\\"ordinary\\"}"; an explicit baseRef must be paired with committedOnly: true to request a committed range, while policyPath remains repository-local. policyHash is legacy compact-only. The controller derives lineage, Git/untracked scope, tier, lenses, authored lines, and budget.',
 			"Use RECONCILE_AUTHORITY only to quarantine one invalid native recovery successor. Supply exact predecessorLineage, expectedPredecessorRevision, successorLineage, expectedSuccessorRevision, actor, and reason values; Pi derives and displays the seven-line native authorization binding for fresh UI approval. The predecessor stays untouched, native returns the durable audit record, and Pi never falls back to RESET or RECOVER.",
 			"Use ABANDON or QUARANTINE_LEGACY only after an explicit user decision and with exact native inputs. ABANDON needs lineage, expectedRevision, snapshotIdentity, capturedLensResults, findingsPresent, evidenceRecordsPresent, actor, and reason; QUARANTINE_LEGACY accepts only the published malformed freeze-findings diagnostic/disposition. A dual reconciliation may supply only anomalies `unchanged_target,malformed_recovery_authorization` in that exact order. Use REPAIR_LEGACY_ALIAS only with lineage, actor, and reason: Pi freshly reads native inventory and derives repository, revision, diagnostic, disposition, and the exact eight-line binding before interactive approval. `review dispose-result` is unsupported pending design.",
-			"Lens, refuter, and validator verdicts are admitted natively, never Pi-authored: FINALIZE routes provider --materialize lens slots through the host relay, executes provider-rendered self-contained role vectors verbatim, and runs the provider's own review.finalize transition (captured-results discovery). Call FINALIZE with a JSON string carrying only the negotiated collection answers: correction_line_forecast for the pre-edit forecast, validation for the targeted validation document the exact collection input requests, and final_evidence paired with exactly one of final_verification_passed or final_verification_outcome (passed, verification_failed, procedural_tooling_failed). Correction evidence is captured natively before STATUS can expose targeted validation. Use ADVANCE only for explicit graph-v1 Judgment Day.",
+			"Lens, refuter, and validator verdicts are admitted natively, never Pi-authored: FINALIZE routes provider --materialize lens slots through the host relay, executes provider-rendered self-contained role vectors verbatim, and runs the provider's own review.finalize transition (captured-results discovery). Call FINALIZE with a JSON string carrying only the negotiated collection answers: correction_line_forecast for the pre-edit forecast, validation for the targeted validation document the exact collection input requests, and final_evidence paired with exactly one of final_verification_passed or final_verification_outcome (passed, verification_failed, procedural_tooling_failed). Correction evidence is captured natively before STATUS can expose targeted validation. When the provider offers host-relay lens slots, FINALIZE first returns a `reviewer-model-run-forecast` naming the lenses and the real model runs it would spend; re-run it with `reviewer_run_acknowledged: true` to authorize exactly that reviewer work. Use ADVANCE only for explicit graph-v1 Judgment Day.",
 			"For blocked-legacy or blocked-mixed, do not call START repeatedly. Explain invalidation, request explicit user authorization for the exact reset_request challenge, then call RESET or RECOVER only after authorization. RESET and RECOVER_LOCK route to audited native `gentle-ai review reclaim` and RECOVER routes to native `gentle-ai review recover`; negotiated target status supplies the sole accepted recovery disposition, and a caller-supplied substitute is rejected. Treat a native-input-required envelope as a request for exact values, never as permission to invent them. After a committed native recovery record, INSPECT before any fresh ordinary START.",
 			"A consent-required START returns the complete provider envelope and an opaque consent_binding, then stops. The parent presents and localizes that envelope without changing machine tokens, commands, target IDs, or invocations. After one explicit human answer, call answer-consent exactly once with a JSON string containing only consentBinding and answer (`granted` or `declined`). A reported lineage_created false or pre-authority validation error proves no lineage was created. After ambiguous START, answer-consent, or FINALIZE output, the controller calls target-scoped native status first and returns only its declared action. Never infer or prescribe replay unless native explicitly reports exact_replay_safe for the same canonical request and required lineage.",
 			"Use gentle_review for bounded review transaction operations and exact lifecycle validation; never fabricate bash tool metadata or a separate gate target.",

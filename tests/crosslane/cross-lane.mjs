@@ -593,20 +593,36 @@ async function recoveredSuccessorLifecycle(binary, cli, root) {
 			"external scope_changed successor driven from STATUS alone: pre-STATUS dispatch refused, post-STATUS dispatch injected the successor candidate context (a controller without STATUS hydration fails here)",
 		);
 
-		// Defect B: document-free finalize at reviewer_results_required.
-		const finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({}) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
-		if (finalizeEnvelope.status !== "blocked" || finalizeEnvelope.outcome !== "reviewer-results-required" || finalizeEnvelope.mutation_performed !== false) {
-			throw new Error(`finalize routed to ${String(finalizeEnvelope.outcome ?? finalizeEnvelope.status)} instead of the blocked reviewer-results-required step`);
+		// Defect B: finalize must follow the provider transition for reviewer
+		// results and never the correction evidence-first-ordering lane. On a
+		// provider that admits the pi transport the correct route is the host
+		// relay; the pi-subprocess hop is stubbed to keep this check free.
+		let relaySlots = 0;
+		__testing.setReviewHostRelayRunnerForTesting(async (request) => {
+			relaySlots += 1;
+			return { promptByteLength: request.captureArgumentTokens.length, resultByteLength: 0, submission: "{}" };
+		});
+		let finalizeEnvelope;
+		try {
+			finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({ reviewer_run_acknowledged: true }) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
+		} finally {
+			__testing.setReviewHostRelayRunnerForTesting();
 		}
-		if (!/capture the reviewer result first/i.test(String(finalizeEnvelope.reason)) || !String(finalizeEnvelope.reason).includes("review.capture-result")) {
-			throw new Error("finalize block is missing the actionable review.capture-result direction");
+		const routedToRelay = relaySlots > 0 && finalizeEnvelope.host_relay?.transport === "pi_host_relay";
+		const routedToBlockedCapture = finalizeEnvelope.outcome === "reviewer-results-required"
+			&& /capture the reviewer result first/i.test(String(finalizeEnvelope.reason))
+			&& finalizeEnvelope.mutation_performed === false;
+		if (!routedToRelay && !routedToBlockedCapture) {
+			throw new Error(`finalize routed to ${String(finalizeEnvelope.outcome ?? finalizeEnvelope.status)} instead of the provider reviewer-result step`);
 		}
 		if (JSON.stringify(finalizeEnvelope).includes("evidence-first-ordering")) {
 			throw new Error("finalize still leaked the correction evidence-first-ordering lane");
 		}
 		pass(
 			"recovered routing: finalize offers capture-result, never evidence ordering",
-			"document-free finalize at reviewer_results_required returned the actionable review.capture-result block with zero mutations (a finalize that misroutes into evidence ordering fails here)",
+			routedToRelay
+				? "finalize followed the provider transition into the pi host relay for the outstanding reviewer result. Accepting either provider-correct route (relay when the provider admits the pi transport, blocked capture-result otherwise) is NOT a relaxation of the evidence-ordering guard: this check still fails on any evidence-first-ordering leak in the envelope, and on any route that is neither of the two"
+				: "document-free finalize at reviewer_results_required returned the actionable review.capture-result block with zero mutations. Accepting either provider-correct route (relay when the provider admits the pi transport, blocked capture-result otherwise) is NOT a relaxation of the evidence-ordering guard: this check still fails on any evidence-first-ordering leak in the envelope, and on any route that is neither of the two",
 		);
 
 		// Complete the drive to one really captured lens through the exact
@@ -710,9 +726,22 @@ async function recoveredSuccessorFieldFlow(binary, cli, root) {
 	// A brand-new registry stands in for the fresh Pi session.
 	const registry = new CandidateViewRegistry();
 	try {
-		const finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({}) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
-		if (finalizeEnvelope.outcome !== "reviewer-results-required") {
-			throw new Error(`finalize routed to ${String(finalizeEnvelope.outcome ?? finalizeEnvelope.status)} instead of the blocked reviewer-results-required step`);
+		// The pi-subprocess hop is stubbed: this check is about the dispatch
+		// binding the finalize-first flow leaves behind, on whichever route the
+		// provider offers (host relay when it admits the pi transport).
+		__testing.setReviewHostRelayRunnerForTesting(async (request) => ({ promptByteLength: request.captureArgumentTokens.length, resultByteLength: 0, submission: "{}" }));
+		let finalizeEnvelope;
+		try {
+			finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({ reviewer_run_acknowledged: true }) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
+		} finally {
+			__testing.setReviewHostRelayRunnerForTesting();
+		}
+		const routed = finalizeEnvelope.outcome === "reviewer-results-required" || finalizeEnvelope.host_relay?.transport === "pi_host_relay";
+		if (!routed) {
+			throw new Error(`finalize routed to ${String(finalizeEnvelope.outcome ?? finalizeEnvelope.status)} instead of the provider reviewer-result step`);
+		}
+		if (JSON.stringify(finalizeEnvelope).includes("evidence-first-ordering")) {
+			throw new Error("finalize leaked the correction evidence-first-ordering lane");
 		}
 		const binding = finalizeEnvelope.dispatch_binding;
 		if (binding === undefined) throw new Error("the blocked finalize envelope does not report a dispatch-binding hydration outcome");
@@ -724,12 +753,79 @@ async function recoveredSuccessorFieldFlow(binary, cli, root) {
 		const dispatch = { agent: "review-reliability", task: "review the recovered successor", mode: "task" };
 		injectReviewCandidateView(dispatch, registry);
 		if (!dispatch.task.includes(successor)) throw new Error("hydrated dispatch context is not bound to the recovered successor lineage");
-		return "linked worktree + uncommitted tracked changes + external recover: finalize-first (no STATUS call) hydrated the dispatch binding and the reviewer dispatch resolved; residual gap: the battery cannot age a lineage by days or span OS processes, only a fresh registry";
+		return "linked worktree + uncommitted tracked changes + external recover: finalize-first (no STATUS call) hydrated the dispatch binding and the reviewer dispatch resolved, on whichever provider-correct route was offered, and the envelope still carries no evidence-first-ordering leak; residual gap: the battery cannot age a lineage by days or span OS processes, only a fresh registry";
 	} finally {
 		try {
 			registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);
 		} catch {
 			// No hydrated view to clean when the check failed before binding.
+		}
+	}
+}
+
+// relayMaterializeSlotLifecycle covers the shape every earlier check missed:
+// the provider's MATERIALIZE-marked host-relay slot (agent=pi,
+// materialize=true, provider submission) on an externally recovered lineage.
+// Measured root cause (third field report): the adapter's negotiated STATUS
+// never named its agent, so the provider only ever returned a bare
+// capture-result input, reviewHostRelaySlots() saw zero slots, and the relay
+// never ran. This check fails on any build that drops `--agent pi`.
+//
+// Residual gap, stated honestly: the locked-down pi subprocess and the final
+// provider submit leg are NOT executed here — those cost model spend. The
+// check drives everything up to and including the REAL materialize leg
+// against the real binary (the provider-issued tokens must actually produce
+// prompt bytes), and stubs only the pi-subprocess hop.
+async function relayMaterializeSlotLifecycle(binary, cli, root) {
+	const cwd = scratchLinkedWorktree(root, "pi-relay-slot");
+	write(cwd, "docs/relay-guide.md", "# Relay guide\n\nline one\n");
+	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\n");
+	commitAll(cwd, "feat: base");
+	write(cwd, "docs/relay-guide.md", "# Relay guide\n\nline one\nline two, purely passive documentation\n");
+	const successor = await externallyRecoveredSuccessor(binary, cli, cwd, "relay-materialize-successor");
+
+	const relayed = [];
+	let materializedBytes = 0;
+	const registry = new CandidateViewRegistry();
+	__testing.setReviewHostRelayRunnerForTesting(async (request) => {
+		relayed.push(request);
+		// The REAL materialize leg: the provider-issued tokens must produce a
+		// non-empty opaque prompt from the real binary. No model spend.
+		const prompt = execFileSync(binary, ["review", "capture-result", ...request.captureArgumentTokens], {
+			cwd,
+			env: gentleAiProcessEnvironment(),
+			maxBuffer: 64 * 1024 * 1024,
+		});
+		materializedBytes = prompt.length;
+		if (materializedBytes === 0) throw new Error("provider materialize produced no prompt bytes");
+		return { promptByteLength: materializedBytes, resultByteLength: 0, submission: "{}" };
+	});
+	try {
+		const envelope = await __testing.executeReviewControllerOperation(
+			{ operation: "finalize", lineageId: successor, input: JSON.stringify({ reviewer_run_acknowledged: true }) },
+			cwd, new Map(), cli, undefined, undefined, undefined, registry,
+		);
+		if (relayed.length !== 1) {
+			throw new Error(`the provider materialize slot never reached the host relay (relayed ${relayed.length}); outcome=${String(envelope.outcome ?? envelope.status)}`);
+		}
+		const tokens = relayed[0].captureArgumentTokens;
+		if (!tokens.includes("--agent=pi") || !tokens.includes("--materialize=true")) {
+			throw new Error(`relay slot is missing the provider transport tokens: ${tokens.join(" ")}`);
+		}
+		if (relayed[0].submission?.operationToken !== "capture-result") {
+			throw new Error("relay slot carries no provider submission completing form");
+		}
+		const hostRelay = envelope.host_relay;
+		if (hostRelay?.transport !== "pi_host_relay" || hostRelay.captured_slots?.length !== 1) {
+			throw new Error(`controller envelope did not report one relayed slot: ${JSON.stringify(hostRelay)}`);
+		}
+		return `provider offered the materialize slot to the adapter and it reached the relay verbatim (agent=pi, materialize=true, submission=capture-result); the real materialize leg returned ${materializedBytes} prompt bytes. Residual gap: the locked-down pi subprocess and the provider submit leg are not executed here (model spend)`;
+	} finally {
+		__testing.setReviewHostRelayRunnerForTesting();
+		try {
+			registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);
+		} catch {
+			// No hydrated view to clean when the relay lane bound nothing.
 		}
 	}
 }
@@ -865,6 +961,12 @@ async function main() {
 			pass("recovered field flow: linked dirty worktree, finalize-first dispatch", await recoveredSuccessorFieldFlow(binary, cli, root));
 		} catch (error) {
 			fail("recovered field flow: linked dirty worktree, finalize-first dispatch", knownRedParity(describeError(error)));
+		}
+
+		try {
+			pass("relay materialize slot on an externally recovered lineage", await relayMaterializeSlotLifecycle(binary, cli, root));
+		} catch (error) {
+			fail("relay materialize slot on an externally recovered lineage", knownRedParity(describeError(error)));
 		}
 
 		if (WITH_MODEL && mediumRepo !== undefined) {
