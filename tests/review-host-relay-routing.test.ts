@@ -131,7 +131,12 @@ function finalizeParameters(lineageId: string, input: Record<string, unknown> = 
 	return { operation: "finalize", lineageId, input: JSON.stringify(input) };
 }
 
-async function runFinalize(cwd: string, harness: RoutingHarness, lineageId: string, input: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+// Relay ROUTING is the subject here, not spend authorization: a host-relay
+// finalize now forecasts its reviewer model runs and spends nothing until the
+// caller acknowledges them (see review-relay-transport-agent.test.ts), so these
+// routing cases authorize the run up front and keep asserting where the slots
+// go. A case that must observe the forecast passes the acknowledgement off.
+async function runFinalize(cwd: string, harness: RoutingHarness, lineageId: string, input: Record<string, unknown> = { reviewer_run_acknowledged: true }): Promise<Record<string, unknown>> {
 	return await __testing.executeReviewControllerOperation(
 		finalizeParameters(lineageId, input),
 		cwd,

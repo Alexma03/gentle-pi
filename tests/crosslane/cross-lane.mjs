@@ -604,7 +604,7 @@ async function recoveredSuccessorLifecycle(binary, cli, root) {
 		});
 		let finalizeEnvelope;
 		try {
-			finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({}) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
+			finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({ reviewer_run_acknowledged: true }) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
 		} finally {
 			__testing.setReviewHostRelayRunnerForTesting();
 		}
@@ -621,8 +621,8 @@ async function recoveredSuccessorLifecycle(binary, cli, root) {
 		pass(
 			"recovered routing: finalize offers capture-result, never evidence ordering",
 			routedToRelay
-				? "finalize followed the provider transition into the pi host relay for the outstanding reviewer result (a finalize that misroutes into evidence ordering fails here)"
-				: "document-free finalize at reviewer_results_required returned the actionable review.capture-result block with zero mutations (a finalize that misroutes into evidence ordering fails here)",
+				? "finalize followed the provider transition into the pi host relay for the outstanding reviewer result. Accepting either provider-correct route (relay when the provider admits the pi transport, blocked capture-result otherwise) is NOT a relaxation of the evidence-ordering guard: this check still fails on any evidence-first-ordering leak in the envelope, and on any route that is neither of the two"
+				: "document-free finalize at reviewer_results_required returned the actionable review.capture-result block with zero mutations. Accepting either provider-correct route (relay when the provider admits the pi transport, blocked capture-result otherwise) is NOT a relaxation of the evidence-ordering guard: this check still fails on any evidence-first-ordering leak in the envelope, and on any route that is neither of the two",
 		);
 
 		// Complete the drive to one really captured lens through the exact
@@ -732,13 +732,16 @@ async function recoveredSuccessorFieldFlow(binary, cli, root) {
 		__testing.setReviewHostRelayRunnerForTesting(async (request) => ({ promptByteLength: request.captureArgumentTokens.length, resultByteLength: 0, submission: "{}" }));
 		let finalizeEnvelope;
 		try {
-			finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({}) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
+			finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({ reviewer_run_acknowledged: true }) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
 		} finally {
 			__testing.setReviewHostRelayRunnerForTesting();
 		}
 		const routed = finalizeEnvelope.outcome === "reviewer-results-required" || finalizeEnvelope.host_relay?.transport === "pi_host_relay";
 		if (!routed) {
 			throw new Error(`finalize routed to ${String(finalizeEnvelope.outcome ?? finalizeEnvelope.status)} instead of the provider reviewer-result step`);
+		}
+		if (JSON.stringify(finalizeEnvelope).includes("evidence-first-ordering")) {
+			throw new Error("finalize leaked the correction evidence-first-ordering lane");
 		}
 		const binding = finalizeEnvelope.dispatch_binding;
 		if (binding === undefined) throw new Error("the blocked finalize envelope does not report a dispatch-binding hydration outcome");
@@ -750,7 +753,7 @@ async function recoveredSuccessorFieldFlow(binary, cli, root) {
 		const dispatch = { agent: "review-reliability", task: "review the recovered successor", mode: "task" };
 		injectReviewCandidateView(dispatch, registry);
 		if (!dispatch.task.includes(successor)) throw new Error("hydrated dispatch context is not bound to the recovered successor lineage");
-		return "linked worktree + uncommitted tracked changes + external recover: finalize-first (no STATUS call) hydrated the dispatch binding and the reviewer dispatch resolved; residual gap: the battery cannot age a lineage by days or span OS processes, only a fresh registry";
+		return "linked worktree + uncommitted tracked changes + external recover: finalize-first (no STATUS call) hydrated the dispatch binding and the reviewer dispatch resolved, on whichever provider-correct route was offered, and the envelope still carries no evidence-first-ordering leak; residual gap: the battery cannot age a lineage by days or span OS processes, only a fresh registry";
 	} finally {
 		try {
 			registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);
@@ -799,7 +802,7 @@ async function relayMaterializeSlotLifecycle(binary, cli, root) {
 	});
 	try {
 		const envelope = await __testing.executeReviewControllerOperation(
-			{ operation: "finalize", lineageId: successor, input: JSON.stringify({}) },
+			{ operation: "finalize", lineageId: successor, input: JSON.stringify({ reviewer_run_acknowledged: true }) },
 			cwd, new Map(), cli, undefined, undefined, undefined, registry,
 		);
 		if (relayed.length !== 1) {

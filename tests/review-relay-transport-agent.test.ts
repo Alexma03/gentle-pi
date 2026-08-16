@@ -146,9 +146,9 @@ function transportAwareNative(options: { refusePiAgent?: boolean } = {}): { nati
 	return { native, agents };
 }
 
-async function runFinalize(cwd: string, native: NativeReviewCli, lineageId: string): Promise<Record<string, unknown>> {
+async function runFinalize(cwd: string, native: NativeReviewCli, lineageId: string, input: Record<string, unknown> = { reviewer_run_acknowledged: true }): Promise<Record<string, unknown>> {
 	return await __testing.executeReviewControllerOperation(
-		{ operation: "finalize", lineageId, input: JSON.stringify({}) },
+		{ operation: "finalize", lineageId, input: JSON.stringify(input) },
 		cwd, new Map(), native, undefined, undefined, undefined, new CandidateViewRegistry(),
 	) as Record<string, unknown>;
 }
@@ -174,6 +174,38 @@ test("the negotiated status asks for the pi agent so the provider offers its mat
 	assert.ok(hostRelay !== undefined, "the envelope reports the relay capture");
 	assert.equal(hostRelay.transport, "pi_host_relay");
 	assert.equal(hostRelay.captured_slots.length, 1);
+});
+
+test("finalize forecasts the reviewer model run once and spends nothing until it is acknowledged", async (t) => {
+	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
+	const cwd = repository(t);
+	const lineageId = "forecast-lineage";
+	const { native } = transportAwareNative();
+	let launches = 0;
+	__testing.setReviewHostRelayRunnerForTesting(async () => {
+		launches += 1;
+		return { promptByteLength: 128, resultByteLength: 64, submission: '{"admission_decision":"completed"}' };
+	});
+
+	// An unacknowledged finalize must forecast, never spend.
+	const forecast = await runFinalize(cwd, native, lineageId, {});
+	assert.equal(launches, 0, "no reviewer model run may start before the forecast is acknowledged");
+	assert.equal(forecast.status, "blocked");
+	assert.equal(forecast.outcome, "reviewer-model-run-forecast");
+	assert.equal(forecast.mutation_performed, false);
+	assert.equal(forecast.mutation_outcome, "none");
+	const cost = forecast.cost_forecast as { transport: string; model_runs: number; lenses: readonly string[]; side_effects: readonly string[] };
+	assert.equal(cost.transport, "pi_host_relay");
+	assert.equal(cost.model_runs, 1, "one model run per outstanding lens, forecast once before launch");
+	assert.deepEqual(cost.lenses, ["review-reliability"]);
+	assert.ok(cost.side_effects.length > 0);
+	assert.match(String(forecast.reason), /model run/i);
+	assert.match(String(forecast.next_action), /reviewer_run_acknowledged/);
+
+	// The acknowledged finalize runs exactly the forecast work.
+	const acknowledged = await runFinalize(cwd, native, lineageId, { reviewer_run_acknowledged: true });
+	assert.equal(launches, 1, "the acknowledged finalize runs the forecast model run");
+	assert.equal((acknowledged.host_relay as { captured_slots: readonly unknown[] }).captured_slots.length, 1);
 });
 
 test("a provider that refuses the pi transport surfaces the typed cause and still returns status", async (t) => {
