@@ -343,6 +343,9 @@ export const NATIVE_REVIEW_LEGACY_ALIAS_REPAIR = {
 
 
 
+
+
+
 /** Raw audited native record; Pi relays it verbatim and never reinterprets it. */
 
 
@@ -1687,7 +1690,11 @@ export class NativeReviewCliV214 {
 		for (const [name, value] of [["lineage", request.lineage], ["expectedRevision", request.expectedRevision], ["snapshotIdentity", request.snapshotIdentity], ["actor", request.actor], ["reason", request.reason]]         ) {
 			if (!isCanonicalProcessString(value)) throw new TypeError(`Native ABANDON ${name} must be a non-empty, trimmed, NUL-free string`);
 		}
-		if (request.maintainerAuthorization !== nativeReviewAbandonAuthorization(request)) throw new TypeError("Native ABANDON maintainerAuthorization must match the exact lineage, revision, snapshot, actor, and reason binding");
+		if (!Array.isArray(request.capturedLensResults) || request.capturedLensResults.some((entry) => !isCanonicalProcessString(entry))) throw new TypeError("Native ABANDON capturedLensResults must be an array of non-empty, trimmed, NUL-free strings");
+		for (const [name, value] of [["findingsPresent", request.findingsPresent], ["evidenceRecordsPresent", request.evidenceRecordsPresent]]         ) {
+			if (typeof value !== "boolean") throw new TypeError(`Native ABANDON ${name} must be a boolean`);
+		}
+		if (request.maintainerAuthorization !== nativeReviewAbandonAuthorization(request)) throw new TypeError("Native ABANDON maintainerAuthorization must match the exact lineage, revision, snapshot, reason, discarded-work, and actor binding");
 		await this.verifyVersion(request.cwd, request.signal, ["abandon"]);
 		const execution = await this.execute(NATIVE_REVIEW_OPERATION.ABANDON, request.cwd, [
 			"review", "abandon", "--cwd", request.cwd,
@@ -1781,14 +1788,17 @@ export class NativeReviewCliV214 {
 	}
 }
 
-export function nativeReviewAbandonAuthorization(request                                                                                                            )         {
+export function nativeReviewAbandonAuthorization(request                                                                                                                                                                                   )         {
 	return [
-		"gentle-ai.review-abandon-authorization/v1",
+		"gentle-ai.review-abandon-authorization/v2",
 		`lineage=${request.lineage}`,
 		`revision=${request.expectedRevision}`,
 		`snapshot_identity=${request.snapshotIdentity}`,
-		`actor=${request.actor}`,
 		`reason=${request.reason}`,
+		`captured_lens_results=${request.capturedLensResults.join(",")}`,
+		`findings_present=${request.findingsPresent}`,
+		`evidence_records_present=${request.evidenceRecordsPresent}`,
+		`actor=${request.actor.trim()}`,
 	].join("\n");
 }
 
