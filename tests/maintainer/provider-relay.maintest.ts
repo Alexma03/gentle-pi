@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import test from "node:test";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
-import { ARM_POSITIVE_ENV, CASE_KINDS, DESCRIPTOR_SCHEMA, DescriptorValidationError, POSITIVE_JOURNEY_COMMAND, loadDescriptor, resolveDeclaredExecutable, runMatrix, validateDescriptor } from "../../scripts/maintainer/provider-relay-matrix.mjs";
+import { ARM_POSITIVE_ENV, CASE_KINDS, DESCRIPTOR_SCHEMA, DescriptorValidationError, POSITIVE_JOURNEY_COMMAND, PROVIDER_ROLE_CAPTURE_ARTIFACT_SCHEMA, PROVIDER_ROLE_VECTOR_KINDS, ProviderRoleVectorError, ROLE_VECTOR_FAILURE, loadDescriptor, resolveDeclaredExecutable, runMatrix, validateDescriptor } from "../../scripts/maintainer/provider-relay-matrix.mjs";
 const BASELINE_ENV = "GENTLE_PI_MAINTAINER_BASELINE_BINARY";
 const CAPABLE_ENV = "GENTLE_PI_MAINTAINER_CAPABLE_BINARY";
 const REQUIRE_ENV = "GENTLE_PI_REQUIRE_MAINTAINER";
@@ -45,6 +45,43 @@ const SUBMISSION = Object.freeze({
 	operationToken: "capture-result",
 	argumentTokens: Object.freeze([...BINDING_TOKENS, "--input={{value}}"]),
 	values: Object.freeze([{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitutionLocation: BINDING_TOKENS.length }]),
+});
+
+// Provider-role vector fixtures (gentle-pi#311 P7). Synthetic stable values —
+// never copied from a live probe. The refuter vector is binding tokens plus
+// --agent=pi --execute=true (no submission, no validation_request). The
+// validator vector adds --request-hash=<hash> and carries the minimal
+// validation_request binding (schema + requestHash) extracted from the
+// provider-embedded descriptor, so the matrix can assert the token matches.
+const ROLE_LINEAGE = "review-fixture-role-vector";
+const ROLE_REVISION = `sha256:${"a".repeat(64)}`;
+const ROLE_TARGET = `sha256:${"b".repeat(64)}`;
+const ROLE_CONTEXT = `rctx1_${"c".repeat(64)}`;
+const ROLE_REQUEST_HASH = `sha256:${"9".repeat(64)}`;
+const REFUTER_TOKENS = Object.freeze([
+	`--lineage=${ROLE_LINEAGE}`,
+	`--expected-revision=${ROLE_REVISION}`,
+	`--target=${ROLE_TARGET}`,
+	`--repository-context=${ROLE_CONTEXT}`,
+	"--agent=pi",
+	"--execute=true",
+]);
+const VALIDATOR_TOKENS = Object.freeze([
+	`--lineage=${ROLE_LINEAGE}`,
+	`--expected-revision=${ROLE_REVISION}`,
+	`--target=${ROLE_TARGET}`,
+	`--repository-context=${ROLE_CONTEXT}`,
+	`--request-hash=${ROLE_REQUEST_HASH}`,
+	"--agent=pi",
+	"--execute=true",
+]);
+const VALIDATION_REQUEST = Object.freeze({ schema: "gentle-ai.review-targeted-validation-request/v1", requestHash: ROLE_REQUEST_HASH });
+const ROLE_ARTIFACT = Object.freeze({
+	schema: "gentle-ai.review-provider-role-capture/v1",
+	lineage_id: ROLE_LINEAGE,
+	target_identity: ROLE_TARGET,
+	role: "refuter",
+	captured: true,
 });
 
 function descriptor(overrides = {}) {
@@ -83,7 +120,7 @@ test("rejects malformed descriptor fields with exact-shape errors (no defaults, 
 	rejects({ ...descriptor(), gentleAiExecutable: undefined }, "absolute path");
 	rejects({ ...descriptor(), extra: 1 }, "descriptor.extra");
 	rejects({ ...descriptor(), cases: [{ ...descriptor().cases[0]!, extra: 1 }] }, "extra");
-	assert.deepEqual([...CASE_KINDS], ["relay-unavailable", "positive-lens"]);
+	assert.deepEqual([...CASE_KINDS], ["relay-unavailable", "positive-lens", ...PROVIDER_ROLE_VECTOR_KINDS]);
 	rejects({ ...descriptor(), cases: [{ ...descriptor().cases[0]!, kind: "bogus" }] }, "kind must be one of");
 	const dup = { ...descriptor().cases[0]!, name: "dup" };
 	rejects({ ...descriptor(), cases: [structuredClone(dup), structuredClone(dup)] }, "duplicated");
@@ -106,6 +143,156 @@ test("loadDescriptor reads and validates a descriptor file", (t) => {
 	assert.throws(() => loadDescriptor(join(dirname(path), "missing.json")), /could not read descriptor/);
 	writeFileSync(join(dirname(path), "bad.json"), "{not json");
 	assert.throws(() => loadDescriptor(join(dirname(path), "bad.json")), /not valid JSON/);
+});
+
+// ---------------------------------------------------------------------------
+// Provider-role vector descriptor validation (gentle-pi#311 P7) — the two
+// organic self-contained vectors. The descriptor carries provider-returned
+// argument tokens verbatim; the matrix never reconstructs the role payload.
+// Pure/deterministic; always runs.
+// ---------------------------------------------------------------------------
+function roleDescriptor(kind: "provider-role-refuter" | "provider-role-validator", overrides: Record<string, unknown> = {}) {
+	const tokens = kind === "provider-role-refuter" ? REFUTER_TOKENS : VALIDATOR_TOKENS;
+	const entry: Record<string, unknown> = { name: `${kind}-case`, kind, argumentTokens: [...tokens] };
+	if (kind === "provider-role-validator") entry.validationRequest = structuredClone(VALIDATION_REQUEST);
+	return { schema: DESCRIPTOR_SCHEMA, gentleAiExecutable: PLACEHOLDER_BINARY, piExecutable: "pi", cases: [entry], ...overrides };
+}
+// A declared gentle-ai executable that EXISTS so resolveDeclaredExecutable
+// succeeds and the role branch is reached. The stub roleRunner replaces the
+// real spawn, so this file is never executed and no model launches.
+const ROLE_STUB_BINARY = sandboxPath("gentle-ai-role-stub");
+writeFileSync(ROLE_STUB_BINARY, "stub");
+test("role vector descriptors validate and return a normalized copy with exact provider tokens", () => {
+	const refuter = validateDescriptor(roleDescriptor("provider-role-refuter")).cases[0]!;
+	assert.equal(refuter.kind, "provider-role-refuter");
+	assert.deepEqual(refuter.argumentTokens, [...REFUTER_TOKENS]);
+	assert.equal("validationRequest" in refuter, false);
+	assert.equal("captureArgumentTokens" in refuter, false);
+	assert.equal("submission" in refuter, false);
+	const validator = validateDescriptor(roleDescriptor("provider-role-validator")).cases[0]!;
+	assert.deepEqual(validator.argumentTokens, [...VALIDATOR_TOKENS]);
+	assert.deepEqual(validator.validationRequest, VALIDATION_REQUEST);
+});
+test("role vector descriptors reject missing --agent=pi / --execute=true and reject --materialize=true (self-contained, never a lens slot)", () => {
+	rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: [...REFUTER_TOKENS].filter((t) => t !== "--agent=pi") }] }), "--agent=pi");
+	rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: [...REFUTER_TOKENS].filter((t) => t !== "--execute=true") }] }), "--execute=true");
+	rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: [...REFUTER_TOKENS, "--materialize=true"] }] }), "--materialize=true");
+});
+test("targeted-validator descriptor preserves the provider request hash / validation request binding", () => {
+	// The --request-hash token must match validationRequest.requestHash exactly.
+	const mismatched = { ...structuredClone(VALIDATION_REQUEST), requestHash: `sha256:${"0".repeat(64)}` };
+	rejects(roleDescriptor("provider-role-validator", { cases: [{ name: "v", kind: "provider-role-validator", argumentTokens: [...VALIDATOR_TOKENS], validationRequest: mismatched }] }), "must include the provider-issued");
+	// A validator without validationRequest is a contract violation.
+	rejects(roleDescriptor("provider-role-validator", { cases: [{ name: "v", kind: "provider-role-validator", argumentTokens: [...VALIDATOR_TOKENS] }] }), "validationRequest");
+	// A refuter must not carry validationRequest (only the validator does).
+	rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: [...REFUTER_TOKENS], validationRequest: structuredClone(VALIDATION_REQUEST) }] }), "validationRequest");
+	// A malformed requestHash is rejected.
+	const badHash = { ...structuredClone(VALIDATION_REQUEST), requestHash: "not-a-sha256" };
+	rejects(roleDescriptor("provider-role-validator", { cases: [{ name: "v", kind: "provider-role-validator", argumentTokens: [...VALIDATOR_TOKENS], validationRequest: badHash }] }), "sha256");
+});
+
+// ---------------------------------------------------------------------------
+// Provider-role vector execution (stub-injected roleRunner) — proves the
+// matrix reaches the boundary with the exact kind, verb, argument tokens, and
+// preserved validation_request binding, exactly once, without launching a
+// model. Deterministic; always runs.
+// ---------------------------------------------------------------------------
+test("refuter vector: runMatrix executes exactly once through review.capture-refuter with exact provider tokens and returns the typed artifact", async () => {
+	const calls: Array<{ kind: string; argumentTokens: readonly string[]; gentleAiExecutable: string; validationRequest?: unknown }> = [];
+	const [verdict] = await runMatrix(validateDescriptor({ ...roleDescriptor("provider-role-refuter"), gentleAiExecutable: ROLE_STUB_BINARY }), {
+		armPositive: true,
+		roleRunner: async (request) => {
+			calls.push({ kind: request.kind, argumentTokens: request.argumentTokens, gentleAiExecutable: request.gentleAiExecutable, ...(request.validationRequest === undefined ? {} : { validationRequest: request.validationRequest }) });
+			return { schema: PROVIDER_ROLE_CAPTURE_ARTIFACT_SCHEMA, lineageId: ROLE_LINEAGE, targetIdentity: ROLE_TARGET, role: "refuter", captured: true };
+		},
+	});
+	assert.equal(calls.length, 1, "the refuter vector must execute exactly once");
+	assert.equal(calls[0]!.kind, "provider-role-refuter");
+	assert.equal("validationRequest" in calls[0]!, false, "the refuter vector must not carry a validation_request");
+	assert.deepEqual(calls[0]!.argumentTokens, [...REFUTER_TOKENS]);
+	assert.ok(calls[0]!.argumentTokens.includes("--execute=true"));
+	assert.ok(!calls[0]!.argumentTokens.includes("--materialize=true"));
+	assert.equal(calls[0]!.gentleAiExecutable, ROLE_STUB_BINARY);
+	assert.equal(verdict!.verdict, "pass");
+	assert.equal(verdict!.role, "refuter");
+	assert.equal(verdict!.captured, true);
+	assert.equal(verdict!.lineageId, ROLE_LINEAGE);
+	assert.equal(verdict!.targetIdentity, ROLE_TARGET);
+});
+test("validator vector: runMatrix executes exactly once through review.capture-validation and preserves the request-hash binding", async () => {
+	const calls: Array<{ kind: string; argumentTokens: readonly string[]; validationRequest?: unknown }> = [];
+	const [verdict] = await runMatrix(validateDescriptor({ ...roleDescriptor("provider-role-validator"), gentleAiExecutable: ROLE_STUB_BINARY }), {
+		armPositive: true,
+		roleRunner: async (request) => {
+			calls.push({ kind: request.kind, argumentTokens: request.argumentTokens, ...(request.validationRequest === undefined ? {} : { validationRequest: request.validationRequest }) });
+			return { schema: PROVIDER_ROLE_CAPTURE_ARTIFACT_SCHEMA, lineageId: ROLE_LINEAGE, targetIdentity: ROLE_TARGET, role: "targeted-validator", captured: true };
+		},
+	});
+	assert.equal(calls.length, 1, "the validator vector must execute exactly once");
+	assert.equal(calls[0]!.kind, "provider-role-validator");
+	assert.deepEqual(calls[0]!.argumentTokens, [...VALIDATOR_TOKENS]);
+	assert.ok(calls[0]!.argumentTokens.includes(`--request-hash=${ROLE_REQUEST_HASH}`));
+	assert.deepEqual(calls[0]!.validationRequest, VALIDATION_REQUEST);
+	assert.equal(verdict!.verdict, "pass");
+	assert.equal(verdict!.role, "targeted-validator");
+	assert.equal(verdict!.captured, true);
+});
+test("an unarmed role vector blocks loudly and never fakes green (no model launch)", async () => {
+	const calls: unknown[] = [];
+	const [verdict] = await runMatrix(validateDescriptor({ ...roleDescriptor("provider-role-refuter"), gentleAiExecutable: ROLE_STUB_BINARY }), {
+		roleRunner: async () => { calls.push("ran"); return ROLE_ARTIFACT; },
+	});
+	assert.equal(calls.length, 0, "an unarmed role vector must never reach the runner");
+	assert.equal(verdict!.verdict, "blocked");
+	assert.match(verdict!.reason, new RegExp(ARM_POSITIVE_ENV));
+	assert.equal(verdict!.command, POSITIVE_JOURNEY_COMMAND);
+});
+test("negative control: an unsupported role surface fails closed with zero role invocation and no mutation", async () => {
+	const calls: unknown[] = [];
+	const [verdict] = await runMatrix(validateDescriptor({ ...roleDescriptor("provider-role-refuter"), gentleAiExecutable: ROLE_STUB_BINARY }), {
+		armPositive: true,
+		roleRunner: async (request) => {
+			calls.push(request);
+			throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_SURFACE_UNAVAILABLE, "execute", "the declared gentle-ai binary lacks the provider role capture surface");
+		},
+	});
+	assert.equal(calls.length, 1, "the runner was probed exactly once to detect the missing surface");
+	assert.equal(verdict!.verdict, "blocked");
+	assert.equal(verdict!.mutationOutcome, "none");
+	assert.match(verdict!.reason, /provider role capture surface/);
+	assert.equal(verdict!.command, POSITIVE_JOURNEY_COMMAND);
+	assert.notEqual(verdict!.verdict, "pass");
+	assert.notEqual(verdict!.verdict, "fail");
+});
+test("negative control: a role vector failure (not surface-unavailable) is reported as fail, never pass", async () => {
+	const [verdict] = await runMatrix(validateDescriptor({ ...roleDescriptor("provider-role-refuter"), gentleAiExecutable: ROLE_STUB_BINARY }), {
+		armPositive: true,
+		roleRunner: async () => {
+			throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_FAILED, "execute", "gentle-ai role vector failed");
+		},
+	});
+	assert.equal(verdict!.verdict, "fail");
+	assert.match(verdict!.reason, /role-failed/);
+});
+test("stale-target fail-closed: missing or duplicate required binding tokens are rejected before runner invocation", () => {
+	const drop = (tokens: readonly string[], prefix: string) => tokens.filter((t) => !t.startsWith(prefix));
+	for (const prefix of ["--lineage=", "--target=", "--expected-revision=", "--repository-context="]) {
+		rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: drop(REFUTER_TOKENS, prefix) }] }), `exactly one "${prefix}`);
+	}
+	rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: [...REFUTER_TOKENS, `--lineage=${ROLE_LINEAGE}`] }] }), "exactly one \"--lineage=\"");
+	const badTarget = REFUTER_TOKENS.map((t) => t.startsWith("--target=") ? "--target=not-a-sha256" : t);
+	rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: badTarget }] }), "malformed");
+});
+test("stale-target fail-closed: a returned artifact with mismatched lineage or target fails, never passes", async () => {
+	const stale = `sha256:${"f".repeat(64)}`;
+	for (const [lineageId, targetIdentity] of [[stale, ROLE_TARGET], [ROLE_LINEAGE, stale]] as const) {
+		const [verdict] = await runMatrix(validateDescriptor({ ...roleDescriptor("provider-role-refuter"), gentleAiExecutable: ROLE_STUB_BINARY }), {
+			armPositive: true,
+			roleRunner: async () => ({ schema: PROVIDER_ROLE_CAPTURE_ARTIFACT_SCHEMA, lineageId, targetIdentity, role: "refuter", captured: true }),
+		});
+		assert.equal(verdict!.verdict, "fail");
+		assert.match(verdict!.reason, /stale artifact/);
+	}
 });
 
 // ---------------------------------------------------------------------------
