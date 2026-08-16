@@ -151,6 +151,17 @@ function scratchRepo(root, name) {
 	return cwd;
 }
 
+// A LINKED git worktree (not the primary checkout) of a fresh scratch repo:
+// the field shape the reported defect was hit in.
+function scratchLinkedWorktree(root, name) {
+	const primary = scratchRepo(root, `${name}-primary`);
+	const linked = join(root, `${name}-linked`);
+	git(primary, "worktree", "add", "-q", linked, "-b", `feature/${name}`);
+	git(linked, "config", "user.email", "crosslane@example.com");
+	git(linked, "config", "user.name", "Cross Lane Battery");
+	return linked;
+}
+
 function write(cwd, name, content) {
 	const path = join(cwd, name);
 	mkdirSync(dirname(path), { recursive: true });
@@ -633,6 +644,96 @@ async function recoveredSuccessorLifecycle(binary, cli, root) {
 	}
 }
 
+// externallyRecoveredSuccessor performs the shared setup both recovered-
+// lineage checks need: approve a predecessor in `cwd`, change the scope, and
+// create a successor through the EXTERNAL native `review recover` command
+// with its explicit LF-only v1 binding. Returns the successor lineage id.
+async function externallyRecoveredSuccessor(binary, cli, cwd, successor) {
+	let raw = rawStatus(binary, cwd);
+	let status = await cli.targetStatus({ cwd });
+	assertOfferedStepMatchesNative("pre-start", status, raw);
+	const start = await cli.start({ cwd, targetIdentity: status.targetIdentity, projection: "workspace" });
+	if (start.state !== "reviewing") throw new Error(`predecessor start state=${start.state}`);
+	status = await cli.targetStatus({ cwd });
+	if (status.nextTransition?.execute?.operation !== "review.finalize") {
+		throw new Error(`expected review.finalize, got ${summarizeDecoded(status.nextTransition)}`);
+	}
+	const finalize = await cli.finalizeTransition({ cwd, argumentTokens: executeTokens(status.nextTransition) });
+	if (finalize.state !== "approved") throw new Error(`predecessor finalize state=${finalize.state}`);
+	// The caller has already staged its scope change in the worktree.
+	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\nexport function twice(a) {\n  return a + a;\n}\n");
+	raw = rawStatus(binary, cwd);
+	const authorization = [
+		"gentle-ai.review-recovery-authorization/v1",
+		`predecessor_lineage=${finalize.lineageId}`,
+		`predecessor_revision=${finalize.storeRevision}`,
+		`target_identity=${raw.target_identity}`,
+		"actor=cross-lane-battery",
+		"reason=scope changed after approval",
+	].join("\n");
+	rawInvoke(binary, cwd, [
+		"review", "recover", "--cwd", cwd,
+		"--predecessor-lineage", finalize.lineageId,
+		"--expected-predecessor-revision", finalize.storeRevision,
+		"--successor-lineage", successor,
+		"--disposition", "scope_changed",
+		"--actor", "cross-lane-battery",
+		"--reason", "scope changed after approval",
+		"--maintainer-authorization", authorization,
+	]);
+	return successor;
+}
+
+// recoveredSuccessorFieldFlow reproduces the FIELD-REPORTED flow (2026-08-16,
+// gentle-pi 402f9f77 + gentle-ai 2.4.0-main): the candidate lives in a LINKED
+// git worktree with UNCOMMITTED tracked modifications, the successor came
+// from an external native recover, and the session drives `finalize` FIRST
+// and dispatches the reviewer straight after — never calling the STATUS
+// controller operation. Hydration wired only into STATUS leaves that flow
+// refusing, which is exactly what the maintainer hit after #340.
+//
+// Residual gap, honestly stated: the battery cannot age a lineage by days or
+// span real OS processes; it reproduces linked-worktree placement, dirty
+// tracked files, external recovery, and a FRESH controller registry (the
+// property a new process actually contributes), not wall-clock age.
+async function recoveredSuccessorFieldFlow(binary, cli, root) {
+	const cwd = scratchLinkedWorktree(root, "pi-recovered-linked");
+	write(cwd, "docs/recover-guide.md", "# Recover guide\n\nline one\n");
+	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\n");
+	commitAll(cwd, "feat: base");
+	write(cwd, "docs/recover-guide.md", "# Recover guide\n\nline one\nline two, purely passive documentation\n");
+	const successor = await externallyRecoveredSuccessor(binary, cli, cwd, "recovered-linked-successor");
+	// The tracked scope change stays UNCOMMITTED, like the reported worktree.
+	const dirty = execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
+	if (!/^ M src\/mul\.js$/m.test(dirty)) throw new Error(`expected an uncommitted tracked modification, got ${JSON.stringify(dirty)}`);
+
+	// A brand-new registry stands in for the fresh Pi session.
+	const registry = new CandidateViewRegistry();
+	try {
+		const finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({}) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
+		if (finalizeEnvelope.outcome !== "reviewer-results-required") {
+			throw new Error(`finalize routed to ${String(finalizeEnvelope.outcome ?? finalizeEnvelope.status)} instead of the blocked reviewer-results-required step`);
+		}
+		const binding = finalizeEnvelope.dispatch_binding;
+		if (binding === undefined) throw new Error("the blocked finalize envelope does not report a dispatch-binding hydration outcome");
+		if (binding.hydrated !== true) {
+			throw new Error(`finalize reported hydration failure ${String(binding.reason)}: ${String(binding.message)}`);
+		}
+		if (!registry.hasCurrentBinding()) throw new Error("finalize did not hydrate the candidate-view dispatch binding");
+		// The reviewer dispatch the maintainer runs next must resolve.
+		const dispatch = { agent: "review-reliability", task: "review the recovered successor", mode: "task" };
+		injectReviewCandidateView(dispatch, registry);
+		if (!dispatch.task.includes(successor)) throw new Error("hydrated dispatch context is not bound to the recovered successor lineage");
+		return "linked worktree + uncommitted tracked changes + external recover: finalize-first (no STATUS call) hydrated the dispatch binding and the reviewer dispatch resolved; residual gap: the battery cannot age a lineage by days or span OS processes, only a fresh registry";
+	} finally {
+		try {
+			registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);
+		} catch {
+			// No hydrated view to clean when the check failed before binding.
+		}
+	}
+}
+
 async function modelReview(binary, cli, cwd) {
 	const raw = rawStatus(binary, cwd);
 	const input = raw.next_transition?.collect?.inputs?.[0];
@@ -758,6 +859,12 @@ async function main() {
 			pass("external native recover to captured successor lens", await recoveredSuccessorLifecycle(binary, cli, root));
 		} catch (error) {
 			fail("external native recover to captured successor lens", knownRedParity(describeError(error)));
+		}
+
+		try {
+			pass("recovered field flow: linked dirty worktree, finalize-first dispatch", await recoveredSuccessorFieldFlow(binary, cli, root));
+		} catch (error) {
+			fail("recovered field flow: linked dirty worktree, finalize-first dispatch", knownRedParity(describeError(error)));
 		}
 
 		if (WITH_MODEL && mediumRepo !== undefined) {

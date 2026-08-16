@@ -5503,20 +5503,39 @@ function pendingReviewerLenses(status: ReviewStatusV3): readonly string[] {
 // from STATUS discovery: when an unknown-but-live lineage still collecting
 // reviewer results appears in a status this controller decoded, restore its
 // frozen projection from the native descriptor and bind the dispatch-facing
-// current candidate view with the provider-named pending lenses. Best-effort
-// by design: when the live candidate no longer matches the frozen descriptor,
-// dispatch keeps its own typed refusal.
-function hydrateDispatchBindingFromStatus(candidateViews: CandidateViewRegistry | null, contributorRoot: string, status: ReviewStatusV3): void {
-	if (candidateViews === null || candidateViews.hasCurrentBinding()) return;
+// current candidate view with the provider-named pending lenses.
+//
+// Field report (2026-08-16, gentle-pi 402f9f77): hydration must run from
+// EVERY lane that decodes an authoritative status, not from the STATUS
+// operation alone — the reported flow was `finalize` (blocked on
+// review.capture-result) followed by a reviewer dispatch, which never passed
+// through STATUS. It also never fails its caller: STATUS and the blocked
+// FINALIZE envelope stay read-only, and the outcome is returned so the caller
+// can report it instead of swallowing it.
+type DispatchHydrationOutcome =
+	| { hydrated: true; lineage_id: string; lenses: readonly string[] }
+	| { hydrated: false; lineage_id: string; reason: string; message: string }
+	| undefined;
+
+function hydrateDispatchBindingFromStatus(candidateViews: CandidateViewRegistry | null, contributorRoot: string, status: ReviewStatusV3): DispatchHydrationOutcome {
+	if (candidateViews === null || candidateViews.hasCurrentBinding()) return undefined;
 	const lineageId = status.authority?.lineageId;
-	if (lineageId === undefined || status.applicability !== "current_target" || candidateViews.hasProjection(lineageId)) return;
+	if (lineageId === undefined || status.applicability !== "current_target" || candidateViews.hasProjection(lineageId)) return undefined;
 	const lenses = pendingReviewerLenses(status);
-	if (lenses.length === 0) return;
+	if (lenses.length === 0) return undefined;
 	try {
 		candidateViews.restoreCurrentForDispatchFromNative(lineageId, contributorRoot, status.projection, lenses);
-	} catch {
-		// Dispatch surfaces its own typed refusal when the live candidate
-		// cannot be bound; a read-only STATUS never fails on hydration.
+		return { hydrated: true, lineage_id: lineageId, lenses };
+	} catch (error) {
+		// Never fail the caller on hydration; the registry records the typed
+		// cause so the later dispatch refusal names the attempt instead of
+		// claiming no binding was ever available.
+		return {
+			hydrated: false,
+			lineage_id: lineageId,
+			reason: error instanceof CandidateViewError ? error.reason : "candidate-view-invalid",
+			message: error instanceof Error ? error.message : String(error),
+		};
 	}
 }
 
@@ -6032,12 +6051,20 @@ async function executeReviewControllerOperation(
 				if (reviewerResultsOutstanding && (finalizeDocumentsPresent || (negotiatedStatus.raw as { schema?: unknown }).schema === "gentle-ai.review-integration.status/v5")) {
 					const outstandingReviewerLenses = pendingReviewerLenses(negotiatedStatus);
 					if (candidateView !== undefined && candidateViews && (correctionCompletion || validationAttempt)) candidateViews.cleanup(candidateView.token);
+					// Field report (2026-08-16): this lane is where the reported
+					// flow actually learns reviewer results are outstanding, and
+					// the reviewer dispatch follows it directly. Hydrate the
+					// dispatch binding from the authoritative status just decoded
+					// — against the workspace root, never a frozen view root —
+					// and report the outcome either way.
+					const dispatchBinding = hydrateDispatchBindingFromStatus(candidateViews, defaultCwd, negotiatedStatus);
 					return {
 						operation: parameters.operation,
 						status: "blocked",
 						outcome: "reviewer-results-required",
 						reason: "Capture the reviewer result first; the provider offers review.capture-result. Correction evidence and targeted validation are never admissible while reviewer results are outstanding.",
 						...(outstandingReviewerLenses.length === 0 ? {} : { pending_lenses: outstandingReviewerLenses }),
+						...(dispatchBinding === undefined ? {} : { dispatch_binding: dispatchBinding }),
 						result: negotiatedStatus.raw,
 						mutation_performed: false,
 						mutation_outcome: "none",
