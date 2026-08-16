@@ -11,6 +11,7 @@ import {
 	NativeReviewCliV214 as NativeReviewCliV214Production,
 	NativeReviewCliV216,
 	clearNativeReviewCapabilitiesCacheForTesting,
+	nativeReviewAbandonAuthorization,
 	nativeReviewLegacyAliasRepairAuthorization,
 	type ExecFileAdapter,
 	type NativeReviewCli,
@@ -69,7 +70,23 @@ const LEGACY_ALIAS_AUTHORIZATION = [
 	"actor=maintainer",
 	"reason=quarantine approved historical alias",
 ].join("\n");
+const ABANDON_DISCARDED_WORK = {
+	capturedLensResults: ["00-risk.json", "01-readability.json"],
+	findingsPresent: true,
+	evidenceRecordsPresent: false,
+} as const;
 const ABANDON_AUTHORIZATION = [
+	"gentle-ai.review-abandon-authorization/v2",
+	"lineage=pristine",
+	"revision=revision",
+	"snapshot_identity=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	"reason=retire pristine lineage",
+	"captured_lens_results=00-risk.json,01-readability.json",
+	"findings_present=true",
+	"evidence_records_present=false",
+	"actor=maintainer",
+].join("\n");
+const LEGACY_V1_ABANDON_AUTHORIZATION = [
 	"gentle-ai.review-abandon-authorization/v1",
 	"lineage=pristine",
 	"revision=revision",
@@ -77,6 +94,16 @@ const ABANDON_AUTHORIZATION = [
 	"actor=maintainer",
 	"reason=retire pristine lineage",
 ].join("\n");
+const ABANDON_REQUEST = {
+	cwd: "/repo",
+	lineage: "pristine",
+	expectedRevision: "revision",
+	snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	...ABANDON_DISCARDED_WORK,
+	actor: "maintainer",
+	reason: "retire pristine lineage",
+	maintainerAuthorization: ABANDON_AUTHORIZATION,
+} as const;
 const LEGACY_QUARANTINE_AUTHORIZATION = [
 	"gentle-ai.review-legacy-quarantine-authorization/v1",
 	"repository=/repo",
@@ -249,7 +276,7 @@ test("native v2.1.9 maintenance wrappers use exact argv and published authorizat
 		VERSION_219, { stdout: JSON.stringify({ operation: "review/reconcile-authority", record: RECONCILE_RECORD }) },
 	]);
 	const cli = new NativeReviewCliV214(adapter);
-	assert.deepEqual((await cli.abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION })).record, ABANDON_RECORD);
+	assert.deepEqual((await cli.abandon!({ ...ABANDON_REQUEST })).record, ABANDON_RECORD);
 	assert.deepEqual((await cli.quarantineLegacy!({ cwd: "/repo", repository: "/repo", lineage: "legacy", expectedRevision: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", diagnostic: LEGACY_FREEZE_DIAGNOSTIC, disposition: LEGACY_FREEZE_DISPOSITION, actor: "maintainer", reason: "quarantine malformed legacy freeze", maintainerAuthorization: LEGACY_QUARANTINE_AUTHORIZATION })).record, LEGACY_QUARANTINE_RECORD);
 	assert.deepEqual((await cli.reconcileAuthority!({ cwd: "/repo", predecessorLineage: "predecessor", expectedPredecessorRevision: "predecessor-revision", successorLineage: "successor", expectedSuccessorRevision: "successor-revision", actor: "maintainer", reason: "invalid recovery edge", anomalies: COMBINED_RECONCILE_ANOMALIES, maintainerAuthorization: COMBINED_RECONCILE_AUTHORIZATION })).record, RECONCILE_RECORD);
 	assert.deepEqual(calls.filter((call) => call.arguments[0] === "review").map((call) => call.arguments), [
@@ -350,7 +377,7 @@ test("native repair-legacy-alias fails closed for stale bindings, malformed outp
 
 test("native v2.1.9 maintenance wrappers fail closed before launch for unsupported versions and invalid bindings", async () => {
 	const unsupported = queuedAdapter([{ stdout: "gentle-ai 2.1.8\n" }]);
-	await assert.rejects(() => new NativeReviewCliV214(unsupported.adapter).abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION }), NativeReviewCliError);
+	await assert.rejects(() => new NativeReviewCliV214(unsupported.adapter).abandon!({ ...ABANDON_REQUEST }), NativeReviewCliError);
 	const invalid = queuedAdapter([]);
 	await assert.rejects(() => new NativeReviewCliV214(invalid.adapter).reconcileAuthority!({ cwd: "/repo", predecessorLineage: "predecessor", expectedPredecessorRevision: "predecessor-revision", successorLineage: "successor", expectedSuccessorRevision: "successor-revision", actor: "maintainer", reason: "invalid recovery edge", anomalies: "malformed_recovery_authorization,unchanged_target", maintainerAuthorization: COMBINED_RECONCILE_AUTHORIZATION }), TypeError);
 	assert.equal(invalid.calls.length, 0);
@@ -358,14 +385,14 @@ test("native v2.1.9 maintenance wrappers fail closed before launch for unsupport
 
 test("native v2.1.9 maintenance wrappers preserve only valid prepared audit records on partial failures", async () => {
 	for (const [operation, invoke, result] of [
-		["review/abandon", (cli: NativeReviewCliV214) => cli.abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION }), ABANDON_RECORD],
+		["review/abandon", (cli: NativeReviewCliV214) => cli.abandon!({ ...ABANDON_REQUEST }), ABANDON_RECORD],
 		["review/quarantine-legacy", (cli: NativeReviewCliV214) => cli.quarantineLegacy!({ cwd: "/repo", repository: "/repo", lineage: "legacy", expectedRevision: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", diagnostic: LEGACY_FREEZE_DIAGNOSTIC, disposition: LEGACY_FREEZE_DISPOSITION, actor: "maintainer", reason: "quarantine malformed legacy freeze", maintainerAuthorization: LEGACY_QUARANTINE_AUTHORIZATION }), LEGACY_QUARANTINE_RECORD],
 	] as const) {
 		const queue = queuedAdapter([VERSION_219, { stdout: JSON.stringify({ operation, record: result }), stderr: "quarantine interrupted", exitCode: 1 }]);
 		await assert.rejects(() => invoke(new NativeReviewCliV214(queue.adapter)), (error: unknown) => error instanceof NativeReviewCliError && error.mutationOutcome === "unknown" && error.nextAction === "review.status" && error.auditRecord?.schema === result.schema);
 	}
 	const malformed = queuedAdapter([VERSION_219, { stdout: JSON.stringify({ operation: "review/abandon" }), exitCode: 1 }]);
-	await assert.rejects(() => new NativeReviewCliV214(malformed.adapter).abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION }), (error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE && error.auditRecord === undefined);
+	await assert.rejects(() => new NativeReviewCliV214(malformed.adapter).abandon!({ ...ABANDON_REQUEST }), (error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE && error.auditRecord === undefined);
 });
 
 test("native abandon forwards cancellation and preserves the unknown mutation outcome", async () => {
@@ -379,7 +406,75 @@ test("native abandon forwards cancellation and preserves the unknown mutation ou
 		error.name = "AbortError";
 		throw error;
 	};
-	await assert.rejects(() => new NativeReviewCliV214(adapter).abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION, signal: controller.signal }), (error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.CANCELLED && error.mutationOutcome === "unknown" && error.nextAction === "review.status");
+	await assert.rejects(() => new NativeReviewCliV214(adapter).abandon!({ ...ABANDON_REQUEST, signal: controller.signal }), (error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.CANCELLED && error.mutationOutcome === "unknown" && error.nextAction === "review.status");
+});
+
+test("native abandon authorization emits the exact nine-line v2 discarded-work binding", () => {
+	assert.equal(
+		nativeReviewAbandonAuthorization({
+			lineage: "pristine",
+			expectedRevision: "revision",
+			snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			actor: "  maintainer  ",
+			reason: "operator_disposition",
+			capturedLensResults: ["00-risk.json", "01-readability.json"],
+			findingsPresent: true,
+			evidenceRecordsPresent: false,
+		}),
+		[
+			"gentle-ai.review-abandon-authorization/v2",
+			"lineage=pristine",
+			"revision=revision",
+			"snapshot_identity=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"reason=operator_disposition",
+			"captured_lens_results=00-risk.json,01-readability.json",
+			"findings_present=true",
+			"evidence_records_present=false",
+			"actor=maintainer",
+		].join("\n"),
+	);
+	assert.equal(
+		nativeReviewAbandonAuthorization({
+			lineage: "pristine",
+			expectedRevision: "revision",
+			snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			actor: "maintainer",
+			reason: "retired_schema",
+			capturedLensResults: [],
+			findingsPresent: false,
+			evidenceRecordsPresent: true,
+		}),
+		[
+			"gentle-ai.review-abandon-authorization/v2",
+			"lineage=pristine",
+			"revision=revision",
+			"snapshot_identity=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"reason=retired_schema",
+			"captured_lens_results=",
+			"findings_present=false",
+			"evidence_records_present=true",
+			"actor=maintainer",
+		].join("\n"),
+	);
+});
+
+test("native abandon refuses the legacy v1 authorization binding before process launch", async () => {
+	const { adapter, calls } = queuedAdapter([]);
+	await assert.rejects(
+		() => new NativeReviewCliV214(adapter).abandon!({ ...ABANDON_REQUEST, maintainerAuthorization: LEGACY_V1_ABANDON_AUTHORIZATION }),
+		TypeError,
+	);
+	assert.equal(calls.length, 0);
+});
+
+test("native abandon validates discarded-work inputs before process launch", async () => {
+	const { adapter, calls } = queuedAdapter([]);
+	const cli = new NativeReviewCliV214(adapter);
+	await assert.rejects(() => cli.abandon!({ ...ABANDON_REQUEST, capturedLensResults: "00-risk.json" as unknown as string[] }), /capturedLensResults/);
+	await assert.rejects(() => cli.abandon!({ ...ABANDON_REQUEST, capturedLensResults: ["00-risk.json", " padded "] }), /capturedLensResults/);
+	await assert.rejects(() => cli.abandon!({ ...ABANDON_REQUEST, findingsPresent: "true" as unknown as boolean }), /findingsPresent/);
+	await assert.rejects(() => cli.abandon!({ ...ABANDON_REQUEST, evidenceRecordsPresent: undefined as unknown as boolean }), /evidenceRecordsPresent/);
+	assert.equal(calls.length, 0);
 });
 
 test("native reconcile-authority refuses a mismatched authorization before process launch", async () => {
@@ -767,12 +862,26 @@ test("published maintenance controller actions require exact inputs and fresh UI
 	const controller = tools.get("gentle_review");
 	assert.ok(controller);
 	const cwd = scratchDir("gentle-pi-v219-maintenance-");
-	const abandon = { operation: "abandon", input: JSON.stringify({ lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage" }) };
+	const abandon = { operation: "abandon", input: JSON.stringify({ lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ...ABANDON_DISCARDED_WORK, actor: "maintainer", reason: "retire pristine lineage" }) };
 	await assert.rejects(controller.execute("headless-abandon", abandon, undefined, undefined, { cwd, hasUI: false, ui: { confirm: async () => true } } as unknown as ExtensionContext), /interactive Pi UI.*fails closed/i);
 	await assert.rejects(controller.execute("denied-abandon", abandon, undefined, undefined, { cwd, hasUI: true, ui: { confirm: async () => false } } as unknown as ExtensionContext), /not explicitly authorized/);
-	const approved = await controller.execute("approved-abandon", abandon, undefined, undefined, { cwd, hasUI: true, ui: { confirm: async () => true } } as unknown as ExtensionContext) as { details: Record<string, unknown> };
+	let abandonPrompt = "";
+	const approved = await controller.execute("approved-abandon", abandon, undefined, undefined, { cwd, hasUI: true, ui: { confirm: async (_title: string, message: string) => { abandonPrompt = message; return true; } } } as unknown as ExtensionContext) as { details: Record<string, unknown> };
 	assert.equal(approved.details.mutation_outcome, "committed");
+	assert.match(abandonPrompt, /gentle-ai\.review-abandon-authorization\/v2/);
+	assert.match(abandonPrompt, /captured_lens_results=00-risk\.json,01-readability\.json/);
+	assert.match(abandonPrompt, /findings_present=true\nevidence_records_present=false\nactor=maintainer/);
 	assert.equal(calls[0]?.operation, "abandon");
+	assert.equal((calls[0]?.request as { maintainerAuthorization?: string }).maintainerAuthorization, ABANDON_AUTHORIZATION);
+	assert.deepEqual(calls[0]?.request.capturedLensResults, ["00-risk.json", "01-readability.json"]);
+	assert.equal(calls[0]?.request.findingsPresent, true);
+	assert.equal(calls[0]?.request.evidenceRecordsPresent, false);
+	const missingDiscarded = await runControllerOperation({ operation: "abandon", input: JSON.stringify({ lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage" }) }, native);
+	assert.equal(missingDiscarded.outcome, "native-input-required");
+	assert.deepEqual(missingDiscarded.missing_input, ["capturedLensResults", "findingsPresent", "evidenceRecordsPresent"]);
+	const invalidDiscarded = await runControllerOperation({ operation: "abandon", input: JSON.stringify({ lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", capturedLensResults: ["00-risk.json", " padded "], findingsPresent: true, evidenceRecordsPresent: false, actor: "maintainer", reason: "retire pristine lineage" }) }, native);
+	assert.equal(invalidDiscarded.outcome, "native-input-required");
+	assert.deepEqual(invalidDiscarded.missing_input, ["capturedLensResults"]);
 	const legacy = await controller.execute("approved-legacy-quarantine", { operation: "quarantine-legacy", input: JSON.stringify({ repository: "/repo", lineage: "legacy", expectedRevision: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", diagnostic: LEGACY_FREEZE_DIAGNOSTIC, disposition: LEGACY_FREEZE_DISPOSITION, actor: "maintainer", reason: "quarantine malformed legacy freeze" }) }, undefined, undefined, { cwd, hasUI: true, ui: { confirm: async () => true } } as unknown as ExtensionContext) as { details: Record<string, unknown> };
 	assert.equal(legacy.details.mutation_outcome, "committed");
 	assert.equal(calls[1]?.operation, "quarantineLegacy");
