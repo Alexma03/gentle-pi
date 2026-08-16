@@ -857,6 +857,11 @@ export class CandidateViewRegistry {
 	private readonly projections = new Map<string, FrozenCandidateProjection>();
 	private readonly replays = new Map<string, string>();
 	private current: { lineageId: string; token: string } | undefined;
+	// The last dispatch-binding hydration that was attempted and failed. A
+	// swallowed hydration failure is its own defect (field report 2026-08-16):
+	// without it the later dispatch refusal claims no binding was ever
+	// available instead of naming the attempt and its typed cause.
+	private lastHydrationFailure: { lineageId: string; reason: string; message: string } | undefined;
 
 	create(request: CreateCandidateViewRequest): CandidateView {
 		return this.createOrReuse(request);
@@ -1116,21 +1121,31 @@ export class CandidateViewRegistry {
 	 */
 	restoreCurrentForDispatchFromNative(lineageId: string, contributorRoot: string, descriptor: NativeCandidateProjectionDescriptor, selectedLenses: readonly string[]): void {
 		if (this.current !== undefined) throw new CandidateViewError("candidate view already has a current lineage binding", "current-binding-already-established");
-		const lenses = this.validateSelectedLenses(selectedLenses);
-		this.restoreProjectionFromNative(lineageId, contributorRoot, descriptor);
-		const projection = this.resolveProjection(lineageId, contributorRoot);
-		const record = materializeCandidateView({ contributorRoot, baseRef: projection.baseCommit, committedOnly: projection.committedOnly }, this.gitExecutor);
 		try {
-			if (record.baseTree !== projection.baseTree || record.candidateTree !== projection.candidateTree || JSON.stringify(record.scope.paths) !== JSON.stringify(projection.paths)) {
-				throw new CandidateViewError("live candidate does not match the native frozen projection");
+			const lenses = this.validateSelectedLenses(selectedLenses);
+			this.restoreProjectionFromNative(lineageId, contributorRoot, descriptor);
+			const projection = this.resolveProjection(lineageId, contributorRoot);
+			const record = materializeCandidateView({ contributorRoot, baseRef: projection.baseCommit, committedOnly: projection.committedOnly }, this.gitExecutor);
+			try {
+				if (record.baseTree !== projection.baseTree || record.candidateTree !== projection.candidateTree || JSON.stringify(record.scope.paths) !== JSON.stringify(projection.paths)) {
+					throw new CandidateViewError("live candidate does not match the native frozen projection");
+				}
+				this.records.set(record.token, record);
+				this.bindRecord(record.token, lineageId, lenses);
+				this.current = { lineageId, token: record.token };
+			} catch (error) {
+				this.projections.delete(lineageId);
+				this.records.delete(record.token);
+				this.remove(record);
+				throw error;
 			}
-			this.records.set(record.token, record);
-			this.bindRecord(record.token, lineageId, lenses);
-			this.current = { lineageId, token: record.token };
+			this.lastHydrationFailure = undefined;
 		} catch (error) {
-			this.projections.delete(lineageId);
-			this.records.delete(record.token);
-			this.remove(record);
+			this.lastHydrationFailure = {
+				lineageId,
+				reason: error instanceof CandidateViewError ? error.reason : "candidate-view-invalid",
+				message: error instanceof Error ? error.message : String(error),
+			};
 			throw error;
 		}
 	}
@@ -1152,8 +1167,22 @@ export class CandidateViewRegistry {
 	}
 
 	currentLineageId(): string {
-		if (this.current === undefined) throw new CandidateViewError("review subagent dispatch has no current controller-owned candidate view lineage binding", "current-binding-missing");
+		if (this.current === undefined) {
+			const failure = this.lastHydrationFailure;
+			if (failure !== undefined) {
+				throw new CandidateViewError(
+					`review subagent dispatch has no current controller-owned candidate view lineage binding: hydration for lineage ${failure.lineageId} was attempted from authoritative native status and failed (${failure.reason}): ${failure.message}`,
+					"current-binding-hydration-failed",
+				);
+			}
+			throw new CandidateViewError("review subagent dispatch has no current controller-owned candidate view lineage binding", "current-binding-missing");
+		}
 		return this.current.lineageId;
+	}
+
+	/** The last failed dispatch-binding hydration, for controller envelopes. */
+	lastDispatchHydrationFailure(): Readonly<{ lineageId: string; reason: string; message: string }> | undefined {
+		return this.lastHydrationFailure;
 	}
 
 	resolveCurrentForLens(lens: string): CandidateView {
