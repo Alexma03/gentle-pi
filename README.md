@@ -110,6 +110,7 @@ pi
 /sdd-init                  Create or refresh openspec/config.yaml (openspec/both stores only).
 /gentle:models             Assign global model/effort routing to SDD/custom agents.
 /gentle:persona            Switch between gentleman and neutral persona modes.
+/gentle:background-subagents  Show or set the managed background-subagents policy, with its deciding source.
 /gentle:banner             Configure startup rose, text logo, and color preset.
 /gentle:commit-status      Inspect an unresolved durable commit transaction.
 /gentle:commit-abort       Abandon safe recovery state without changing HEAD or the index.
@@ -594,6 +595,7 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/gentle:doctor`              | Runs read-only diagnostics for SDD assets, model/persona config, memory tools, and safety guards. |
 | `/gentle:models`                 | Opens global model + effort assignment UI. Press `x` to export and `r` to restore saved routing. |
 | `/gentle:persona`                | Switches global persona mode, with project override support.        |
+| `/gentle:background-subagents`   | Shows or sets the managed background-subagents policy (`status\|enable\|disable`), naming the source that decided it. |
 | `/gentle:banner`                 | Configures startup banner rose, text logo, and color preset.        |
 | `/gentle:toggle-rose`            | Toggles the startup rose.                                           |
 | `/gentle:toggle-text-logo`       | Toggles the startup text logo.                                      |
@@ -605,6 +607,29 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/skill-creation`                | Creates or updates an LLM-first skill using the packaged `gentle-ai-skill-creator` contract and style guide. |
 
 Package-owned global SDD runtime assets are also refreshed automatically on session start when `gentle-pi` changes. Project-local `.pi/agents` and `.pi/chains` remain manual overrides and are never overwritten by startup refresh.
+
+### Background subagents policy
+
+Background delegation is off unless you turn it on. The policy is user-owned: only an explicit `/gentle:background-subagents enable` or `disable` writes it, and Pi automation never toggles it.
+
+```text
+/gentle:background-subagents           Report the effective policy, the deciding source, and the resolved capability.
+/gentle:background-subagents enable    Write "on" to the global file.
+/gentle:background-subagents disable   Write "off" to the global file.
+```
+
+Four sources can decide the policy, and the first hit wins:
+
+| Priority | Source                                            | Notes                                                        |
+| -------- | ------------------------------------------------- | ------------------------------------------------------------ |
+| 1        | `<cwd>/.pi/gentle-ai/background-subagents.json`   | Project file. Outranks everything, including a global write.  |
+| 2        | `<configHome>/background-subagents.json`          | Global file, written by `enable`/`disable`. `configHome` honors `GENTLE_PI_CONFIG_HOME` and defaults to `~/.pi/gentle-ai`. |
+| 3        | `GENTLE_PI_BACKGROUND_SUBAGENTS`                  | Exactly `on` or `off`. Any other value is ignored.            |
+| 4        | Built-in default                                  | `off`.                                                        |
+
+Both files use the strict shape `{"schema":"gentle-pi.background-subagents/v1","policy":"on"}`. A file that is present but malformed fails closed to `off` and is **not** skipped in favor of a lower-priority source, so a typo in the project file disables background subagents rather than silently handing the decision to the global file. The command reports that case as a warning instead of an ordinary `off`.
+
+Because the project file outranks the global one, `enable` still writes the global file but reports plainly when a project file keeps the effective policy unchanged. The resolved capability (`ready` or `absent`) reports whether `subagent_run` is actually callable in this session; a policy of `on` with capability `absent` means the subagents package is not installed.
 
 Startup banner settings are global and default to the current pink rose + text logo. Supported color presets are `pink`, `cyan`, `yellow`, and `green`.
 
