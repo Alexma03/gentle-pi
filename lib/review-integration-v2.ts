@@ -349,6 +349,14 @@ export interface ReviewCaptureSubmissionValueV1 {
 	slot: string;
 	domain: string;
 	substitutionLocation: number;
+	/**
+	 * status/v5 only: the artifact schema the substituted value must satisfy.
+	 * NEW optional member carried by the singular wire `value` form the live
+	 * 2.4.0-main binary emits for the materialize capture-result slot
+	 * (captured 2026-08-16 from 2.4.0-main.b1afef46); the legacy `values`
+	 * array rows never carry it and existing consumers stay untouched.
+	 */
+	schema?: string;
 }
 
 export interface ReviewCaptureSubmissionV1 {
@@ -1206,7 +1214,31 @@ function decodeTransitionArguments(value: unknown, label: string): readonly Revi
 	});
 }
 
-function decodeCaptureSubmission(value: unknown, label: string): ReviewCaptureSubmissionV1 {
+function decodeCaptureSubmission(value: unknown, label: string, v5: boolean): ReviewCaptureSubmissionV1 {
+	// status/v5: the live 2.4.0-main binary emits the materialize
+	// capture-result submission as a SINGULAR `value` object carrying a
+	// `schema` key (captured 2026-08-16 from 2.4.0-main.b1afef46; the
+	// emitter has been singular since gentle-ai f1a95179). The form is
+	// closed to that exact captured shape and normalizes into the typed
+	// one-entry values array the host relay already consumes. A payload
+	// carrying both wire forms at once matches no captured shape and falls
+	// through to the legacy decoder, which rejects the unknown `value` key.
+	if (v5 && typeof value === "object" && value !== null && "value" in value && !("values" in value)) {
+		const submission = exactRecord(value, label, ["operation_token", "argument_tokens", "value"]);
+		if (submission.operation_token !== "capture-result") throw new TypeError(`${label}.operation_token must be capture-result for the singular value form`);
+		const argumentTokens = stringArray(submission.argument_tokens, `${label}.argument_tokens`, { minimum: 1 });
+		const row = exactRecord(submission.value, `${label}.value`, ["slot", "domain", "schema", "substitution_location"]);
+		return {
+			operationToken: "capture-result",
+			argumentTokens,
+			values: [{
+				slot: enumeration(row.slot, ["reviewer_result"] as const, `${label}.value.slot`),
+				domain: nonempty(row.domain, `${label}.value.domain`),
+				schema: nonempty(row.schema, `${label}.value.schema`),
+				substitutionLocation: integer(row.substitution_location, `${label}.value.substitution_location`, 0, argumentTokens.length - 1),
+			}],
+		};
+	}
 	const submission = exactRecord(value, label, ["operation_token", "argument_tokens", "values"]);
 	const operationToken = text(submission.operation_token, `${label}.operation_token`, { minimum: 1, pattern: /^[a-z0-9-]+$/ });
 	const argumentTokens = stringArray(submission.argument_tokens, `${label}.argument_tokens`, { minimum: 1 });
@@ -1391,7 +1423,7 @@ function decodeCollectInput(value: unknown, label: string, v5: boolean): ReviewC
 		if (v5 && (operationToken === "finalize" || operationToken === "capture-evidence")) {
 			submissionDescriptor = decodeSubmissionDescriptorV5(input.submission, `${label}.submission`, operationToken);
 		} else {
-			submission = decodeCaptureSubmission(input.submission, `${label}.submission`);
+			submission = decodeCaptureSubmission(input.submission, `${label}.submission`, v5);
 		}
 	}
 
