@@ -33,6 +33,7 @@ import {
 import {
 	createNativeReviewCli,
 	gentleAiProcessEnvironment,
+	nativeReviewAbandonAuthorization,
 	NativeReviewConsentRequiredError,
 } from "../../runtime/native-review-cli.mjs";
 import {
@@ -419,6 +420,82 @@ async function sequencingLifecycle(binary, cli, root) {
 	return "offered step matched native at every hop; plan -> fix -> evidence -> targeted validation -> approved receipt";
 }
 
+// abandonLifecycle drives the audited abandon end-to-end through the real
+// adapter runtime against the real binary: start a low lineage, abandon it
+// with the adapter-built maintainer authorization, and confirm the native
+// gate accepted the binding, committed a quarantine record, and no longer
+// offers the lineage as live authority. RED-provable: the check asserts the
+// adapter-built binding is exactly the nine-line
+// gentle-ai.review-abandon-authorization/v2 discarded-work binding, so a
+// v1-emitting builder (the drift class that escaped to a live Pi session)
+// fails this check before the binary is even invoked - and would be refused
+// by the native gate anyway.
+async function abandonLifecycle(binary, cli, root) {
+	const cwd = scratchRepo(root, "pi-abandon");
+	write(cwd, "docs/abandon-guide.md", "# Abandon guide\n\nline one\n");
+	commitAll(cwd, "docs: abandon guide");
+	write(cwd, "docs/abandon-guide.md", "# Abandon guide\n\nline one\nline two, purely passive documentation\n");
+
+	let raw = rawStatus(binary, cwd);
+	let status = await cli.targetStatus({ cwd });
+	assertOfferedStepMatchesNative("pre-start", status, raw);
+	const start = await cli.start({ cwd, targetIdentity: status.targetIdentity, projection: "workspace" });
+	if (start.state !== "reviewing") throw new Error(`abandon precondition start state=${start.state}`);
+
+	raw = rawStatus(binary, cwd);
+	if (raw.authority?.lineage_id !== start.lineageId || typeof raw.authority?.revision !== "string") {
+		throw new Error(`live authority missing for started lineage ${start.lineageId}: ${JSON.stringify(raw.authority)}`);
+	}
+	// A fresh lineage before any capture carries the smallest discarded-work
+	// summary the v2 binding names: no captured lens results, no findings,
+	// no evidence records.
+	const request = {
+		cwd,
+		lineage: raw.authority.lineage_id,
+		expectedRevision: raw.authority.revision,
+		snapshotIdentity: raw.projection.initial_snapshot_identity,
+		capturedLensResults: [],
+		findingsPresent: false,
+		evidenceRecordsPresent: false,
+		actor: "cross-lane-battery",
+		reason: "operator_disposition",
+	};
+	const authorization = nativeReviewAbandonAuthorization(request);
+	const expectedBinding = [
+		"gentle-ai.review-abandon-authorization/v2",
+		`lineage=${request.lineage}`,
+		`revision=${request.expectedRevision}`,
+		`snapshot_identity=${request.snapshotIdentity}`,
+		"reason=operator_disposition",
+		"captured_lens_results=",
+		"findings_present=false",
+		"evidence_records_present=false",
+		"actor=cross-lane-battery",
+	].join("\n");
+	if (authorization !== expectedBinding) {
+		throw new Error(
+			`adapter built ${authorization.split("\n")[0]} instead of the exact nine-line gentle-ai.review-abandon-authorization/v2 binding: the audited-abandon drift class (v1 emission) is back`,
+		);
+	}
+	const result = await cli.abandon({ ...request, maintainerAuthorization: authorization });
+	if (result.record?.status !== "committed") throw new Error(`abandon record status=${result.record?.status}`);
+	if (result.record?.abandonment?.schema !== "gentle-ai.review-abandon-authorization/v2") {
+		throw new Error(`abandon record binding schema=${result.record?.abandonment?.schema}`);
+	}
+
+	// The abandoned lineage must no longer be offered as live authority.
+	raw = rawStatus(binary, cwd);
+	status = await cli.targetStatus({ cwd });
+	assertOfferedStepMatchesNative("post-abandon", status, raw);
+	if (raw.authority !== null && raw.authority !== undefined) {
+		throw new Error(`post-abandon status still reports live authority ${JSON.stringify(raw.authority)}`);
+	}
+	if (status.nextTransition?.execute?.operation !== "review.start") {
+		throw new Error(`post-abandon expected a fresh review.start, got ${summarizeDecoded(status.nextTransition)}`);
+	}
+	return "adapter-built nine-line v2 binding accepted natively; quarantine record committed; post-abandon status offers only a fresh start";
+}
+
 async function modelReview(binary, cli, cwd) {
 	const raw = rawStatus(binary, cwd);
 	const input = raw.next_transition?.collect?.inputs?.[0];
@@ -532,6 +609,12 @@ async function main() {
 				? "sequencing: evidence collected before targeted validation"
 				: "sequencing lifecycle to approved receipt";
 			fail(name, knownRedParity(message));
+		}
+
+		try {
+			pass("audited abandon end-to-end (v2 discarded-work binding)", await abandonLifecycle(binary, cli, root));
+		} catch (error) {
+			fail("audited abandon end-to-end (v2 discarded-work binding)", knownRedParity(describeError(error)));
 		}
 
 		if (WITH_MODEL && mediumRepo !== undefined) {
