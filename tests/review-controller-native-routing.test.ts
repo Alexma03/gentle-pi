@@ -1308,6 +1308,270 @@ test("production correction routing rejects a second capture that reuses failed 
 	execFileSync("chmod", ["-R", "u+w", cwd]);
 });
 
+// Live-emitter correction shapes (probed 2026-08-16 against BOTH the pinned
+// 2.2.3 binary and dev 2.4.0-main.b1afef46, scripted correction lane):
+// - The evidence-collect status at `correction_required` carries the
+//   `validation_request` CONTEXT alongside its single `review.capture-evidence`
+//   input (reason correction_repository_verification_required). The request
+//   context is not an offered validation step.
+// - The post-evidence targeted-validation status keeps state
+//   `correction_required` (never `validating`), and its
+//   `external.run_targeted_validation` input embeds the identical
+//   validation_request.
+test("production correction routing accepts the live emitters' early validation-request context and correction_required post-evidence state", async (t) => {
+	for (const [outcome, expectedKind] of [
+		["passed", "run-targeted-validation"],
+		["verification_failed", "recapture-required"],
+	] as const) {
+		await t.test(outcome, async (scenario) => {
+			const cwd = repository(scenario);
+			writeFileSync(join(cwd, "app.ts"), `export const live = ${JSON.stringify(outcome)};\n`);
+			const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+			const beforeCapture = bindCorrectionCollection(targetStatusFixture({
+				lineageId: `live-correction-${outcome.replaceAll("_", "-")}`,
+				authorityState: "correction_required",
+				baseTree: frozen.baseTree,
+				currentCandidateTree: frozen.candidateTree,
+				paths: frozen.paths,
+			}));
+			// The live emitters publish the request context BEFORE evidence.
+			beforeCapture.validationRequest = bindTargetedValidation(targetStatusFixture({
+				lineageId: beforeCapture.authority!.lineageId,
+				authorityState: "correction_required",
+				baseTree: frozen.baseTree,
+				currentCandidateTree: frozen.candidateTree,
+				paths: frozen.paths,
+			})).validationRequest;
+			const afterCapture = targetStatusFixture({
+				lineageId: beforeCapture.authority!.lineageId,
+				// Live post-evidence state on both emitters.
+				authorityState: "correction_required",
+				baseTree: frozen.baseTree,
+				currentCandidateTree: frozen.candidateTree,
+				paths: frozen.paths,
+			});
+			if (outcome === "passed") bindTargetedValidation(afterCapture);
+			else {
+				bindCorrectionCollection(afterCapture);
+				afterCapture.validationRequest = beforeCapture.validationRequest;
+			}
+			frozen.cleanup();
+			const calls: string[] = [];
+			let statuses = 0;
+			let finalizes = 0;
+			const { controller } = runtime(fakeNative({
+				targetStatus: async () => {
+					calls.push("status");
+					statuses += 1;
+					return statuses === 1 ? beforeCapture : afterCapture;
+				},
+				captureEvidence: async (request) => {
+					calls.push("capture-evidence");
+					assert.equal(request.outcome, outcome);
+					return capturedCorrectionEvidence(beforeCapture, outcome, outcome === "passed" ? "7" : "8");
+				},
+				finalize: async () => {
+					calls.push("finalize");
+					finalizes += 1;
+					return { lineageId: beforeCapture.authority!.lineageId, state: "approved", action: "approved", storeRevision: "r-final" };
+				},
+			}), undefined, undefined, undefined, new CandidateViewRegistry());
+			const validation = outcome === "passed" ? {
+				request_hash: "9".repeat(64), correction_ids: [],
+				original_criteria: { passed: true, evidence: ["acceptance passes"] },
+				correction_regression: { passed: true, evidence: ["regression passes"] },
+				fix_caused_findings: [], follow_ups: [],
+			} : undefined;
+			const result = await controller.execute(`live-correction-${outcome}`, {
+				operation: "finalize",
+				lineageId: beforeCapture.authority!.lineageId,
+				input: JSON.stringify({ final_evidence: `evidence: ${outcome}`, final_verification_outcome: outcome, ...(validation === undefined ? {} : { validation }) }),
+			}, undefined, undefined, context(cwd));
+			const details = result.details as Record<string, unknown>;
+			assert.deepEqual(calls.slice(0, 3), ["status", "capture-evidence", "status"], "the early validation-request context must not block the evidence capture the state demands");
+			assert.equal((details.correction_step as { kind?: string } | undefined)?.kind, expectedKind);
+			assert.equal(finalizes, outcome === "passed" ? 1 : 0);
+		});
+	}
+});
+
+// Ordinary final verification (field defect, dev binary 2.4.0-main.b1afef46,
+// reproduced identically on the pinned 2.2.3 binary): after FINALIZE with
+// captured results the native state is `validating` and the provider collects
+// exactly one `review.capture-evidence` record, then offers one execute
+// `review.finalize --captured-evidence=true` transition. The controller must
+// follow that transition faithfully — it must never demand its correction-lane
+// targeted-validation phase, and never substitute the validate gate.
+function bindFinalVerificationTransition(status: ReviewStatusV3, outcome: "passed" | "verification_failed" | "procedural_tooling_failed"): ReviewStatusV3 {
+	const reasonCode = outcome === "passed"
+		? "captured_verification_evidence_passed"
+		: outcome === "verification_failed" ? "captured_verification_failed" : "captured_verification_tooling_failed";
+	status.nextTransition = {
+		kind: "execute",
+		reasonCode,
+		execute: {
+			operation: "review.finalize",
+			// The second argument deliberately omits `token` to pin the
+			// provider's published hyphenation fallback (captured_evidence ->
+			// --captured-evidence=true); the host never invents another form.
+			arguments: [
+				{ name: "lineage", value: status.authority!.lineageId, token: `--lineage=${status.authority!.lineageId}` },
+				{ name: "captured_evidence", value: "true" },
+			],
+			preconditions: [{ name: "state", value: "validating" }, { name: "verification_outcome", value: outcome }],
+			binding: { targetIdentity: status.targetIdentity, lineageId: status.authority!.lineageId },
+		},
+	};
+	delete status.validationRequest;
+	return status;
+}
+
+test("ordinary final verification at validating captures evidence then executes the provider finalize transition, never targeted validation", async (t) => {
+	for (const [outcome, terminalState] of [
+		["passed", "approved"],
+		["verification_failed", "escalated"],
+		["procedural_tooling_failed", "escalated"],
+	] as const) {
+		await t.test(outcome, async (scenario) => {
+			const cwd = repository(scenario);
+			writeFileSync(join(cwd, "app.ts"), `export const outcome = ${JSON.stringify(outcome)};\n`);
+			const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+			const beforeCapture = bindCorrectionCollection(targetStatusFixture({
+				lineageId: "final-verification",
+				authorityState: "validating",
+				baseTree: frozen.baseTree,
+				currentCandidateTree: frozen.candidateTree,
+				paths: frozen.paths,
+			}));
+			const afterCapture = bindFinalVerificationTransition(targetStatusFixture({
+				lineageId: "final-verification",
+				authorityState: "validating",
+				baseTree: frozen.baseTree,
+				currentCandidateTree: frozen.candidateTree,
+				paths: frozen.paths,
+			}), outcome);
+			frozen.cleanup();
+			const calls: string[] = [];
+			const transitions: Array<readonly string[]> = [];
+			let statuses = 0;
+			const { controller } = runtime(fakeNative({
+				targetStatus: async () => {
+					calls.push("status");
+					statuses += 1;
+					return statuses === 1 ? beforeCapture : afterCapture;
+				},
+				captureEvidence: async (request) => {
+					calls.push("capture-evidence");
+					assert.equal(request.outcome, outcome);
+					return capturedCorrectionEvidence(beforeCapture, outcome, "6");
+				},
+				finalize: async () => {
+					calls.push("finalize");
+					return { lineageId: "final-verification", state: terminalState, action: "terminal", storeRevision: "r2" };
+				},
+				finalizeTransition: async (request) => {
+					calls.push("finalize-transition");
+					transitions.push(request.argumentTokens);
+					return { lineageId: "final-verification", state: terminalState, action: "terminal", storeRevision: "r2", receiptPath: "/opaque/receipt" };
+				},
+			}), undefined, undefined, undefined, new CandidateViewRegistry());
+			const result = await controller.execute(`final-verification-${outcome}`, {
+				operation: "finalize",
+				lineageId: "final-verification",
+				input: JSON.stringify({ final_evidence: `verification run: ${outcome}`, final_verification_outcome: outcome }),
+			}, undefined, undefined, context(cwd));
+			const details = result.details as Record<string, unknown>;
+			assert.deepEqual(calls, ["status", "capture-evidence", "status", "finalize-transition"], "the controller must follow the provider transition after evidence capture");
+			assert.deepEqual(transitions, [["--lineage=final-verification", "--captured-evidence=true"]]);
+			assert.equal((details.result as { state?: string } | undefined)?.state, terminalState);
+			assert.equal("correction_step" in details, false, "ordinary final verification is not a correction transaction");
+		});
+	}
+});
+
+test("ordinary final verification rejects a Pi-authored targeted validation document before any capture", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 1;\n");
+	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+	const status = bindCorrectionCollection(targetStatusFixture({
+		lineageId: "final-verification",
+		authorityState: "validating",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}));
+	frozen.cleanup();
+	let captures = 0;
+	let finalizes = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => status,
+		captureEvidence: async () => { captures += 1; return capturedCorrectionEvidence(status, "passed", "4"); },
+		finalize: async () => { finalizes += 1; return { lineageId: "final-verification", state: "approved", action: "approved", storeRevision: "r1" }; },
+	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	const result = await controller.execute("final-verification-validation-doc", {
+		operation: "finalize",
+		lineageId: "final-verification",
+		input: JSON.stringify({
+			final_evidence: "verification run: passed",
+			final_verification_outcome: "passed",
+			validation: { request_hash: "9".repeat(64), correction_ids: [], original_criteria: { passed: true, evidence: ["passes"] }, correction_regression: { passed: true, evidence: ["passes"] }, fix_caused_findings: [], follow_ups: [] },
+		}),
+	}, undefined, undefined, context(cwd));
+	assert.equal((result.details as { outcome?: string }).outcome, "native-operation-failed");
+	assert.match(JSON.stringify(result.details), /final-verification-provider-owned/);
+	assert.equal(captures, 0, "an inadmissible payload must fail closed before the single evidence capture is consumed");
+	assert.equal(finalizes, 0);
+});
+
+test("ordinary final verification fails closed without substituting a step when the provider offers no finalize transition", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+	const beforeCapture = bindCorrectionCollection(targetStatusFixture({
+		lineageId: "final-verification",
+		authorityState: "validating",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}));
+	const afterCapture = targetStatusFixture({
+		lineageId: "final-verification",
+		authorityState: "validating",
+		action: "stop",
+		replayability: "manual_action_required",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	});
+	frozen.cleanup();
+	let statuses = 0;
+	let finalizes = 0;
+	let transitions = 0;
+	let validates = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statuses += 1;
+			return statuses === 1 ? beforeCapture : afterCapture;
+		},
+		captureEvidence: async () => capturedCorrectionEvidence(beforeCapture, "passed", "5"),
+		finalize: async () => { finalizes += 1; return { lineageId: "final-verification", state: "approved", action: "approved", storeRevision: "r1" }; },
+		finalizeTransition: async () => { transitions += 1; return { lineageId: "final-verification", state: "approved", action: "approved", storeRevision: "r1" }; },
+		validate: async () => { validates += 1; return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() }; },
+	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	const result = await controller.execute("final-verification-no-transition", {
+		operation: "finalize",
+		lineageId: "final-verification",
+		input: JSON.stringify({ final_evidence: "verification run: passed", final_verification_outcome: "passed" }),
+	}, undefined, undefined, context(cwd));
+	const details = result.details as Record<string, unknown>;
+	assert.equal(details.outcome, "final-verification-transition-unavailable");
+	assert.equal(details.mutation_performed, true, "the committed evidence capture must never be reported as zero mutations");
+	assert.equal(details.mutation_outcome, "committed");
+	assert.equal(finalizes, 0, "no substitute finalize form may be invented");
+	assert.equal(transitions, 0);
+	assert.equal(validates, 0, "the validate gate must never be substituted for a missing transition");
+});
+
 // gentle-pi#311 P4-roles fixture: one provider-rendered SELF-CONTAINED role
 // capture vector (binding tokens + --agent=pi --execute=true, no submission).
 function bindProviderRoleVector(status: ReviewStatusV3, role: "refuter" | "targeted-validator"): ReviewStatusV3 {
