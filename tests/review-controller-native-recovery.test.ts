@@ -845,13 +845,20 @@ test("REPAIR_LEGACY_ALIAS derives fixed inputs from fresh inventory and requires
 // Pi passes the transition's tokens through verbatim and adds only --input.
 test("captureResult passes the provider tokens through verbatim and carries no --contract", async (t) => {
 	t.after(() => clearNativeReviewCapabilitiesCacheForTesting());
+	// The full live envelope shape, confirmed against real capture-result runs
+	// on both the pinned line and gentle-ai main (tests/fixtures/devbinary/
+	// result-artifact-v2.captured.json): the opaque locator prefix is rart1_.
 	const manifest = {
 		schema: "gentle-ai.review-result-artifact/v2",
 		capability: "review.native_result_artifact",
+		reference: "rart1_" + "b".repeat(64),
+		sha256: "sha256:" + "f".repeat(64),
+		lineage_id: "review-1d5aadacc600e167",
+		target_identity: "sha256:" + "d".repeat(64),
+		lens: "review-reliability",
+		selected_order: 0,
 		subject_hash: "sha256:" + "a".repeat(64),
 		admission_decision: "completed",
-		lens: "review-reliability",
-		reference: "rref1_" + "b".repeat(64),
 	};
 	const { adapter, calls } = queuedAdapter([{ stdout: JSON.stringify(manifest) }]);
 	const cli = new NativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
@@ -882,6 +889,45 @@ test("captureResult passes the provider tokens through verbatim and carries no -
 	assert.equal(argv.at(-2), "--input");
 	assert.match(argv.at(-1) as string, /\S/);
 	assert.equal(argv.length, 2 + tokens.length + 2);
+});
+
+// The admission answer routes through the exact-identity forward decoder:
+// a manifest missing its binding fields (the shape no real binary ever
+// emitted) or carrying a foreign locator prefix is refused, never partially
+// consumed. This is the decoder-freshness discipline reaching the consumer.
+test("captureResult refuses an under-specified or foreign-locator manifest", async (t) => {
+	t.after(() => clearNativeReviewCapabilitiesCacheForTesting());
+	const full = {
+		schema: "gentle-ai.review-result-artifact/v2",
+		capability: "review.native_result_artifact",
+		reference: "rart1_" + "b".repeat(64),
+		sha256: "sha256:" + "f".repeat(64),
+		lineage_id: "review-1d5aadacc600e167",
+		target_identity: "sha256:" + "d".repeat(64),
+		lens: "review-reliability",
+		selected_order: 0,
+		subject_hash: "sha256:" + "a".repeat(64),
+		admission_decision: "completed",
+	};
+	const legacyPartial = {
+		schema: full.schema,
+		capability: full.capability,
+		subject_hash: full.subject_hash,
+		admission_decision: full.admission_decision,
+		lens: full.lens,
+		reference: full.reference,
+	};
+	for (const body of [
+		legacyPartial,
+		{ ...full, reference: "rref1_" + "b".repeat(64) },
+		{ ...full, unadvertised: true },
+	]) {
+		const cli = new NativeReviewCliV216(async () => ({ stdout: JSON.stringify(body), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false }), "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
+		await assert.rejects(cli.captureResult({
+			argumentTokens: ["--lineage=review-1d5aadacc600e167", "--repository-context=rctx1_" + "e".repeat(64)],
+			resultDocument: JSON.stringify({ subject_hash: full.subject_hash, inspection: { status: "completed", paths: ["a.ts"] }, findings: [], evidence: ["reviewed the complete frozen candidate scope"] }),
+		}));
+	}
 });
 
 test("captureEvidence stages exact bytes, uses the closed outcome argv, and decodes the native record", async (t) => {
