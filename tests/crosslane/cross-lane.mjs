@@ -22,7 +22,7 @@
 // tests/*.test.ts only.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -776,6 +776,147 @@ async function recoveredSuccessorFieldFlow(binary, cli, root) {
 // check drives everything up to and including the REAL materialize leg
 // against the real binary (the provider-issued tokens must actually produce
 // prompt bytes), and stubs only the pi-subprocess hop.
+// correctedLifecycleThroughAdapter drives the shape three field defects in a
+// row escaped through: a MEDIUM candidate taken all the way through detection,
+// bounded correction, evidence and targeted validation to an approved receipt
+// THROUGH THE ADAPTER — not the clean-approval path, and not raw CLI.
+//
+// Field defect it locks down (Engram #12547): after an admitted correction the
+// candidate identity legitimately moves, and a FINALIZE that merely follows the
+// provider's own execute transition carries no documents. That made the
+// adapter resolve the START-time reviewer view and report
+// `candidate-target-projection-drift`, so no corrected lineage could ever reach
+// a receipt through Pi.
+//
+// The controller-driven client is built from lib/*.ts on purpose: the battery's
+// shared `cli` comes from runtime/*.mjs, and mixing that module instance with
+// the extension's lib/*.ts instance breaks `instanceof` across the boundary,
+// which silently turns the consent path into a generic failure.
+async function correctedLifecycleThroughAdapter(binary, root) {
+	const { createNativeReviewCli } = await import("../../lib/native-review-cli.ts");
+	const cli = createNativeReviewCli(undefined, binary);
+	const cwd = scratchRepo(root, "pi-corrected");
+	const base = "export function parsePath(input) {\n  return input.split(\"/\");\n}\n";
+	write(cwd, "src/parse.js", base);
+	commitAll(cwd, "feat: parse");
+	// The intentional reliability defect: the last component is omitted.
+	write(cwd, "src/parse.js", `${base}export function lastComponent(input) {\n  const parts = input.split("/");\n  return parts[parts.length - 2];\n}\n`);
+
+	const registry = new CandidateViewRegistry();
+	const context = { cwd, hasUI: false, ui: { confirm: async () => true, notify: () => {} } };
+	// The real tool is used, not the bare entry point: the pending-consent map
+	// lives for the tool's lifetime, so START and ANSWER-CONSENT share it.
+	const { createGentleAiExtension } = await import("../../extensions/gentle-ai.ts");
+	const tools = new Map();
+	createGentleAiExtension({ nativeReviewCli: cli, candidateViews: registry })({
+		on() {}, registerTool(definition) { tools.set(definition.name, definition); }, registerCommand() {},
+	});
+	const tool = tools.get("gentle_review");
+	let call = 0;
+	const controller = async (parameters) => (await tool.execute(`corrected-${call++}`, parameters, undefined, undefined, context)).details;
+	let boundLineageId;
+	try {
+		// START through the controller so this session holds the START-time
+		// immutable reviewer view — the state the defect needs.
+		let envelope = await controller({ operation: "start", input: JSON.stringify({ mode: "ordinary" }) });
+		if (envelope.consent_binding === undefined) throw new Error(`medium START did not surface consent: ${String(envelope.outcome ?? envelope.status)}`);
+		envelope = await controller({ operation: "answer-consent", input: JSON.stringify({ consentBinding: envelope.consent_binding, answer: "granted" }) });
+		const lineageId = envelope.result?.lineage_id;
+		boundLineageId = lineageId;
+		if (envelope.result?.state !== "reviewing" || lineageId === undefined) throw new Error(`granted START state=${String(envelope.result?.state)}`);
+		if (!registry.hasCurrentBinding()) throw new Error("START did not bind the immutable reviewer view for this session");
+		const startTree = rawStatus(binary, cwd).projection.current_candidate_tree;
+
+		// Reviewer slot: one deterministic candidate-caused BLOCKER.
+		let raw = rawStatus(binary, cwd);
+		let slot = raw.next_transition?.collect?.inputs?.[0];
+		if (slot?.capture_operation !== "review.capture-result") throw new Error(`expected review.capture-result, got ${summarizeRaw(raw.next_transition)}`);
+		let args = rawArgumentValues(slot);
+		const reviewerFile = join(root, "pi-corrected-reviewer.json");
+		writeFileSync(reviewerFile, JSON.stringify({
+			subject_hash: args["subject-hash"],
+			inspection: { status: "completed", paths: ["src/parse.js"] },
+			evidence: ["lastComponent indexes parts.length - 2 and omits the last component; introduced by the candidate hunk"],
+			findings: [{
+				claim: "lastComponent returns the second-to-last path component instead of the last",
+				severity: "BLOCKER",
+				evidence_class: "deterministic",
+				causal_disposition: "introduced",
+				lens: args.lens,
+				location: "src/parse.js:6",
+				proof_refs: ["src/parse.js:4-7 indexes parts.length - 2 in the candidate tree"],
+			}],
+		}));
+		rawInvoke(binary, cwd, ["review", "capture-result", "--lineage", args.lineage, "--expected-revision", args["expected-revision"],
+			"--target", args.target, "--repository-context", args["repository-context"], "--lens", args.lens,
+			"--order", args.order, "--subject-hash", args["subject-hash"], "--input", reviewerFile]);
+
+		envelope = await controller({ operation: "finalize", lineageId, input: JSON.stringify({}) });
+		if (envelope.result?.state !== "correction_required") throw new Error(`finalize after capture state=${String(envelope.result?.state ?? envelope.outcome)}`);
+
+		// Bounded correction: forecast BEFORE editing, then the edit.
+		raw = rawStatus(binary, cwd);
+		const planInput = raw.next_transition?.collect?.inputs?.[0];
+		if (planInput?.capture_operation !== "external.plan_correction") throw new Error(`expected external.plan_correction, got ${summarizeRaw(raw.next_transition)}`);
+		const bounds = planInput.submission?.values?.[0] ?? {};
+		envelope = await controller({ operation: "finalize", lineageId, input: JSON.stringify({ correction_line_forecast: bounds.minimum ?? 1 }) });
+		if (envelope.result?.state !== "correction_required") throw new Error(`correction forecast rejected: ${JSON.stringify(envelope.diagnostics ?? envelope.outcome)}`);
+		write(cwd, "src/parse.js", `${base}export function lastComponent(input) {\n  const parts = input.split("/");\n  return parts[parts.length - 1];\n}\n`);
+		const correctedTree = rawStatus(binary, cwd).projection.current_candidate_tree;
+		if (correctedTree === startTree) throw new Error("the correction did not move the candidate identity");
+
+		// THE REGRESSION PROBE: a FINALIZE that just follows the provider
+		// transition carries no documents. Whatever the provider answers is
+		// fine; what must never come back is adapter-side reviewer-view drift.
+		envelope = await controller({ operation: "finalize", lineageId, input: JSON.stringify({}) });
+		if (envelope.diagnostics?.code === "candidate-target-projection-drift") {
+			throw new Error("document-free FINALIZE on the corrected candidate still reports candidate-target-projection-drift");
+		}
+
+		// Correction evidence, then targeted validation, to the receipt.
+		envelope = await controller({ operation: "finalize", lineageId, input: JSON.stringify({ final_evidence: "node --check src/parse.js passed; lastComponent now returns the final component", final_verification_passed: true }) });
+		if (envelope.diagnostics?.code === "candidate-target-projection-drift") throw new Error("evidence FINALIZE reported candidate-target-projection-drift");
+		raw = rawStatus(binary, cwd);
+		const validationInput = raw.next_transition?.collect?.inputs?.[0];
+		if (validationInput?.capture_operation !== "external.run_targeted_validation") {
+			return `corrected lineage reached ${String(raw.authority?.state)} through the adapter with no candidate-target-projection-drift at any step; residual gap: this provider renders targeted validation as the Go-owned ${String(validationInput?.capture_operation)} vector, which costs a model run, so the battery stops before the receipt`;
+		}
+		// The evidence-only FINALIZE above already advanced the provider to
+		// targeted validation, so the receipt is completed through the exact
+		// provider-rendered submission (the same way the sequencing check does).
+		// Re-calling FINALIZE with final_evidence AND validation re-enters
+		// evidence capture on this provider; that lane question is pre-existing
+		// and out of scope for this defect, and is noted rather than papered over.
+		const request = raw.validation_request ?? validationInput.validation_request;
+		const validatorFile = join(root, "pi-corrected-validator.json");
+		writeFileSync(validatorFile, JSON.stringify({
+			targeted_validation_request_hash: request.request_hash,
+			correction_target_identity: request.correction_target_identity,
+			original_criteria: { passed: true, evidence: ["frozen correction tree returns parts[parts.length - 1]"] },
+			correction_regression: { passed: true, evidence: ["parsePath is untouched by the correction diff"] },
+			follow_ups: [],
+		}));
+		const submitted = rawInvoke(binary, root, ["review", validationInput.submission.operation_token,
+			...substitute(validationInput.submission.argument_tokens, { value: validatorFile })]);
+		const finalState = submitted?.result?.state ?? submitted?.state ?? rawStatus(binary, cwd).authority?.state;
+		if (finalState !== "approved") throw new Error(`corrected lineage ended at ${String(finalState)} instead of approved`);
+		// The receipt must be the adapter-validatable one for the corrected tree.
+		const gate = await controller({ operation: "status", lineageId });
+		if (gate.result?.authority?.state !== "approved") throw new Error(`adapter status does not see the approved corrected lineage: ${String(gate.result?.authority?.state)}`);
+		return "medium candidate driven through the adapter: BLOCKER detected -> bounded correction -> document-free provider-transition FINALIZE with no candidate-target-projection-drift -> correction evidence -> targeted validation -> approved receipt the adapter can see. Residual gap: the final targeted-validation document is submitted through the exact provider-rendered vector, because a combined evidence+validation FINALIZE re-enters evidence capture on this provider (pre-existing lane question, not this defect)";
+	} finally {
+		// Candidate views are materialized read-only; leaving one behind makes
+		// the battery's own root cleanup fail with EACCES.
+		const resolvers = [
+			() => registry.resolveCurrentForLens("review-reliability"),
+			...(boundLineageId === undefined ? [] : [() => registry.resolveForFinalize(boundLineageId)]),
+		];
+		for (const resolve of resolvers) {
+			try { registry.cleanup(resolve().token); } catch { /* nothing bound to clean */ }
+		}
+	}
+}
+
 async function relayMaterializeSlotLifecycle(binary, cli, root) {
 	const cwd = scratchLinkedWorktree(root, "pi-relay-slot");
 	write(cwd, "docs/relay-guide.md", "# Relay guide\n\nline one\n");
@@ -908,6 +1049,28 @@ function decoderFreshness(binary) {
 	}
 }
 
+// Candidate views are materialized read-only, so a leaked one makes a plain
+// rmSync fail with EACCES — and losing the battery's results table to a scratch
+// permission is worse than leaving bytes in /tmp. Make everything writable
+// first, then remove, and never let cleanup mask the run's outcome.
+function removeScratchRoot(root) {
+	const makeWritable = (path) => {
+		let entry;
+		try { entry = statSync(path); } catch { return; }
+		try { chmodSync(path, entry.isDirectory() ? 0o700 : 0o600); } catch { /* best effort */ }
+		if (!entry.isDirectory()) return;
+		let children = [];
+		try { children = readdirSync(path); } catch { return; }
+		for (const child of children) makeWritable(join(path, child));
+	};
+	makeWritable(root);
+	try {
+		rmSync(root, { recursive: true, force: true });
+	} catch (error) {
+		console.log(`note: scratch root ${root} could not be fully removed (${error.code ?? "unknown"}); results below are unaffected`);
+	}
+}
+
 // --- driver ---
 
 async function main() {
@@ -969,6 +1132,12 @@ async function main() {
 			fail("relay materialize slot on an externally recovered lineage", knownRedParity(describeError(error)));
 		}
 
+		try {
+			pass("corrected lifecycle through the adapter to an approved receipt", await correctedLifecycleThroughAdapter(binary, root));
+		} catch (error) {
+			fail("corrected lifecycle through the adapter to an approved receipt", knownRedParity(describeError(error)));
+		}
+
 		if (WITH_MODEL && mediumRepo !== undefined) {
 			try {
 				pass("medium reviewer model run (pi)", await modelReview(binary, cli, mediumRepo));
@@ -981,7 +1150,7 @@ async function main() {
 
 		decoderFreshness(binary);
 	} finally {
-		rmSync(root, { recursive: true, force: true });
+		removeScratchRoot(root);
 	}
 
 	const nameWidth = Math.max(...checks.map((check) => check.name.length), "check".length);

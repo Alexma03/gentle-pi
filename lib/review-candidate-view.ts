@@ -1092,6 +1092,37 @@ export class CandidateViewRegistry {
 		});
 	}
 
+	/**
+	 * Re-derives this lineage's FINALIZE binding from the provider's own
+	 * projection, replacing a binding this session is still holding.
+	 *
+	 * Field defect (Engram #12547): once a bounded correction is admitted, the
+	 * candidate identity legitimately moves, and the provider issues its
+	 * finalize transition for that corrected target. A session that started the
+	 * review still holds the START-time immutable reviewer view, so comparing
+	 * it against the corrected projection reads as drift and no receipt is ever
+	 * minted — while a fresh process, which restores from the native descriptor,
+	 * finalizes the very same lineage successfully. This makes the in-session
+	 * path behave like that already-correct fresh-process path.
+	 *
+	 * This is a re-derivation, not a relaxation: the replacement is
+	 * materialized from Git and must match the provider descriptor exactly
+	 * (base tree, projection kind, changed-path manifest), and the caller still
+	 * asserts the binding afterwards. The immutable reviewer view is retired
+	 * here on purpose — the lenses that consumed it finished before the
+	 * correction.
+	 */
+	rebindForFinalizeFromNative(lineageId: string, contributorRoot: string, descriptor: NativeCandidateProjectionDescriptor): CandidateView {
+		const staleToken = this.lineages.get(lineageId);
+		const stale = staleToken === undefined ? undefined : this.records.get(staleToken);
+		this.projections.delete(lineageId);
+		if (stale !== undefined) {
+			this.remove(stale);
+			this.forget(stale);
+		}
+		return this.restoreForFinalizeFromNative(lineageId, contributorRoot, descriptor);
+	}
+
 	restoreForFinalizeFromNative(lineageId: string, contributorRoot: string, descriptor: NativeCandidateProjectionDescriptor): CandidateView {
 		this.restoreProjectionFromNative(lineageId, contributorRoot, descriptor);
 		const projection = this.resolveProjection(lineageId, contributorRoot);
