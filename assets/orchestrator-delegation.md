@@ -275,6 +275,21 @@ For generic non-SDD technical verification that executes or delegates commands, 
 
 Use `sdd-explore` and `sdd-verify` only inside SDD. Use review lenses only inside explicit review transactions.
 
+#### Allowed edit surfaces (MANDATORY)
+
+The bounded writer refuses to write outside the exact allowed edit surfaces and stops with `status: interaction_required` when they are missing. The parent owns that input. Deriving it is part of planning the delegation, not something the writer or the human can be left to supply.
+
+Before launching a bounded writer (`gentle-ai-worker`, a user-configured `worker`, or the native `Agent` fallback), derive the allowed edit surface from the task being delegated — the files the planned change must touch, plus the directories where the task authorizes new files — and pass it in the delegated prompt under an `## Allowed edit surfaces` heading, in the same exact-path form as `## Skills to load before work`:
+
+- exact repository-relative paths or narrow globs, one per line; never `.` and never a bare repository root;
+- pre-existing untracked targets the writer may write, listed explicitly;
+- the directories where new files are authorized, when the task requires new files;
+- nothing beyond the delegated task — a surface wider than the task is the same defect as no surface at all.
+
+If the surface genuinely cannot be derived, do not launch the writer, and do not ask the human to author paths. Derive a candidate set first — the exact paths this task would touch — and present that enumerated list as an approve/decline choice under the Lossless Blocking Prompts rules above. A free-text question asking which paths or globs to authorize is never a valid escalation: it asks the human to invent the answer the parent is responsible for computing, in a layout they have no reason to know.
+
+Relay a writer's `interaction_required` payload about edit surfaces the same way: present its derived candidate paths as the choice, and add or drop paths only on the human's explicit instruction.
+
 #### Key Learnings closing block
 
 When delegating to a generic Explore/general worker (`gentle-ai-explore`, `gentle-ai-worker`, `gentle-ai-verify`) or their native `Agent` fallback, include the same `## Key Learnings` closing instruction in the delegated prompt: after the worker returns its normal result envelope or handoff, it closes its final response text with a `## Key Learnings` block of 1–5 numbered items, each a standalone factual sentence of at least 20 characters and at least 4 words, omitting the block when there is genuinely no reusable learning. The block layers on after the structured Return contract and does not alter its fields. This applies to final response text only — not intermediate tool output. The Engram memory provider automatically extracts and persists these items as passive capture; the worker does not parse the block or invoke passive-capture tools itself. This is separate from explicit `mem_save` artifact/decision persistence. Agents that must return strict JSON (review lenses, `review-refuter`, `review-validator`, Judgment Day judges and fix agent) never receive this closing instruction; their strict output shape is unchanged.

@@ -20,10 +20,10 @@ Use this agent only for scoped implementation work that is too large for the par
 Before repository work:
 
 1. Read every exact path under `## Skills to load before work` in the parent task. Do not rediscover the skill registry.
-2. Consume the parent-provided task, acceptance criteria, relevant prior context, exact allowed edit surfaces, and validation commands.
+2. Consume the parent-provided task, acceptance criteria, relevant prior context, exact allowed edit surfaces, and validation commands. The parent supplies the edit surfaces under `## Allowed edit surfaces` in the parent task; treat that section as the authoritative list.
 3. Inspect the working tree and preserve pre-existing changes. Writes may include pre-existing untracked targets explicitly listed by the parent and new files required by the delegated task, but only when they are inside the exact allowed edit surfaces.
 4. Preserve every unrelated tracked or untracked file. Do not edit, move, delete, stage, or otherwise alter anything outside the allowed edit surfaces.
-5. If scope, ownership, allowed edit surfaces, acceptance criteria, or another human choice is ambiguous, stop with `status: interaction_required`; do not guess.
+5. If scope, ownership, allowed edit surfaces, acceptance criteria, or another human choice is ambiguous, stop with `status: interaction_required`; do not guess. Escalate in the answerable shape required by the Interaction contract below: a derived candidate set the human can approve or narrow, never an open request for the human to author paths or globs.
 
 Do not read persistent memory for context. The parent selects and forwards relevant observations.
 
@@ -67,6 +67,10 @@ Run focused tests first. Broad suites, builds, formatters, or linters may run on
 
 When any human input is required, stop editing and return the full schema in the Return contract with `status: interaction_required` and the nested `interaction_required` payload completed. Populate the remaining fields with the work and evidence available at the stopping point.
 
+Every interaction must be answerable from the payload alone. State the concrete choices in `options` as a closed set the human can approve, decline, or select from, and never ask the human to author paths, globs, identifiers, or commands as free text.
+
+When the missing input is the allowed edit surface, derive the candidate set before stopping: put the exact repository-relative paths the delegated task would touch in `options`, and ask the human to approve that list or name which entries to drop. Present it as the derived answer, not as an example, and never as an open question about which paths or globs to authorize. If the delegated task gives no basis for even a candidate list, say that plainly in `reason` and name the missing evidence in `unblock_response`.
+
 Do not return `blocked` for a human decision and do not invent a second interaction shape.
 
 ## Return contract
@@ -92,7 +96,7 @@ skill_resolution: paths-injected | paths-invalid | none
 interaction_required: <include only when status is interaction_required>
   question: <same deterministic interaction question>
   reason: <same deterministic blocking reason>
-  options: <same meaningful choices and tradeoffs, when applicable>
+  options: <same closed set of concrete choices; for a missing edit surface, the derived candidate paths>
   unblock_response: <same exact context needed to continue>
 ```
 
