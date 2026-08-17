@@ -122,6 +122,7 @@ import {
 	nativeReviewLegacyAliasRepairAuthorization,
 	nativeReviewLegacyQuarantineAuthorization,
 	nativeReviewReconcileAuthorization,
+	nativeReviewRecoverAuthorization,
 	normalizeNativeReviewCwd,
 	NativeReviewCliError,
 	NativeReviewConsentBindingError,
@@ -2919,7 +2920,17 @@ async function authorizeDestructiveReviewOperation(
 	ctx: ExtensionContext,
 ): Promise<void> {
 	const parameters = parseReviewControllerParameters(parametersValue);
-	const isReset = parameters.operation === REVIEW_CONTROLLER_OPERATION.RESET || parameters.operation === REVIEW_CONTROLLER_OPERATION.RECOVER;
+	// RESET alone carries the legacy repository-wide challenge. Native compact-v2
+	// RECOVER has its own six-field contract and its own derived
+	// `gentle-ai.review-recovery-authorization/v1` binding, neither of which the
+	// legacy `repositoryId`/`commonDirHash`/`inventoryHash`/`confirmation` quartet
+	// can express. Native INSPECT never publishes that quartet either, so
+	// demanding it here made the only supported recovery flow unreachable
+	// (issue #212).
+	// RECOVER authorizes itself in `executeReviewControllerOperation`, the way
+	// REPAIR_LEGACY_ALIAS does, because its binding can only be derived from a
+	// fresh native target-status read.
+	const isReset = parameters.operation === REVIEW_CONTROLLER_OPERATION.RESET;
 	const maintenance = nativeMaintenanceOperation(parameters.operation);
 	if (!isReset && maintenance === undefined) return;
 	const input = parseControllerJson(requiredControllerString(parameters, "input"), parameters.operation);
@@ -5811,6 +5822,20 @@ async function executeReviewControllerOperation(
 	}
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.RECOVER) {
 		const input = parseControllerJson(requiredControllerString(parameters, "input"), parameters.operation);
+		// The authorization binding is Pi-derived, never caller-carried. It is
+		// recorded verbatim as a maintainer attestation, so accepting one the
+		// caller composed would let an unapproved actor sign the recovery edge.
+		if (input.maintainerAuthorization !== undefined) {
+			return {
+				operation: parameters.operation,
+				status: "blocked",
+				outcome: "native-recovery-caller-authorization-rejected",
+				native_operation: "review recover",
+				mutation_performed: false,
+				mutation_outcome: "none",
+				next_action: "resubmit-without-maintainer-authorization",
+			};
+		}
 		const missing = NATIVE_RECOVERY_INPUT.recover.filter((key) =>
 			key === "disposition"
 				? !["scope_changed", "invalidated", "escalated"].includes(input[key] as string)
@@ -5818,27 +5843,76 @@ async function executeReviewControllerOperation(
 		);
 		if (missing.length > 0) return await executeNativeRecoveryRoute(parameters.operation, "recover", input, defaultCwd, nativeReviewCli, pendingAuthorizations, signal);
 		if (nativeReviewCli?.targetStatus === undefined) return nativeStatusUnsupported(parameters.operation);
+		const frozenTarget = candidateViews?.hasProjection(String(input.predecessorLineage))
+			? candidateViews.resolveProjection(String(input.predecessorLineage), defaultCwd)
+			: undefined;
+		const statusRequest = {
+			cwd: defaultCwd,
+			lineageId: String(input.predecessorLineage),
+			...(frozenTarget?.committedOnly === true ? { baseRef: frozenTarget.baseCommit } : {}),
+			...(signal === undefined ? {} : { signal }),
+		};
 		let status: ReviewStatusV3;
 		try {
-			const frozenTarget = candidateViews?.hasProjection(String(input.predecessorLineage))
-				? candidateViews.resolveProjection(String(input.predecessorLineage), defaultCwd)
-				: undefined;
-			status = await nativeReviewCli.targetStatus({
-				cwd: defaultCwd,
-				lineageId: String(input.predecessorLineage),
-				...(frozenTarget?.committedOnly === true ? { baseRef: frozenTarget.baseCommit } : {}),
-				...(signal === undefined ? {} : { signal }),
-			});
+			status = await nativeReviewCli.targetStatus(statusRequest);
 		} catch (error) {
 			return nativeStatusFailed(parameters.operation, error);
 		}
-		if (status.action !== "recover" || status.actionDisposition === undefined || status.authority?.lineageId !== input.predecessorLineage || status.authority.revision !== input.expectedPredecessorRevision) {
+		const pinnedRecoveryStatus = (candidate: ReviewStatusV3): boolean =>
+			candidate.action === "recover"
+			&& candidate.actionDisposition === status.actionDisposition
+			&& candidate.authority?.lineageId === input.predecessorLineage
+			&& candidate.authority?.revision === input.expectedPredecessorRevision
+			&& candidate.targetIdentity === status.targetIdentity;
+		if (status.action !== "recover" || status.actionDisposition === undefined || status.authority?.lineageId !== input.predecessorLineage || status.authority.revision !== input.expectedPredecessorRevision || !isCanonicalProcessString(status.targetIdentity)) {
 			return { operation: parameters.operation, status: "blocked", outcome: "native-recovery-status-mismatch", mutation_performed: false, mutation_outcome: "none", result: status.raw, next_action: "follow-provider-target-status" };
 		}
 		if (input.disposition !== status.actionDisposition) {
 			return { operation: parameters.operation, status: "blocked", outcome: "native-recovery-disposition-mismatch", mutation_performed: false, mutation_outcome: "none", provider_disposition: status.actionDisposition, next_action: "resubmit-with-provider-disposition" };
 		}
-		return await executeNativeRecoveryRoute(parameters.operation, "recover", { ...input, disposition: status.actionDisposition }, defaultCwd, nativeReviewCli, pendingAuthorizations, signal);
+		const recoverAuthorization = nativeReviewRecoverAuthorization({
+			predecessorLineage: String(input.predecessorLineage),
+			expectedPredecessorRevision: String(input.expectedPredecessorRevision),
+			targetIdentity: status.targetIdentity,
+			actor: String(input.actor),
+			reason: String(input.reason),
+		});
+		if (context?.hasUI !== true) throw new Error("Review controller RECOVER requires fresh explicit authorization through the interactive Pi UI; headless execution fails closed");
+		const approved = await context.ui.confirm(
+			"Authorize destructive review authority RECOVER?",
+			[
+				"Operation: RECOVER",
+				`Provider-selected disposition: ${status.actionDisposition}`,
+				"Exact published authorization binding:",
+				recoverAuthorization,
+				`The native command creates one auditable successor authority (${String(input.successorLineage)}) for this exact predecessor and target identity; the predecessor stays untouched.`,
+			].join("\n"),
+		);
+		if (!approved) throw new Error("Review controller RECOVER was not explicitly authorized");
+		// Time-of-check to time-of-use: the human deliberates for an unbounded
+		// interval, and the authority can advance, be recovered by someone else, or
+		// stop being recovery-eligible while they do. The approval and the derived
+		// binding are pinned to the pre-approval read, so the authority is read once
+		// more and must still match it exactly before anything mutates.
+		let confirmedStatus: ReviewStatusV3;
+		try {
+			confirmedStatus = await nativeReviewCli.targetStatus(statusRequest);
+		} catch (error) {
+			return nativeStatusFailed(parameters.operation, error);
+		}
+		if (!pinnedRecoveryStatus(confirmedStatus)) {
+			return {
+				operation: parameters.operation,
+				status: "blocked",
+				outcome: "native-recovery-authority-changed",
+				native_operation: "review recover",
+				mutation_performed: false,
+				mutation_outcome: "none",
+				result: confirmedStatus.raw,
+				next_action: "reinspect-and-reauthorize-recovery",
+			};
+		}
+		return await executeNativeRecoveryRoute(parameters.operation, "recover", { ...input, disposition: status.actionDisposition, maintainerAuthorization: recoverAuthorization }, defaultCwd, nativeReviewCli, pendingAuthorizations, signal);
 	}
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.RESET) {
 		const input = parseControllerJson(requiredControllerString(parameters, "input"), parameters.operation);
@@ -7241,7 +7315,7 @@ function createGentleAiExtensionForTesting(
 			"Use RECONCILE_AUTHORITY only to quarantine one invalid native recovery successor. Supply exact predecessorLineage, expectedPredecessorRevision, successorLineage, expectedSuccessorRevision, actor, and reason values; Pi derives and displays the seven-line native authorization binding for fresh UI approval. The predecessor stays untouched, native returns the durable audit record, and Pi never falls back to RESET or RECOVER.",
 			"Use ABANDON or QUARANTINE_LEGACY only after an explicit user decision and with exact native inputs. ABANDON needs lineage, expectedRevision, snapshotIdentity, capturedLensResults, findingsPresent, evidenceRecordsPresent, actor, and reason; QUARANTINE_LEGACY accepts only the published malformed freeze-findings diagnostic/disposition. A dual reconciliation may supply only anomalies `unchanged_target,malformed_recovery_authorization` in that exact order. Use REPAIR_LEGACY_ALIAS only with lineage, actor, and reason: Pi freshly reads native inventory and derives repository, revision, diagnostic, disposition, and the exact eight-line binding before interactive approval. `review dispose-result` is unsupported pending design.",
 			"Lens, refuter, and validator verdicts are admitted natively, never Pi-authored: FINALIZE routes provider --materialize lens slots through the host relay, executes provider-rendered self-contained role vectors verbatim, and runs the provider's own review.finalize transition (captured-results discovery). Call FINALIZE with a JSON string carrying only the negotiated collection answers: correction_line_forecast for the pre-edit forecast, validation for the targeted validation document the exact collection input requests, and final_evidence paired with exactly one of final_verification_passed or final_verification_outcome (passed, verification_failed, procedural_tooling_failed). Correction evidence is captured natively before STATUS can expose targeted validation. When the provider offers host-relay lens slots, FINALIZE first returns a `reviewer-model-run-forecast` naming the lenses and the real model runs it would spend; re-run it with `reviewer_run_acknowledged: true` to authorize exactly that reviewer work. Use ADVANCE only for explicit graph-v1 Judgment Day.",
-			"For blocked-legacy or blocked-mixed, do not call START repeatedly. Explain invalidation, request explicit user authorization for the exact reset_request challenge, then call RESET or RECOVER only after authorization. RESET and RECOVER_LOCK route to audited native `gentle-ai review reclaim` and RECOVER routes to native `gentle-ai review recover`; negotiated target status supplies the sole accepted recovery disposition, and a caller-supplied substitute is rejected. Treat a native-input-required envelope as a request for exact values, never as permission to invent them. After a committed native recovery record, INSPECT before any fresh ordinary START.",
+			"For blocked-legacy or blocked-mixed, do not call START repeatedly. Explain invalidation, request explicit user authorization, then call RESET or RECOVER only after authorization. RESET and RECOVER_LOCK route to audited native `gentle-ai review reclaim`; only RESET carries the legacy repositoryId, commonDirHash, inventoryHash, and confirmation challenge. RECOVER routes to native `gentle-ai review recover` with exactly six inputs: predecessorLineage, expectedPredecessorRevision, successorLineage, disposition, actor, and reason. Never send RECOVER the reset challenge and never send it a maintainerAuthorization: Pi reads fresh native target status, pins the predecessor lineage, revision, provider-selected disposition, and target identity, derives the exact six-line native authorization binding, displays it for fresh UI approval, and re-reads status before mutating. Negotiated target status supplies the sole accepted recovery disposition, and a caller-supplied substitute is rejected. Treat a native-input-required envelope as a request for exact values, never as permission to invent them. After a committed native recovery record, INSPECT before any fresh ordinary START.",
 			"A consent-required START returns the complete provider envelope and an opaque consent_binding, then stops. The parent presents and localizes that envelope without changing machine tokens, commands, target IDs, or invocations. After one explicit human answer, call answer-consent exactly once with a JSON string containing only consentBinding and answer (`granted` or `declined`). A reported lineage_created false or pre-authority validation error proves no lineage was created. After ambiguous START, answer-consent, or FINALIZE output, the controller calls target-scoped native status first and returns only its declared action. Never infer or prescribe replay unless native explicitly reports exact_replay_safe for the same canonical request and required lineage.",
 			"Use gentle_review for bounded review transaction operations and exact lifecycle validation; never fabricate bash tool metadata or a separate gate target.",
 		],

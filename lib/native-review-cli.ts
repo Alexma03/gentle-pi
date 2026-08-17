@@ -1829,6 +1829,32 @@ export function nativeReviewLegacyQuarantineAuthorization(request: Pick<NativeRe
 	].join("\n");
 }
 
+/**
+ * The exact native `gentle-ai.review-recovery-authorization/v1` binding for one
+ * recovery edge.
+ *
+ * Native `review recover` accepts a caller-supplied authorization only when it
+ * reproduces this binding byte for byte, because it is copied verbatim into the
+ * recovery provenance and read afterwards as a maintainer attestation. Pi
+ * therefore derives it from freshly read native target status and never
+ * forwards a caller-supplied one: a wrong binding is worse than an absent one,
+ * since an absent field cannot lie about who approved what.
+ *
+ * `targetIdentity` is the live target identity the provider itself publishes in
+ * the `review.recover` eligibility binding (`status.target_identity`), which is
+ * the identity the successor's initial snapshot takes.
+ */
+export function nativeReviewRecoverAuthorization(request: Pick<NativeReviewRecoverRequest, "predecessorLineage" | "expectedPredecessorRevision" | "actor" | "reason"> & { targetIdentity: string }): string {
+	return [
+		"gentle-ai.review-recovery-authorization/v1",
+		`predecessor_lineage=${request.predecessorLineage}`,
+		`predecessor_revision=${request.expectedPredecessorRevision}`,
+		`target_identity=${request.targetIdentity}`,
+		`actor=${request.actor.trim()}`,
+		`reason=${request.reason.trim()}`,
+	].join("\n");
+}
+
 export function nativeReviewReconcileAuthorization(request: Pick<NativeReviewReconcileAuthorityRequest, "predecessorLineage" | "expectedPredecessorRevision" | "successorLineage" | "expectedSuccessorRevision" | "actor" | "reason" | "anomalies">): string {
 	return [
 		"gentle-ai.review-reconcile-authorization/v1",

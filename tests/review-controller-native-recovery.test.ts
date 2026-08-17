@@ -124,6 +124,26 @@ const RECONCILE_AUTHORIZATION = [
 	"reason=invalid recovery edge",
 ].join("\n");
 const COMBINED_RECONCILE_AUTHORIZATION = `${RECONCILE_AUTHORIZATION}\nanomalies=${COMBINED_RECONCILE_ANOMALIES}`;
+const RECOVER_TARGET_IDENTITY = `sha256:${"e".repeat(64)}`;
+// The six canonical native recovery inputs, and nothing else. INSPECT never
+// publishes the legacy RESET quartet for a compact-v2 recovery, so this is the
+// complete request a maintainer can actually assemble (issue #212).
+const RECOVER_INPUT = {
+	predecessorLineage: "broken",
+	expectedPredecessorRevision: "rev-1",
+	successorLineage: "successor",
+	disposition: "invalidated",
+	actor: "maintainer",
+	reason: "invalid authority",
+} as const;
+const RECOVER_AUTHORIZATION = [
+	"gentle-ai.review-recovery-authorization/v1",
+	"predecessor_lineage=broken",
+	"predecessor_revision=rev-1",
+	`target_identity=${RECOVER_TARGET_IDENTITY}`,
+	"actor=maintainer",
+	"reason=invalid authority",
+].join("\n");
 
 function scratchDir(prefix: string): string {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -133,8 +153,9 @@ function scratchDir(prefix: string): string {
 
 interface RecordedNativeCall { operation: "reclaim" | "recover" | "reconcileAuthority" | "abandon" | "quarantineLegacy"; request: Record<string, unknown>; }
 
-function fakeRecoveryNative(record: Record<string, unknown>): { native: NativeReviewCli; calls: RecordedNativeCall[] } {
+function fakeRecoveryNative(record: Record<string, unknown>): { native: NativeReviewCli; calls: RecordedNativeCall[]; statusReads: Array<string | undefined> } {
 	const calls: RecordedNativeCall[] = [];
+	const statusReads: Array<string | undefined> = [];
 	const native = {
 		async reclaim(request: Record<string, unknown>) {
 			calls.push({ operation: "reclaim", request });
@@ -157,14 +178,23 @@ function fakeRecoveryNative(record: Record<string, unknown>): { native: NativeRe
 			return { record };
 		},
 		async targetStatus(request: { lineageId?: string }) {
-			return {
-				action: "recover",
-				actionDisposition: "invalidated",
-				authority: { lineageId: request.lineageId ?? "broken", revision: "rev-1" },
-			} as unknown;
+			statusReads.push(request.lineageId);
+			return recoveryTargetStatus(request.lineageId ?? "broken");
 		},
 	} as unknown as NativeReviewCli;
-	return { native, calls };
+	return { native, calls, statusReads };
+}
+
+/** One recovery-eligible native target status, shaped as the provider publishes it. */
+function recoveryTargetStatus(lineageId: string, overrides: Record<string, unknown> = {}): unknown {
+	return {
+		action: "recover",
+		actionDisposition: "invalidated",
+		authority: { lineageId, revision: "rev-1" },
+		targetIdentity: RECOVER_TARGET_IDENTITY,
+		raw: { action: "recover", target_identity: RECOVER_TARGET_IDENTITY },
+		...overrides,
+	};
 }
 
 async function runControllerOperation(
@@ -182,6 +212,39 @@ async function runControllerOperation(
 		signal,
 	);
 }
+
+/**
+ * The registered `gentle_review` tool, driven exactly as Pi drives it. RECOVER
+ * regressions hide from `executeReviewControllerOperation` alone, because the
+ * defect in issue #212 lived in the authorization preflight the tool runs first.
+ */
+function recoveryController(native: NativeReviewCli, prefix: string): (id: string, parameters: Record<string, unknown>, context: ExtensionContext) => Promise<Record<string, unknown>> {
+	const tools = new Map<string, { execute: (id: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }>();
+	const pi = { on() {}, registerTool(definition: { name: string; execute: never }) { tools.set(definition.name, definition as never); }, registerCommand() {} } as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: native })(pi);
+	const controller = tools.get("gentle_review");
+	assert.ok(controller);
+	const cwd = scratchDir(prefix);
+	return async (id, parameters, context) => {
+		const result = await controller.execute(id, parameters, undefined, undefined, { ...context, cwd } as unknown as ExtensionContext) as { details: Record<string, unknown> };
+		return result.details;
+	};
+}
+
+/** An interactive Pi context that records every prompt it is shown. */
+function interactiveContext(prompts: string[], approve = true): ExtensionContext {
+	return {
+		hasUI: true,
+		ui: {
+			async confirm(_title: string, message: string) {
+				prompts.push(message);
+				return approve;
+			},
+		},
+	} as unknown as ExtensionContext;
+}
+
+const HEADLESS_CONTEXT = { hasUI: false, ui: { confirm: async () => true } } as unknown as ExtensionContext;
 
 test("native reclaim wrapper issues the exact review reclaim command and returns the audit record", async () => {
 	const { adapter, calls } = queuedAdapter([VERSION_219, { stdout: JSON.stringify(RECLAIM_RECORD) }]);
@@ -619,24 +682,23 @@ test("RESET without a native client fails closed as unavailable", async () => {
 	assert.equal(details.mutation_performed, false);
 });
 
-test("RECOVER maps to native review recover with the successor authority binding", async () => {
-	const { native, calls } = fakeRecoveryNative(RECOVER_RECORD);
-	const details = await runControllerOperation({
-		operation: "recover",
-		input: JSON.stringify({
-			repositoryId: "repo-id",
-			commonDirHash: "c".repeat(64),
-			inventoryHash: "d".repeat(64),
-			confirmation: "DESTROY REVIEW AUTHORITY repo-id",
-			predecessorLineage: "broken",
-			expectedPredecessorRevision: "rev-1",
-			successorLineage: "successor",
-			disposition: "invalidated",
-			actor: "maintainer",
-			reason: "invalid authority",
-			maintainerAuthorization: "binding",
-		}),
-	}, native);
+// Issue #212: `authorizeDestructiveReviewOperation` classified native RECOVER as
+// a legacy repository-wide RESET, so a correct six-field native recovery was
+// refused with "Review controller recover requires an exact string repositoryId"
+// before it ever reached the native router. INSPECT does not publish that
+// quartet for compact-v2 recovery, which left the only supported flow
+// unreachable. Reported by @PwnLabsmx, independently reproduced on macOS by
+// @e-Evolution and again by the maintainer.
+//
+// Every RECOVER test below drives the registered tool rather than
+// `executeReviewControllerOperation`, because the defect lived in the
+// authorization preflight the tool runs before that function.
+test("RECOVER accepts the six canonical native inputs without the legacy RESET challenge", async () => {
+	const { native, calls, statusReads } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-six-field-");
+	const prompts: string[] = [];
+	const details = await run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, interactiveContext(prompts));
+	assert.equal(details.status, undefined, "the native six-field recovery contract is complete on its own");
 	assert.equal(details.native_operation, "review recover");
 	assert.equal(details.mutation_performed, true);
 	assert.deepEqual(details.result, RECOVER_RECORD);
@@ -646,26 +708,144 @@ test("RECOVER maps to native review recover with the successor authority binding
 	assert.equal(calls[0]?.request.expectedPredecessorRevision, "rev-1");
 	assert.equal(calls[0]?.request.successorLineage, "successor");
 	assert.equal(calls[0]?.request.disposition, "invalidated");
-	assert.equal(calls[0]?.request.maintainerAuthorization, "binding");
+	// Pi derives the binding; it is never the caller's to supply.
+	assert.equal(calls[0]?.request.maintainerAuthorization, RECOVER_AUTHORIZATION);
+	assert.equal(prompts.length, 1);
+	assert.match(prompts[0]!, /gentle-ai\.review-recovery-authorization\/v1/);
+	assert.match(prompts[0]!, new RegExp(`target_identity=${RECOVER_TARGET_IDENTITY}`));
+	assert.match(prompts[0]!, /Provider-selected disposition: invalidated/);
+	assert.equal(prompts[0]!.includes("repositoryId"), false, "the legacy reset challenge has no place in native recovery");
+	// Status is read before approval and read again before mutation.
+	assert.deepEqual(statusReads, ["broken", "broken"]);
+});
+
+test("RECOVER rejects a caller-supplied maintainerAuthorization before reading or prompting", async () => {
+	const { native, calls, statusReads } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-caller-authorization-");
+	const prompts: string[] = [];
+	const details = await run(
+		"recover",
+		{ operation: "recover", input: JSON.stringify({ ...RECOVER_INPUT, maintainerAuthorization: RECOVER_AUTHORIZATION }) },
+		interactiveContext(prompts),
+	);
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-recovery-caller-authorization-rejected");
+	assert.equal(details.mutation_performed, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.equal(details.next_action, "resubmit-without-maintainer-authorization");
+	assert.equal(calls.length, 0);
+	assert.deepEqual(statusReads, []);
+	assert.deepEqual(prompts, []);
+});
+
+test("RECOVER fails closed without an interactive Pi UI", async () => {
+	const { native, calls, statusReads } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-headless-");
+	await assert.rejects(
+		run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, HEADLESS_CONTEXT),
+		/Review controller RECOVER requires fresh explicit authorization through the interactive Pi UI; headless execution fails closed/,
+	);
+	assert.equal(calls.length, 0);
+	// Fresh native evidence is read, but nothing mutates without a human.
+	assert.deepEqual(statusReads, ["broken"]);
+});
+
+test("RECOVER refuses to mutate when the human declines the derived binding", async () => {
+	const { native, calls } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-declined-");
+	const prompts: string[] = [];
+	await assert.rejects(
+		run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, interactiveContext(prompts, false)),
+		/Review controller RECOVER was not explicitly authorized/,
+	);
+	assert.equal(prompts.length, 1);
+	assert.equal(calls.length, 0);
+});
+
+test("RECOVER refuses a foreign, stale, or no-longer-recoverable authority before prompting", async () => {
+	for (const [label, status] of [
+		["foreign", recoveryTargetStatus("someone-elses-lineage")],
+		["stale", recoveryTargetStatus("broken", { authority: { lineageId: "broken", revision: "rev-2" } })],
+		["not recovery-eligible", recoveryTargetStatus("broken", { action: "start", actionDisposition: undefined })],
+	] as const) {
+		const calls: Record<string, unknown>[] = [];
+		const native = {
+			async recover(request: Record<string, unknown>) { calls.push(request); return { record: RECOVER_RECORD }; },
+			async targetStatus() { return status; },
+		} as unknown as NativeReviewCli;
+		const run = recoveryController(native, `gentle-pi-recover-${label.replace(/[^a-z]+/g, "-")}-`);
+		const prompts: string[] = [];
+		const details = await run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, interactiveContext(prompts));
+		assert.equal(details.status, "blocked", label);
+		assert.equal(details.outcome, "native-recovery-status-mismatch", label);
+		assert.equal(details.mutation_performed, false, label);
+		assert.equal(calls.length, 0, label);
+		assert.deepEqual(prompts, [], label);
+	}
+});
+
+test("RECOVER refuses a disposition the provider did not select", async () => {
+	const { native, calls } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-disposition-");
+	const prompts: string[] = [];
+	const details = await run("recover", { operation: "recover", input: JSON.stringify({ ...RECOVER_INPUT, disposition: "escalated" }) }, interactiveContext(prompts));
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-recovery-disposition-mismatch");
+	assert.equal(details.provider_disposition, "invalidated");
+	assert.equal(details.mutation_performed, false);
+	assert.equal(calls.length, 0);
+	assert.deepEqual(prompts, []);
+});
+
+// The human deliberates for an unbounded interval. An authority that advanced
+// while they were deciding was never the one they approved, so the approval and
+// its derived binding are pinned and re-checked against a fresh read.
+test("RECOVER refuses to mutate when the authority changes between approval and mutation", async () => {
+	for (const [label, drifted] of [
+		["revision advanced", recoveryTargetStatus("broken", { authority: { lineageId: "broken", revision: "rev-2" } })],
+		["target identity moved", recoveryTargetStatus("broken", { targetIdentity: `sha256:${"f".repeat(64)}` })],
+		["disposition changed", recoveryTargetStatus("broken", { actionDisposition: "escalated" })],
+		["no longer recoverable", recoveryTargetStatus("broken", { action: "start", actionDisposition: undefined })],
+	] as const) {
+		const calls: Record<string, unknown>[] = [];
+		let reads = 0;
+		const native = {
+			async recover(request: Record<string, unknown>) { calls.push(request); return { record: RECOVER_RECORD }; },
+			async targetStatus() {
+				reads += 1;
+				return reads === 1 ? recoveryTargetStatus("broken") : drifted;
+			},
+		} as unknown as NativeReviewCli;
+		const run = recoveryController(native, `gentle-pi-recover-toctou-${label.replace(/[^a-z]+/g, "-")}-`);
+		const prompts: string[] = [];
+		const details = await run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, interactiveContext(prompts));
+		assert.equal(prompts.length, 1, label);
+		assert.equal(reads, 2, label);
+		assert.equal(details.status, "blocked", label);
+		assert.equal(details.outcome, "native-recovery-authority-changed", label);
+		assert.equal(details.mutation_performed, false, label);
+		assert.equal(details.mutation_outcome, "none", label);
+		assert.equal(details.next_action, "reinspect-and-reauthorize-recovery", label);
+		assert.equal(calls.length, 0, label);
+	}
 });
 
 test("RECOVER surfaces every missing successor input including an unsupported disposition", async () => {
-	const { native, calls } = fakeRecoveryNative(RECOVER_RECORD);
-	const details = await runControllerOperation({
-		operation: "recover",
-		input: JSON.stringify({
-			repositoryId: "repo-id",
-			commonDirHash: "c".repeat(64),
-			inventoryHash: "d".repeat(64),
-			confirmation: "DESTROY REVIEW AUTHORITY repo-id",
-			predecessorLineage: "broken",
-			disposition: "not-a-disposition",
-		}),
-	}, native);
+	const { native, calls, statusReads } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-missing-input-");
+	const prompts: string[] = [];
+	const details = await run(
+		"recover",
+		{ operation: "recover", input: JSON.stringify({ predecessorLineage: "broken", disposition: "not-a-disposition" }) },
+		interactiveContext(prompts),
+	);
 	assert.equal(details.outcome, "native-input-required");
 	assert.equal(details.native_operation, "review recover");
+	// The missing inputs are the native six, never the legacy reset quartet.
 	assert.deepEqual(details.missing_input, ["expectedPredecessorRevision", "successorLineage", "disposition", "actor", "reason"]);
 	assert.equal(calls.length, 0);
+	assert.deepEqual(statusReads, []);
+	assert.deepEqual(prompts, []);
 });
 
 test("RECONCILE_AUTHORITY routes one exact native mutation and returns its audit record", async () => {
@@ -813,6 +993,48 @@ test("destructive RESET still fails closed without fresh interactive authorizati
 		/interactive Pi UI.*fails closed/i,
 	);
 	assert.equal(calls.length, 0);
+});
+
+// Regression guard for issue #212: separating RECOVER out must leave the legacy
+// repository-wide RESET challenge exactly as it was.
+test("RESET still demands the complete legacy repository challenge and its own fresh approval", async () => {
+	const tools = new Map<string, { execute: (id: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }>();
+	const pi = { on() {}, registerTool(definition: { name: string; execute: never }) { tools.set(definition.name, definition as never); }, registerCommand() {} } as unknown as ExtensionAPI;
+	const { native, calls } = fakeRecoveryNative(RECLAIM_RECORD);
+	createGentleAiExtension({ nativeReviewCli: native })(pi);
+	const controller = tools.get("gentle_review");
+	assert.ok(controller);
+	const cwd = scratchDir("gentle-pi-native-reset-challenge-");
+	const challenge = {
+		repositoryId: "repo-id",
+		commonDirHash: "c".repeat(64),
+		inventoryHash: "d".repeat(64),
+		confirmation: "DESTROY REVIEW AUTHORITY repo-id",
+	};
+	const reclaim = { lineage: "stuck", actor: "maintainer", reason: "incomplete" };
+	for (const key of ["repositoryId", "commonDirHash", "inventoryHash", "confirmation"] as const) {
+		const incomplete: Record<string, unknown> = { ...challenge, ...reclaim };
+		delete incomplete[key];
+		await assert.rejects(
+			controller.execute(`reset-missing-${key}`, { operation: "reset", input: JSON.stringify(incomplete) }, undefined, undefined, {
+				cwd, hasUI: true, ui: { confirm: async () => true },
+			} as unknown as ExtensionContext),
+			new RegExp(`Review controller reset requires an exact string ${key}`),
+		);
+	}
+	assert.equal(calls.length, 0);
+	let prompt = "";
+	const approved = await controller.execute("approved-reset", { operation: "reset", input: JSON.stringify({ ...challenge, ...reclaim }) }, undefined, undefined, {
+		cwd,
+		hasUI: true,
+		ui: { confirm: async (_title: string, message: string) => { prompt = message; return true; } },
+	} as unknown as ExtensionContext) as { details: Record<string, unknown> };
+	assert.match(prompt, /Repository: repo-id/);
+	assert.match(prompt, /Exact challenge: DESTROY REVIEW AUTHORITY repo-id/);
+	assert.match(prompt, /This invalidates all prior review authority for this repository\./);
+	assert.equal(approved.details.mutation_performed, true);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]?.operation, "reclaim");
 });
 
 test("RECONCILE_AUTHORITY requires fresh Pi approval for the exact seven-line binding", async () => {
