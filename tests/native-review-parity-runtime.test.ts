@@ -89,6 +89,40 @@ interface ReviewGateResult {
 	context: ReviewGateContext;
 }
 
+// Every test in this file drives the real pinned binary through a full review
+// lifecycle, and gentle-ai v2.4.0 made receipt-driven development opt-in: an
+// install whose global mode was never set now resolves to off, and START is
+// rejected before it reaches any of the behavior these tests exist to check.
+//
+// Until that release these tests had a silent dependency on whatever the
+// operator happened to have configured. That is not a new hazard introduced by
+// the pin — it was always there — but the flip is what made it visible: the
+// suite was green on a machine with review enabled and red on a fresh CI
+// runner, from identical bytes. A test whose result depends on unversioned
+// machine state is not evidence either way.
+//
+// So each test owns a sandbox HOME and opts in the same way a user does,
+// exactly as gentle-ai did for its own lifecycle fixtures in the commit that
+// flipped the default. The process-wide HOME is what the extension-registered
+// controller path needs, because it spawns the CLI with the inherited
+// environment rather than an explicit one; it is restored afterwards.
+async function reviewEnabledHome(t: baseTest.TestContext): Promise<string> {
+	const home = await mkdtemp(join(tmpdir(), "gentle-pi-review-home-"));
+	const previousHome = process.env.HOME;
+	process.env.HOME = home;
+	t.after(async () => {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		await rm(home, { recursive: true, force: true });
+	});
+	const enabled = await run(binary, ["review", "mode", "enable", "--scope", "global", "--json"], packageRoot, false, { ...process.env, HOME: home });
+	// Assert the opt-in landed rather than assuming it. A silently ineffective
+	// enable would put these tests straight back to depending on ambient state,
+	// which is the exact failure this helper exists to remove.
+	assert.match(enabled.stdout, /"effective": "on"/, "the sandbox HOME must have receipt-driven development explicitly enabled");
+	return home;
+}
+
 async function run(command: string, arguments_: readonly string[], cwd: string, allowFailure = false, environment?: NodeJS.ProcessEnv): Promise<CommandResult> {
 	try {
 		const result = await execFileAsync(command, [...arguments_], { cwd, encoding: "utf8", shell: false, env: environment });
@@ -204,6 +238,7 @@ async function finalizeEmptyReview(repository: string, artifacts: string, starte
 }
 
 test("official pinned package runtime authorizes an unchanged linked-view candidate and denies a changed staging tree", async (t) => {
+	await reviewEnabledHome(t);
 	assert.equal(createHash("sha256").update(await readFile(binary)).digest("hex"), OFFICIAL_BINARY_SHA256);
 	assert.deepEqual(await run(binary, ["version"], packageRoot), { exitCode: 0, stdout: `gentle-ai ${GENTLE_AI_VERSION}\n`, stderr: "" });
 
@@ -285,6 +320,7 @@ test("official pinned package runtime authorizes an unchanged linked-view candid
 });
 
 test("official pinned package runtime keeps frozen candidate lineages and receipts isolated across replay and replacement", async (t) => {
+	await reviewEnabledHome(t);
 	const workspace = await mkdtemp(join(tmpdir(), "gentle-pi-v215-lineage-"));
 	const repository = join(workspace, "repository");
 	const artifacts = join(workspace, "artifacts");
@@ -379,6 +415,7 @@ test("official pinned package runtime keeps frozen candidate lineages and receip
 });
 
 test("registered gentle_review START materializes a safe internal skill symlink and cleans pending consent on session shutdown", async (t) => {
+	await reviewEnabledHome(t);
 	const workspace = await mkdtemp(join(tmpdir(), "gentle-pi-v215-symlink-candidate-"));
 	const repository = join(workspace, "repository");
 	t.after(async () => rm(workspace, { recursive: true, force: true }));
