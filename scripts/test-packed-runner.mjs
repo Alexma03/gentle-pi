@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const temporary = mkdtempSync(join(tmpdir(), "gentle-pi-packed-runner-"));
@@ -58,7 +59,20 @@ try {
 	if (versions.length !== 1) throw new Error("packed install did not contain exactly one package-local Gentle AI version");
 	const executable = join(packageRoot, ".gentle-ai", versions[0].name, process.platform === "win32" ? "gentle-ai.exe" : "gentle-ai");
 	const capabilities = JSON.parse(execFileSync(executable, ["review", "capabilities", "--contract", "gentle-ai.review-integration/v2"], { cwd: installDirectory, encoding: "utf8" }));
-	if (!["gentle-ai.review-integration.capabilities/v2"].includes(capabilities.schema) || capabilities.contract !== "gentle-ai.review-integration/v2" || capabilities.package?.version !== versions[0].name.slice(1)) throw new Error("package-local Gentle AI returned incompatible capabilities");
+	// Decode with the PACKED consumer's own decoder rather than comparing the
+	// schema string against a list hand-copied into this script. The copy was a
+	// second, silent pin: it accepted only `capabilities/v2`, so the moment the
+	// pinned provider advertised an additive minor this E2E rejected a pairing
+	// that gentle-pi reads correctly, and it would have done so again on the
+	// next minor. Using the shipped decoder makes the assertion what it always
+	// meant to be — the packed consumer can read the packed provider — and it
+	// checks the whole envelope (protocol major/minor, required operations,
+	// gates, projections, advertised schemas, mandatory features, and the
+	// self-reported executable digest) instead of one string.
+	const { decodeReviewCapabilitiesV2 } = await import(pathToFileURL(join(packageRoot, "runtime", "review-integration-v2.mjs")).href);
+	const executableDigest = `sha256:${createHash("sha256").update(readFileSync(executable)).digest("hex")}`;
+	const decoded = decodeReviewCapabilitiesV2(capabilities, executableDigest);
+	if (decoded.contract !== "gentle-ai.review-integration/v2" || decoded.packageVersion !== versions[0].name.slice(1)) throw new Error("package-local Gentle AI returned incompatible capabilities");
 	const packageManifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 	process.stdout.write(`packed runner E2E passed (gentle-pi ${packageManifest.version ?? "unknown"}; Gentle AI ${capabilities.package?.version ?? "unknown"}; ${result.states.length} states)\n`);
 } finally {

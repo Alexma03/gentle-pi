@@ -100,7 +100,7 @@ export class ReviewHostRelayError extends Error {
 // never version-sniffs. Two typed refusal classes are distinguished:
 //
 //   unknown-flag  the Go flag package's exact refusal for a flag the binary
-//                 does not define (an old binary, e.g. the pinned 2.2.3) —
+//                 does not define (any binary older than v2.4.0) —
 //                 the relay is unavailable and existing behavior stays
 //                 untouched.
 //   handshake     the provider's pre-authority pi admission refusal — always

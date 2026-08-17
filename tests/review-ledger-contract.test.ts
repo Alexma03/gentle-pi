@@ -270,7 +270,7 @@ test("orchestrator, skill, and README agree on compact facade and compatibility"
 
 test("README documents the exact native pairing and authority-preserving rollback boundary", () => {
 	const content = read(README);
-	assert.match(content, /package-local Gentle AI v2\.2\.3 executable/i);
+	assert.match(content, /package-local Gentle AI v2\.4\.0 executable/i);
 	assert.match(content, /independently hashes it[\s\S]*negotiates `gentle-ai\.review-integration\/v2`/i);
 	assert.match(content, /Capabilities are cached by that executable digest/i);
 	assert.match(content, /Every START, target status, FINALIZE, validate, and BIND-SDD request passes the same contract identifier/i);

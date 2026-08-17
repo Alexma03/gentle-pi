@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import {
 	NATIVE_REVIEW_ERROR_CODE,
+	REVIEW_CONSENT_NOTICES,
 	NativeReviewCliError,
 	NativeReviewConsentBindingError,
 	NativeReviewConsentRequiredError,
@@ -257,6 +258,29 @@ test("START tolerates the exact review-consent-skipped stderr line only when the
 	const notTolerated = queuedAdapter([DARK_VERSION, { stdout: JSON.stringify(start), stderr: notice }]);
 	await assert.rejects(
 		() => new NativeReviewCliV213(notTolerated.adapter).start({ cwd: "/repo" }),
+		(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.UNEXPECTED_STDERR,
+	);
+});
+
+// gentle-ai v2.4.0 (feat(review)!: make receipt-driven development opt-in)
+// DELETED reviewConsentSkippedDefaultProvenance. It existed to admit reviews
+// were on because nobody chose; under opt-in RDD a default-source clone is
+// refused before the consent ceremony runs, so the pinned binary can never
+// emit it. The allowlist is a statement about what the PINNED binary writes
+// while still succeeding, so a line no pinned binary can produce does not
+// belong in it: keeping it would silently tolerate that exact text from
+// anywhere else in a START's stderr.
+test("the tolerated-stderr allowlist carries no line the pinned binary cannot emit", async () => {
+	assert.ok(
+		!REVIEW_CONSENT_NOTICES.some((notice) => notice.startsWith("Reviews are on by default")),
+		"the default-provenance notice was deleted upstream in v2.4.0 and must not stay tolerated",
+	);
+
+	const start = JSON.parse(START.stdout) as Record<string, unknown>;
+	const deleted = "Reviews are on by default; this was never explicitly chosen. Run 'gentle-ai review mode enable' to make reviews an explicit choice, or 'gentle-ai review mode disable' to turn them off.";
+	const queue = queuedAdapter([CAPABLE_VERSION_LINE, { stdout: JSON.stringify(start), stderr: deleted }]);
+	await assert.rejects(
+		() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }),
 		(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.UNEXPECTED_STDERR,
 	);
 });
@@ -527,15 +551,28 @@ test("kill-switch: a global off names the native global-scope command, never Pi'
 	assert.ok(!/\/gentle:review-mode enable to turn/.test(String(result.next_action)), "a global off must never be sent to Pi's clone-scope command");
 });
 
-// Parity with reviewModeScopeForSource: the default source expresses no opinion
-// and can never be what keeps reviews off, so it gets no guessed continuation.
-test("kill-switch: an off with the default source names no continuation rather than guessing one", async (t) => {
+// Parity with reviewModeScopeForSource as of gentle-ai v2.4.0, which made
+// receipt-driven development opt-in. Before that release an all-sources-unset
+// install resolved to ON with source `default`, so `default` could never be
+// what kept reviews off and naming a continuation would have been a guess.
+// v2.4.0 resolves the same install to OFF with source `default`, which makes
+// this the MOST COMMON refusal there is: every install that never opted in.
+// gentle-ai answers `global` for it -- not because default is a global
+// opinion, but because global is the only scope that can turn reviews on at
+// all. Pi must say the same thing, because the alternative is handing the
+// single most common state a dead end with no way forward.
+test("kill-switch: an off with the default source names the only scope that can turn reviews on", async (t) => {
 	const cwd = repository(t);
 	const { native } = fakeOrganicNative({ reviewModeEffective: "off", reviewModeSource: "default" });
 	const { controller } = runtime(native);
 	const result = await execStart(controller, "kill-switch-default", headlessContext(cwd));
 	assert.equal(result.mode_source, "default");
-	assert.equal(result.next_action, undefined);
+	assert.equal(result.reason, "receipt-driven development is disabled: start is skipped because the default mode source keeps it off");
+	assert.equal(
+		result.next_action,
+		"Run `gentle-ai review mode enable --scope=global` to turn reviews on; receipt-driven development is opt-in and nothing here has enabled it yet. /gentle:review-mode enable only sets clone scope, which can never turn reviews on.",
+	);
+	assert.ok(!/\/gentle:review-mode enable to turn/.test(String(result.next_action)), "a default off must never be sent to Pi's clone-scope command");
 });
 
 test("kill-switch: capability-absent (no reviewMode) leaves today's path unchanged", async (t) => {

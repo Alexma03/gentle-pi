@@ -212,18 +212,24 @@ export interface NativeReviewModeResult {
 
 // Exact-match tolerated-stderr allowlist for START only, gated on the `mode`
 // capability being true (Design Decision #6, organic-rdd-parity). Byte-exact
-// against gentle-ai's headless notice (internal/cli/review_mode.go
-// reviewConsentSkippedNotice) written when the switch is on but no interactive
-// terminal answered the one-time consent question — which is always true when
-// Pi spawns gentle-ai without a TTY. Any other text still fails closed as
-// UNEXPECTED_STDERR.
-// Each entry is one whole line gentle-ai may write to the console stream while
-// still succeeding. The provenance line rides with the skip notice whenever the
-// resolved mode source is `default`, so a headless START legitimately emits two
-// lines; they are separate Fprintln calls, never one joined string.
+// against gentle-ai's headless notices (internal/cli/review_mode.go
+// reviewConsentSkippedNotice and its siblings) written when the switch is on
+// but no interactive terminal answered the one-time consent question — which
+// is always true when Pi spawns gentle-ai without a TTY. Any other text still
+// fails closed as UNEXPECTED_STDERR.
+//
+// Each entry is one whole line the PINNED gentle-ai may write to the console
+// stream while still succeeding. That last qualifier is what keeps this list
+// honest: v2.4.0 deleted reviewConsentSkippedDefaultProvenance ("Reviews are
+// on by default; this was never explicitly chosen. ..."), which used to ride
+// with the skip notice whenever the resolved mode source was `default`. Under
+// opt-in receipt-driven development a default-source clone is refused long
+// before the consent ceremony runs, so the pinned binary can no longer emit
+// that line and it is removed here rather than left as dead tolerance. Multi-
+// line stderr is still expected in principle — these are separate Fprintln
+// calls, never one joined string — which is why membership is per line.
 export const REVIEW_CONSENT_NOTICES = Object.freeze([
 	"Gentle AI reviewed this change without asking, because this session has no terminal to answer on. Run 'gentle-ai review mode disable' to turn reviews off, or 'gentle-ai review mode status' to see the current setting.",
-	"Reviews are on by default; this was never explicitly chosen. Run 'gentle-ai review mode enable' to make reviews an explicit choice, or 'gentle-ai review mode disable' to turn them off.",
 	"Gentle AI could not read an answer, so it reviewed this change and will ask again next time.",
 	"Gentle AI did not recognize that answer, so it reviewed this change and will ask again next time.",
 	"Review skipped for this candidate at your request. It will be offered again on the next change.",
@@ -550,8 +556,9 @@ export interface NativeTargetStatusRequest {
 	 * live 2.4.0-main provider: the materialize-marked relay slot (agent=pi,
 	 * materialize=true, plus the provider submission) is offered ONLY when the
 	 * caller names its agent; an agent-less status returns a bare
-	 * capture-result input the host relay cannot consume. Older providers
-	 * (pinned 2.2.3) refuse the flag, so callers probe and fall back.
+	 * capture-result input the host relay cannot consume. Providers older than
+	 * v2.4.0 do not define the flag and refuse it, so callers probe and fall
+	 * back rather than version-sniff.
 	 */
 	agent?: "pi";
 	signal?: AbortSignal;
@@ -817,6 +824,16 @@ export const NATIVE_CLI_CONTRACTS = Object.freeze({
 	// protocol 2.0 with the same operation set and closed START fields consumed
 	// by Pi, so the existing capability columns are unchanged.
 	"2.2.3": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
+	// Ground-truthed against the released v2.4.0 binary: the v2 lane advertises
+	// capabilities/v2.2 and answers status/v5 and consent/v3, all of which the
+	// existing decoders already read, and the START envelope Pi consumes is
+	// still `start/v3` carrying `risk_reasons` with no `risk_evidence` and no
+	// `hint`, so the existing capability columns are unchanged. v2.4.0 also
+	// made receipt-driven development opt-in, which changes what the mode
+	// envelope reports, not whether it reports it. v2.2.4 and v2.3.0 shipped
+	// while Pi stayed on 2.2.3; they were never pinned or probed, so they get
+	// no row.
+	"2.4.0": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
 });
 type NativeCliCapability = keyof (typeof NATIVE_CLI_CONTRACTS)[keyof typeof NATIVE_CLI_CONTRACTS];
 

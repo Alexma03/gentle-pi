@@ -28,8 +28,9 @@ import type { ReviewHostRelayRequest } from "../lib/review-host-relay.ts";
 // reviewHostRelaySlots() returned 0 for every real lineage, and the host relay
 // was unreachable. The prior fixes all exercised dispatch-shaped slots.
 //
-// The pinned 2.2.3 binary refuses `--agent pi` outright, so the agent is
-// probed and the typed refusal must reach the user instead of being swallowed.
+// Binaries older than v2.4.0 do not define `--agent` on `review status` and
+// refuse it outright, so the agent is probed rather than version-sniffed and
+// the typed refusal must reach the user instead of being swallowed.
 
 const SHA = `sha256:${"1".repeat(64)}`;
 const TRANSPORT_REFUSAL_CODE = "immutable_review_transport_unsupported";
