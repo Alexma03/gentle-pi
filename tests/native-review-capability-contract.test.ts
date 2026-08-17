@@ -92,8 +92,42 @@ test("2.2.3 repeats 2.2.2 because Pi's consumed capability columns did not move"
 	assert.deepEqual(contract, NATIVE_CLI_CONTRACTS["2.2.2"] as Record<string, boolean>);
 });
 
+test("2.4.0 repeats 2.2.3 because the START envelope Pi consumes still omits risk_evidence and hint", () => {
+	// Ground-truthed against the published v2.4.0 linux_amd64 release binary
+	// (sha256:0be4467... , captured 2026-08-17), not against a main build:
+	//
+	//   mode      `gentle-ai review mode status --json` still answers
+	//             `gentle-ai.rdd-mode-status/v1`. The RESOLVED value moved --
+	//             an unconfigured install now reports effective "off" with
+	//             source "default" instead of "on" -- but that is a decision
+	//             the envelope carries, not a capability it lost.
+	//   delivery  `review validate --gate pre-commit` still answers
+	//             `gentle-ai.review-gate-result/v1` with
+	//             `delivery: "disabled/unmanaged"` at exit 0. Under opt-in RDD
+	//             this is now the DEFAULT delivery answer for an install that
+	//             never enabled review, so the column matters more, not less.
+	//
+	// riskEvidence and hint stay dark for exactly the reason the 2.2.0 comment
+	// gives, re-proven rather than inherited: the negotiated
+	// `gentle-ai.review-integration.start/v3` envelope captured from this
+	// binary carries `risk_reasons: [{ code: "non_executable_only" }]` and no
+	// `risk_evidence` and no `hint`. `risk_evidence` does appear in v2.4.0, but
+	// only on the `gentle-ai.review-integration.consent/v3` blocking envelope,
+	// which is a different envelope on a different branch of START and is not
+	// what these columns describe.
+	const contract = NATIVE_CLI_CONTRACTS["2.4.0"] as Record<string, boolean>;
+	assert.equal(contract.mode, true);
+	assert.equal(contract.delivery, true);
+	assert.equal(contract.riskEvidence, false);
+	assert.equal(contract.hint, false);
+	assert.deepEqual(contract, NATIVE_CLI_CONTRACTS["2.2.3"] as Record<string, boolean>);
+});
+
 test("no shipped version key was added beyond the pin bump", () => {
 	// Rows are promises to consumers, so a new key only ever appears in a
-	// dedicated commit alongside a pin bump, never as a side effect.
-	assert.deepEqual(Object.keys(NATIVE_CLI_CONTRACTS), [...DARK_VERSIONS, "2.2.0", "2.2.1", "2.2.2", "2.2.3"]);
+	// dedicated commit alongside a pin bump, never as a side effect. v2.2.4 and
+	// v2.3.0 shipped upstream while Pi stayed on 2.2.3 and were never pinned,
+	// so they get no row: a row asserts ground truth measured against a binary
+	// Pi actually ran, and the table only has to be ascending, not gapless.
+	assert.deepEqual(Object.keys(NATIVE_CLI_CONTRACTS), [...DARK_VERSIONS, "2.2.0", "2.2.1", "2.2.2", "2.2.3", "2.4.0"]);
 });

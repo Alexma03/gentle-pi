@@ -4246,13 +4246,21 @@ const REVIEW_MODE_DISABLED_OUTCOME = "review-mode-disabled";
 // and changes nothing — ground-truthed against a real build. Naming it here
 // would be naming a dead end, which is worse than naming nothing.
 //
-// The default source expresses no opinion and can never be what keeps reviews
-// off, so it gets no guessed continuation — the same reason gentle-ai returns
-// an empty scope for RDDModeSourceDefault.
+// The default branch changed with the pinned v2.4.0 runtime, which made
+// receipt-driven development opt-in. It used to be unreachable as a reason for
+// reviews being off — an all-sources-unset install resolved to ON with source
+// `default` — so naming a continuation for it would have been a guess, and
+// gentle-ai returned an empty scope to say exactly that. v2.4.0 resolves the
+// same install to OFF with source `default`, which makes it the most common
+// refusal there is: every install that never opted in. gentle-ai answers
+// `global` for it now, not because default is a global opinion but because
+// global is the only scope that can turn reviews on at all, and Pi answers the
+// same. Leaving this undefined would hand the single most common state a dead
+// end.
 function reviewModeContinuation(source: NativeReviewModeSource): string | undefined {
 	if (source === NATIVE_REVIEW_MODE_SOURCE.CLONE_LOCAL) return "Run /gentle:review-mode enable to turn reviews back on for this clone.";
 	if (source === NATIVE_REVIEW_MODE_SOURCE.GLOBAL) return "Run `gentle-ai review mode enable --scope=global` to turn reviews back on; /gentle:review-mode enable only clears the clone-local setting, which cannot override a global off.";
-	return undefined;
+	return "Run `gentle-ai review mode enable --scope=global` to turn reviews on; receipt-driven development is opt-in and nothing here has enabled it yet. /gentle:review-mode enable only sets clone scope, which can never turn reviews on.";
 }
 
 // Names the situation before the mechanism, then the mechanism, mirroring
@@ -5683,10 +5691,12 @@ function pendingReviewerLenses(status: ReviewStatusV3): readonly string[] {
 // never named its agent, so reviewHostRelaySlots() saw zero materialize slots,
 // the relay was unreachable, and no lens was ever launched.
 //
-// The agent is PROBED, never assumed: the pinned 2.2.3 provider refuses the
-// flag outright. A typed refusal is remembered per provider instance and the
-// exact provider cause is reported to the user rather than degraded into a
-// generic candidate-view message.
+// The agent is PROBED, never assumed. The pinned provider defines `--agent` as
+// of v2.4.0 — v2.2.3 did not define it on `review status` at all and refused it
+// outright — but Pi still never version-sniffs: the installed binary remains
+// the only authority on whether the flag exists. A typed refusal is remembered
+// per provider instance and the exact provider cause is reported to the user
+// rather than degraded into a generic candidate-view message.
 const REVIEW_HOST_AGENT = "pi" as const;
 const REVIEW_TRANSPORT_REFUSAL_CODES = new Set([
 	"immutable_review_transport_unsupported",
@@ -6633,8 +6643,8 @@ async function executeReviewControllerOperation(
 				// role slots. Pi never assembles reviewer, refuter, or validator
 				// documents for this lane; the remaining document lanes below
 				// (correction forecast, targeted validation, final evidence) are the
-				// negotiated collection answers the pinned v2.2.3 provider still
-				// consumes through --correction-lines/--validation/--evidence.
+				// negotiated collection answers the pinned provider still consumes
+				// through --correction-lines/--validation/--evidence.
 				const finalizeTransition = negotiatedStatus.nextTransition?.kind === "execute" && negotiatedStatus.nextTransition.execute?.operation === "review.finalize"
 					? negotiatedStatus.nextTransition.execute
 					: undefined;
