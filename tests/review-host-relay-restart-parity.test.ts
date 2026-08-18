@@ -152,7 +152,7 @@ function runWorker(t, cwd, statuses, mode) {
 	writeFileSync(statusFile, JSON.stringify(statuses));
 	const script = join(import.meta.dirname, "fixtures", "review-host-relay-restart-worker.mjs");
 	const out = execFileSync(process.execPath, ["--experimental-strip-types", script, cwd, statusFile, mode, outFile], {
-		encoding: "utf8", env: process.env,
+		encoding: "utf8", env: process.env, timeout: 15_000,
 	});
 	assert.equal(out.length, 0, `worker should write nothing to stdout, got: ${out}`);
 	return JSON.parse(readFileSync(outFile, "utf8"));
