@@ -857,6 +857,11 @@ export class CandidateViewRegistry {
 	private readonly projections = new Map<string, FrozenCandidateProjection>();
 	private readonly replays = new Map<string, string>();
 	private current: { lineageId: string; token: string } | undefined;
+	// The last dispatch-binding hydration that was attempted and failed. A
+	// swallowed hydration failure is its own defect (field report 2026-08-16):
+	// without it the later dispatch refusal claims no binding was ever
+	// available instead of naming the attempt and its typed cause.
+	private lastHydrationFailure: { lineageId: string; reason: string; message: string } | undefined;
 
 	create(request: CreateCandidateViewRequest): CandidateView {
 		return this.createOrReuse(request);
@@ -1087,6 +1092,37 @@ export class CandidateViewRegistry {
 		});
 	}
 
+	/**
+	 * Re-derives this lineage's FINALIZE binding from the provider's own
+	 * projection, replacing a binding this session is still holding.
+	 *
+	 * Field defect (Engram #12547): once a bounded correction is admitted, the
+	 * candidate identity legitimately moves, and the provider issues its
+	 * finalize transition for that corrected target. A session that started the
+	 * review still holds the START-time immutable reviewer view, so comparing
+	 * it against the corrected projection reads as drift and no receipt is ever
+	 * minted — while a fresh process, which restores from the native descriptor,
+	 * finalizes the very same lineage successfully. This makes the in-session
+	 * path behave like that already-correct fresh-process path.
+	 *
+	 * This is a re-derivation, not a relaxation: the replacement is
+	 * materialized from Git and must match the provider descriptor exactly
+	 * (base tree, projection kind, changed-path manifest), and the caller still
+	 * asserts the binding afterwards. The immutable reviewer view is retired
+	 * here on purpose — the lenses that consumed it finished before the
+	 * correction.
+	 */
+	rebindForFinalizeFromNative(lineageId: string, contributorRoot: string, descriptor: NativeCandidateProjectionDescriptor): CandidateView {
+		const staleToken = this.lineages.get(lineageId);
+		const stale = staleToken === undefined ? undefined : this.records.get(staleToken);
+		this.projections.delete(lineageId);
+		if (stale !== undefined) {
+			this.remove(stale);
+			this.forget(stale);
+		}
+		return this.restoreForFinalizeFromNative(lineageId, contributorRoot, descriptor);
+	}
+
 	restoreForFinalizeFromNative(lineageId: string, contributorRoot: string, descriptor: NativeCandidateProjectionDescriptor): CandidateView {
 		this.restoreProjectionFromNative(lineageId, contributorRoot, descriptor);
 		const projection = this.resolveProjection(lineageId, contributorRoot);
@@ -1101,6 +1137,46 @@ export class CandidateViewRegistry {
 		} catch (error) {
 			this.projections.delete(lineageId);
 			this.remove(record);
+			throw error;
+		}
+	}
+
+	/**
+	 * Mirrors the START-time dispatch registration for a lineage this
+	 * controller never started (live defect 2026-08-16: a successor created
+	 * by native `review recover` exists only in native authority). The
+	 * authoritative STATUS descriptor supplies the frozen projection; the
+	 * live candidate is re-materialized and must match it exactly before the
+	 * dispatch-facing current binding is established with the provider-named
+	 * pending lenses.
+	 */
+	restoreCurrentForDispatchFromNative(lineageId: string, contributorRoot: string, descriptor: NativeCandidateProjectionDescriptor, selectedLenses: readonly string[]): void {
+		if (this.current !== undefined) throw new CandidateViewError("candidate view already has a current lineage binding", "current-binding-already-established");
+		try {
+			const lenses = this.validateSelectedLenses(selectedLenses);
+			this.restoreProjectionFromNative(lineageId, contributorRoot, descriptor);
+			const projection = this.resolveProjection(lineageId, contributorRoot);
+			const record = materializeCandidateView({ contributorRoot, baseRef: projection.baseCommit, committedOnly: projection.committedOnly }, this.gitExecutor);
+			try {
+				if (record.baseTree !== projection.baseTree || record.candidateTree !== projection.candidateTree || JSON.stringify(record.scope.paths) !== JSON.stringify(projection.paths)) {
+					throw new CandidateViewError("live candidate does not match the native frozen projection");
+				}
+				this.records.set(record.token, record);
+				this.bindRecord(record.token, lineageId, lenses);
+				this.current = { lineageId, token: record.token };
+			} catch (error) {
+				this.projections.delete(lineageId);
+				this.records.delete(record.token);
+				this.remove(record);
+				throw error;
+			}
+			this.lastHydrationFailure = undefined;
+		} catch (error) {
+			this.lastHydrationFailure = {
+				lineageId,
+				reason: error instanceof CandidateViewError ? error.reason : "candidate-view-invalid",
+				message: error instanceof Error ? error.message : String(error),
+			};
 			throw error;
 		}
 	}
@@ -1122,8 +1198,22 @@ export class CandidateViewRegistry {
 	}
 
 	currentLineageId(): string {
-		if (this.current === undefined) throw new CandidateViewError("review subagent dispatch has no current controller-owned candidate view lineage binding", "current-binding-missing");
+		if (this.current === undefined) {
+			const failure = this.lastHydrationFailure;
+			if (failure !== undefined) {
+				throw new CandidateViewError(
+					`review subagent dispatch has no current controller-owned candidate view lineage binding: hydration for lineage ${failure.lineageId} was attempted from authoritative native status and failed (${failure.reason}): ${failure.message}`,
+					"current-binding-hydration-failed",
+				);
+			}
+			throw new CandidateViewError("review subagent dispatch has no current controller-owned candidate view lineage binding", "current-binding-missing");
+		}
 		return this.current.lineageId;
+	}
+
+	/** The last failed dispatch-binding hydration, for controller envelopes. */
+	lastDispatchHydrationFailure(): Readonly<{ lineageId: string; reason: string; message: string }> | undefined {
+		return this.lastHydrationFailure;
 	}
 
 	resolveCurrentForLens(lens: string): CandidateView {

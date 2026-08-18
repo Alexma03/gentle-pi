@@ -58,7 +58,7 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 | **Skill creation workflow**    | Provides the `gentle-ai-skill-creator`/`gentle-ai-skill-improver` skills, `/skill-creation` prompt, and packaged style guide for LLM-first skills. |
 | **Delivery skills**            | Includes issue-first PRs, chained PRs, work-unit commits, cognitive docs, comment writing, and Judgment Day review.                           |
 | **Bounded native review**      | Freezes one candidate, dispatches only controller-selected lenses, records native authority, and reuses the same content-bound receipt at delivery gates. |
-| **Verified native runtime**    | Provisions the exact package-local Gentle AI v2.2.3 runtime: signed archives on Darwin/Linux and a Go SumDB-verified source build on Windows x64/arm64. It validates package-local integrity and rejects PATH, global, sibling, symlink, and mode fallbacks. |
+| **Verified native runtime**    | Provisions the exact package-local Gentle AI v2.4.0 runtime: signed archives on Darwin/Linux and a Go SumDB-verified source build on Windows x64/arm64. It validates package-local integrity and rejects PATH, global, sibling, symlink, and mode fallbacks. |
 | **Runtime safety**             | Blocks destructive shell commands, asks for confirmation for sensitive operations, and blocks direct read/write/edit access to sensitive paths. |
 
 ## Install
@@ -79,7 +79,7 @@ pi install npm:gentle-pi@0.14.0
 pi install npm:gentle-pi@latest
 ```
 
-The latest RDD package installs Gentle AI only into its private `.gentle-ai/` directory. Darwin and Linux use pinned signed archives with archive and executable SHA-256 verification. Windows x64 and arm64 build the exact `v2.2.3` source tag with a local Go 1.25.10+ toolchain, a sealed Go environment, `GOTOOLCHAIN=local`, and `GOSUMDB=sum.golang.org`; it does not download Go automatically. Windows provenance is Go-toolchain plus SumDB evidence and postinstall tamper detection, **not** Authenticode or protection against a malicious joint binary-and-manifest replacement. Package-private locks coordinate cooperative concurrent or crashed installers; their tombstones fail closed. A malicious same-user process with write access to package-private `node_modules` is outside that protocol because it can already replace package code, binary, or manifest, and portable Node has no pathname-delete CAS. It never uses `PATH` or a global `gentle-ai` installation. For development or offline installs only, set `GENTLE_PI_SKIP_GENTLE_AI_INSTALL=1`; native review operations then fail closed with an actionable `package-local-binary-missing` error until the package is reinstalled normally.
+The latest RDD package installs Gentle AI only into its private `.gentle-ai/` directory. Darwin and Linux use pinned signed archives with archive and executable SHA-256 verification. Windows x64 and arm64 build the exact `v2.4.0` source tag with a local Go 1.25.10+ toolchain, a sealed Go environment, `GOTOOLCHAIN=local`, and `GOSUMDB=sum.golang.org`; it does not download Go automatically. Windows provenance is Go-toolchain plus SumDB evidence and postinstall tamper detection, **not** Authenticode or protection against a malicious joint binary-and-manifest replacement. Package-private locks coordinate cooperative concurrent or crashed installers; their tombstones fail closed. A malicious same-user process with write access to package-private `node_modules` is outside that protocol because it can already replace package code, binary, or manifest, and portable Node has no pathname-delete CAS. It never uses `PATH` or a global `gentle-ai` installation. For development or offline installs only, set `GENTLE_PI_SKIP_GENTLE_AI_INSTALL=1`; native review operations then fail closed with an actionable `package-local-binary-missing` error until the package is reinstalled normally.
 
 Recommended companion packages:
 
@@ -110,6 +110,7 @@ pi
 /sdd-init                  Create or refresh openspec/config.yaml (openspec/both stores only).
 /gentle:models             Assign global model/effort routing to SDD/custom agents.
 /gentle:persona            Switch between gentleman and neutral persona modes.
+/gentle:background-subagents  Show or set the managed background-subagents policy, with its deciding source.
 /gentle:banner             Configure startup rose, text logo, and color preset.
 /gentle:commit-status      Inspect an unresolved durable commit transaction.
 /gentle:commit-abort       Abandon safe recovery state without changing HEAD or the index.
@@ -171,7 +172,7 @@ Review actors are dispatched only through parent `subagent_run` calls in `mode: 
 
 Legacy pre-graph authority is never migrated. `gentle_review inspect` reports an exact repository-bound destructive reset challenge for legacy corruption; after that fresh interactive authorization, RESET and RECOVER_LOCK route to the audited native `gentle-ai review reclaim` operation and RECOVER routes to native `gentle-ai review recover`, so every destructive transition is executed and audited by the native authority store. Native inputs the request did not carry return a `native-input-required` envelope instead of being invented. Existing graph-v1 ordinary lineages remain readable and gate-validatable but are read-only; Judgment Day remains mutable on graph-v1.
 
-`gentle_review abandon`, `quarantine-legacy`, and `reconcile-authority` remain explicit v2.1.11 maintenance routes. Pi derives and displays the published six-line abandon binding only for a caller-specified compact lineage, revision, and snapshot identity; the native CLI re-derives pristine compact-v2 eligibility. Legacy quarantine accepts only `historical findings freeze changed unrelated transaction state` with disposition `quarantine-malformed-freeze-event` and uses its exact eight-line binding. Both require fresh interactive approval and fail closed headlessly.
+`gentle_review abandon`, `quarantine-legacy`, and `reconcile-authority` remain explicit v2.1.11 maintenance routes. Pi derives and displays the published nine-line `gentle-ai.review-abandon-authorization/v2` binding only for a caller-specified compact lineage, revision, snapshot identity, and discarded-work summary (captured lens results, findings presence, evidence-record presence); the native CLI re-derives non-terminal compact-v2 eligibility and the exact discarded work before accepting it. Legacy quarantine accepts only `historical findings freeze changed unrelated transaction state` with disposition `quarantine-malformed-freeze-event` and uses its exact eight-line binding. Both require fresh interactive approval and fail closed headlessly.
 
 `gentle_review reconcile-authority` accepts one predecessor lineage and revision, one successor lineage and revision, an actor, and a reason. Pi derives the exact seven-line `gentle-ai.review-reconcile-authorization/v1` binding, or appends exactly `anomalies=unchanged_target,malformed_recovery_authorization` for the published dual anomaly in that order. Native code re-derives every anomaly; malformed bindings, changed revisions, unavailable native support, cancellation, and native refusal fail closed through typed envelopes.
 
@@ -253,15 +254,15 @@ flowchart TD
 
 Lifecycle gates never launch review actors. They rederive Git and publication targets, validate the existing receipt, and authorize one exact command. Any target drift, stale evidence, malformed authority, or unprovable state blocks delivery instead of silently reopening review.
 
-Native contract pairing is exact: this adapter resolves only the integrity-verified package-local Gentle AI v2.1.11 executable, independently hashes it, then negotiates `gentle-ai.review-integration/v1` outside the repository. Capabilities are cached by that executable digest. Every START, target status, FINALIZE, validate, and BIND-SDD request passes the same contract identifier. Current protocol 1.0 envelopes decode exactly against the vendored schemas; `recover` routes only the provider-selected `action_disposition`, and optional additions require a future compatible schema/minor that the provider explicitly advertises and the consumer negotiates.
+Native contract pairing is exact: this adapter resolves only the integrity-verified package-local Gentle AI v2.4.0 executable, independently hashes it, then negotiates `gentle-ai.review-integration/v2` outside the repository. Capabilities are cached by that executable digest. Every START, target status, FINALIZE, validate, and BIND-SDD request passes the same contract identifier. Negotiated envelopes decode exactly against the vendored schemas; `recover` routes only the provider-selected `action_disposition`, and optional additions require a future compatible schema/minor that the provider explicitly advertises and the consumer negotiates.
 
-Gentle AI also publishes a second negotiated contract, `gentle-ai.review-integration/v2`, which replaces the Base64 `candidate_diff` reviewer transport with immutable `base_tree`/`candidate_tree` plus an ordered `changed_path_manifest` and never an inline patch. `gentle-pi` is migrating to `/v2` only, with no dual-lane fallback; the cutover is release-gated on the pinned runtime confirming it serves contract v2 (already true for the currently pinned v2.2.1) and lands as one atomic commit, tracked by the `migrate-review-integration-v2` change. This provider contract version is unrelated to Pi's own internal "compact-v2" review-authority naming used below — the shared digit is coincidental, not a version pairing.
+Contract `/v2` replaces the Base64 `candidate_diff` reviewer transport of `/v1` with immutable `base_tree`/`candidate_tree` plus an ordered `changed_path_manifest` and never an inline patch. `gentle-pi` negotiates `/v2` only, with no dual-lane fallback; the cutover landed as one atomic commit against gentle-ai v2.2.2 (tracked by the `migrate-review-integration-v2` change), and the `/v1` schemas stay packaged because the `/v2` schemas `$ref` into their fragments. This provider contract version is unrelated to Pi's own internal "compact-v2" review-authority naming used below — the shared digit is coincidental, not a version pairing.
 
 Target status owns `current_target`, `unrelated`, `ambiguous`, and `corrupted` applicability and returns one native action. Pi does not reconstruct ordinary authority from provider-private files or choose a lineage from repository-wide history. Restart recovery rebuilds only the derived candidate view from the native Git/content projection, including intended-untracked paths, symlinks, and immutable gitlink identities. Native failure envelopes retain their exact mutation outcome, replayability, required inputs, request digest, and next action. After an unknown or lost mutating result, Pi calls target status before any replay decision and returns only the provider-declared action.
 
 Direct authorized `git commit` commands use a durable recovery record under the Git common directory. The package runs the effective pre-commit hook once, captures the post-hook index, performs final native validation against that tree, suppresses only the already-completed pre-commit hook while preserving message/post hooks through proxies, and proves `HEAD^{tree}` before the tool result succeeds. Any unresolved, interrupted, failed, or mismatched transaction blocks push, PR, and release. Recovery never resets HEAD or the index automatically.
 
-Once the pinned gentle-ai runtime (currently v2.2.1) has written review authority, rollback MUST preserve every native store and receipt and MUST NOT run a downgraded binary against that repository. Disable the Pi route or roll forward to a compatible authority-aware release instead; deleting authority data or reinstalling an older binary is not a rollback path.
+Once the pinned gentle-ai runtime (currently v2.4.0) has written review authority, rollback MUST preserve every native store and receipt and MUST NOT run a downgraded binary against that repository. Disable the Pi route or roll forward to a compatible authority-aware release instead; deleting authority data or reinstalling an older binary is not a rollback path.
 
 ### FINALIZE wrapper input
 
@@ -333,6 +334,8 @@ Dangerous-command safety remains independent and authoritative.
 SDD completion adds no review or Judgment Day pass.
 
 Review operations, validation, and SDD perform no push, PR creation, release, or publication. The separate durable commit runner may create exactly one local commit only after final native pre-commit validation and post-commit tree proof.
+
+The Pi host relay bounds each locked-down reviewer subprocess by materialized prompt size rather than by one fixed number: a 15-minute floor plus 15 minutes per mebibyte of prompt, clamped to a 2-hour ceiling. Set `GENTLE_PI_REVIEW_RELAY_PI_TIMEOUT_MS` to a positive decimal to replace that derived bound with your own; malformed values are ignored and the same 2-hour ceiling still applies, so no configuration turns a foreground finalize into an unbounded child process. A reviewer killed by the bound reports `pi-host-relay-timeout` with the elapsed time and the limit it was measured against, and it explicitly does not ask you to relaunch the identical slot — that would re-spend the model tokens to reach the same wall. Reviewer results admitted earlier in the same finalize stay admitted and are not re-run.
 
 Adversarial review roles (the refuter and the targeted validator) are never Pi-authored: the provider renders self-contained `review.capture-refuter` / `review.capture-validation` vectors and Go runs its own locked-down `pi` process on them. Package agent assets remain a package-managed isolated installation. Project and user overrides may shadow a package asset; `gentle-pi` preserves those definitions and does not claim their effective permissions are package-compliant.
 
@@ -594,6 +597,7 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/gentle:doctor`              | Runs read-only diagnostics for SDD assets, model/persona config, memory tools, and safety guards. |
 | `/gentle:models`                 | Opens global model + effort assignment UI. Press `x` to export and `r` to restore saved routing. |
 | `/gentle:persona`                | Switches global persona mode, with project override support.        |
+| `/gentle:background-subagents`   | Shows or sets the managed background-subagents policy (`status\|enable\|disable`), naming the source that decided it. |
 | `/gentle:banner`                 | Configures startup banner rose, text logo, and color preset.        |
 | `/gentle:toggle-rose`            | Toggles the startup rose.                                           |
 | `/gentle:toggle-text-logo`       | Toggles the startup text logo.                                      |
@@ -605,6 +609,29 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/skill-creation`                | Creates or updates an LLM-first skill using the packaged `gentle-ai-skill-creator` contract and style guide. |
 
 Package-owned global SDD runtime assets are also refreshed automatically on session start when `gentle-pi` changes. Project-local `.pi/agents` and `.pi/chains` remain manual overrides and are never overwritten by startup refresh.
+
+### Background subagents policy
+
+Background delegation is off unless you turn it on. The policy is user-owned: only an explicit `/gentle:background-subagents enable` or `disable` writes it, and Pi automation never toggles it.
+
+```text
+/gentle:background-subagents           Report the effective policy, the deciding source, and the resolved capability.
+/gentle:background-subagents enable    Write "on" to the global file.
+/gentle:background-subagents disable   Write "off" to the global file.
+```
+
+Four sources can decide the policy, and the first hit wins:
+
+| Priority | Source                                            | Notes                                                        |
+| -------- | ------------------------------------------------- | ------------------------------------------------------------ |
+| 1        | `<cwd>/.pi/gentle-ai/background-subagents.json`   | Project file. Outranks everything, including a global write.  |
+| 2        | `<configHome>/background-subagents.json`          | Global file, written by `enable`/`disable`. `configHome` honors `GENTLE_PI_CONFIG_HOME` and defaults to `~/.pi/gentle-ai`. |
+| 3        | `GENTLE_PI_BACKGROUND_SUBAGENTS`                  | Exactly `on` or `off`. Any other value is ignored.            |
+| 4        | Built-in default                                  | `off`.                                                        |
+
+Both files use the strict shape `{"schema":"gentle-pi.background-subagents/v1","policy":"on"}`. A file that is present but malformed fails closed to `off` and is **not** skipped in favor of a lower-priority source, so a typo in the project file disables background subagents rather than silently handing the decision to the global file. The command reports that case as a warning instead of an ordinary `off`.
+
+Because the project file outranks the global one, `enable` still writes the global file but reports plainly when a project file keeps the effective policy unchanged. The resolved capability (`ready` or `absent`) reports whether `subagent_run` is actually callable in this session; a policy of `on` with capability `absent` means the subagents package is not installed.
 
 Startup banner settings are global and default to the current pink rose + text logo. Supported color presets are `pink`, `cyan`, `yellow`, and `green`.
 
@@ -698,6 +725,35 @@ node --experimental-strip-types --check extensions/sdd-init.ts
 node --experimental-strip-types --check extensions/startup-banner.ts
 npm pack --dry-run
 ```
+
+### Running the cross-lane battery
+
+The cross-lane battery (`tests/crosslane/cross-lane.mjs`) validates the adapter against a real `gentle-ai` binary, end to end and out of CI on purpose. The pinned decoder lane only ever sees vendored fixtures, so new envelope schemas and full controller sequencing are never driven through a live lifecycle before merge; the battery closes that gap.
+
+```bash
+pnpm test:cross-lane                # requires the dev-binary override
+pnpm test:cross-lane --with-model   # adds the real Go-owned pi reviewer run (model spend)
+```
+
+What it checks, against live scratch repositories:
+
+- a low-risk lifecycle from START to a `pre-commit` gate allow;
+- the medium-risk `consent/v3` granted round-trip through the direct decoder lane;
+- controller sequencing: at every step the client's decoded offered next step must equal the native transition, including that correction evidence is collected before targeted validation is ever offered, through a full correction lifecycle to an approved receipt;
+- the audited abandon end to end, asserting the adapter builds the exact nine-line `gentle-ai.review-abandon-authorization/v2` discarded-work binding and the native gate commits the quarantine record;
+- forward-decoder freshness: every live envelope captured from the binary must decode without unknown-key rejection, the early warning that gentle-ai main grew a field gentle-pi lacks;
+- with `--with-model`, one real locked-down `pi` reviewer run captured through the native transport.
+
+Prerequisites:
+
+- A real `gentle-ai` binary selected through the dev-binary override; there is no PATH or pinned-binary fallback, and the battery refuses to run without one. Either export `GENTLE_PI_GENTLE_AI_DEV_BINARY=<absolute path>` for the session, or register a persistent override with `/gentle:dev-binary <absolute path>` (stored at `~/.pi/gentle-ai/dev-binary.json` with schema `gentle-pi.dev-binary/v1`; the environment variable takes precedence over the registration, and the binary is re-validated and re-hashed on every resolution). Any real build works: an installed release binary or a locally built gentle-ai main.
+- A Git checkout or worktree of this repository. The battery is a contributor tool wired to the repository layout and is excluded from `pnpm test` and CI by construction; run it from the repo, not from an installed Pi package.
+
+The battery creates throwaway scratch repositories under the OS temp directory and never touches the enclosing repository. The default run spends no model tokens; `--with-model` launches one real reviewer model run and costs model spend.
+
+It prints one PASS/FAIL/SKIP row per check plus a note, and exits non-zero when any check fails. Checks blocked by a known upstream class are reported with a `known-red` prefix instead of being hidden.
+
+Running this battery against new gentle-ai builds (release candidates or main) and reporting red checks is a valuable contribution. The sibling provider-side battery lives at `scripts/cross-lane-battery.sh` in [Gentleman-Programming/gentle-ai](https://github.com/Gentleman-Programming/gentle-ai).
 
 Publish npm through GitHub Actions only:
 

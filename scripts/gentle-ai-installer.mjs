@@ -30,7 +30,7 @@ const WINDOWS_SYSTEM_ROOT = "C:\\Windows";
 // version check below) derives from this constant instead of repeating the
 // literal, so a pin bump cannot leave a stale copy behind. See
 // scripts/install-gentle-ai.mjs for the incident that motivated this.
-export const INSTALLER_VERSION = "2.2.3";
+export const INSTALLER_VERSION = "2.4.0";
 export const RELEASE_BASE_URL = `https://github.com/Gentleman-Programming/gentle-ai/releases/download/v${INSTALLER_VERSION}/`;
 export const GENTLE_AI_INSTALL_METHOD = Object.freeze({
 	SIGNED_RELEASE_ASSET: "signed-release-asset",
@@ -39,9 +39,12 @@ export const GENTLE_AI_INSTALL_METHOD = Object.freeze({
 export const GENTLE_AI_WINDOWS_SOURCE_PACKAGE_PATH = "github.com/gentleman-programming/gentle-ai/v2/cmd/gentle-ai";
 export const GENTLE_AI_WINDOWS_SOURCE_MODULE = "github.com/gentleman-programming/gentle-ai/v2";
 export const GENTLE_AI_WINDOWS_SOURCE_TAG = `v${INSTALLER_VERSION}`;
-// `go mod download -json github.com/gentleman-programming/gentle-ai/v2@v2.2.3`
-// with GOSUMDB=sum.golang.org reports this exact module SumDB checksum.
-export const GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM = "h1:GWFPqNIgPDv82BiCceWQBV6p9VKbFm51W//sKTKNn5c=";
+// `go mod download -json github.com/gentleman-programming/gentle-ai/v2@v2.4.0`
+// with GOSUMDB=sum.golang.org reports this exact module SumDB checksum. The
+// same response resolves the tag to commit 301fb2ad, which is also the
+// `vcs_revision` the published v2.4.0 binary self-reports in its capabilities
+// envelope -- the two independent provenance paths agree.
+export const GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM = "h1:XKkcy+t76cyUKQnRwL1UnqHbhh8o416I8HQ1UsdvWSI=";
 export const GENTLE_AI_WINDOWS_SOURCE_PACKAGE = `${GENTLE_AI_WINDOWS_SOURCE_PACKAGE_PATH}@${GENTLE_AI_WINDOWS_SOURCE_TAG}`;
 export const GENTLE_AI_WINDOWS_MINIMUM_GO_VERSION = "1.25.10";
 export const GENTLE_AI_GO_TOOLCHAIN_UNAVAILABLE_CODE = "GENTLE_AI_GO_TOOLCHAIN_UNAVAILABLE";
@@ -60,7 +63,7 @@ export class GentleAiInstallerError extends Error {
 // Sentinel used while a re-pinned gentle-ai release is not yet published. A
 // sentinel digest can never match a real SHA-256, so installation fails closed,
 // and verify-package-files.mjs refuses to pack/publish while any digest below
-// still holds it. The v2.2.3 digests are pinned from the published release:
+// still holds it. The v2.4.0 digests are pinned from the published release:
 // archive sha256 values verified against the minisign-signed checksums.txt and
 // freshly computed hashes; binary sha256 values computed from the extracted
 // executables.
@@ -71,15 +74,15 @@ function asset(name, sha256, binarySha256, executable) {
 }
 
 // Windows is absent from signed release archives on purpose. gentle-ai stopped
-// distributing unsigned Windows builds in c4b764d0, so v2.2.3 publishes signed
+// distributing unsigned Windows builds in c4b764d0, so v2.4.0 publishes signed
 // Darwin/Linux archives only. Windows x64/arm64 uses the separately verified
 // exact-tag Go SumDB source-build path below; restore archive rows only when
 // upstream ships signed Windows assets.
 export const GENTLE_AI_RELEASE_ASSETS = Object.freeze({
-	"darwin/amd64": asset("gentle-ai_2.2.3_darwin_amd64.tar.gz", "1622e283d53192aaa195ca2a7c6f63d41475dcdadda1949fac248015081c88ca", "f3505695bd135dfdcc64adfeb3385f3aea40033a7c3c02a7b387a26bc10b4a39", "gentle-ai"),
-	"darwin/arm64": asset("gentle-ai_2.2.3_darwin_arm64.tar.gz", "28517e136df6208e0225c51ffc986cb65af1f4fc6e6b173ddc4d0f2d0e402a30", "638a7ef64fa5d2657cbe52fc0a033a5f6ddfce190961e845042ef166f116c70f", "gentle-ai"),
-	"linux/amd64": asset("gentle-ai_2.2.3_linux_amd64.tar.gz", "8ef700fb4d8e097f98a70cbb53edaa854ee39c09c0a998c53866b93c45b51d36", "5af38452caf057215628e0f0c8cb87647b0f0a1506feacc39a3f487d6471b7cc", "gentle-ai"),
-	"linux/arm64": asset("gentle-ai_2.2.3_linux_arm64.tar.gz", "9f4eba7184d2b70e05685e99ffbf2ad4e8df3d8f64519043f08d0bbe5e93d399", "48f55abf9347e9db191469b1daf2265b4d267b3a61db3a548ae269f3407a4b9a", "gentle-ai"),
+	"darwin/amd64": asset("gentle-ai_2.4.0_darwin_amd64.tar.gz", "c3f5a4251e927c41864e7a9a5670ac3fce97c6282755ec8e9b2e7e064067f750", "c4d25b98bae0d06b33baa23ba997cb64ab63c2e93e97983bcb9c239139bceaba", "gentle-ai"),
+	"darwin/arm64": asset("gentle-ai_2.4.0_darwin_arm64.tar.gz", "2240ae797119dd1dc5a0dd2fd2711077ce6712e66ab0b67461344c983478f7f4", "54a8a5957ce4f10f36b46ef818c888f484a3e213a71faca6b7783af6c029eb77", "gentle-ai"),
+	"linux/amd64": asset("gentle-ai_2.4.0_linux_amd64.tar.gz", "517eb8420cf966b74be1413a7ea1036119a5ccbb376e0778aa9f4d4d283e2e9a", "0be446737f8f1a9458fd2891d488beb2d72786578afead9bbf2d6ddddc9ec113", "gentle-ai"),
+	"linux/arm64": asset("gentle-ai_2.4.0_linux_arm64.tar.gz", "1badec9cad1f2bbeb22b5c6804c3a88c601d844abae231264e416e8095f2a15f", "cdd8fa43c3417e844cc11d2e436d4667edb0a54f086e0eb1d6cd3f7493bfee5a", "gentle-ai"),
 });
 
 function upstreamArchitecture(architecture) {

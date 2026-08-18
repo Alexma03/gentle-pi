@@ -7,7 +7,7 @@ import test from "node:test";
 // Native SDD Runtime Attempt Authority contract tests (issue #256 track 3).
 //
 // Locks the Pi-owned lazy-loaded orchestration/status contract that ports the
-// released Gentle AI v2.2.3 compact SDD attempt ledger authority. Pi must NOT
+// released Gentle AI v2.4.0 compact SDD attempt ledger authority. Pi must NOT
 // implement a local attempt runtime; it must route every runtime-bearing
 // sdd-apply/sdd-verify/remediation launch through the provider compact CLI.
 //

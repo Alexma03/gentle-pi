@@ -94,6 +94,18 @@ export const REVIEW_STATUS_ACTION_DISPOSITION = {
 
 const RECEIPT_STATUSES = ["expected_missing", "present", "publication_pending", "not_applicable"]         ;
 const REQUIRED_OPERATIONS = Object.freeze(Object.values(REVIEW_INTEGRATION_OPERATION));
+// failure/v2 operations: the capability floor plus the four collect-capture
+// verbs that emit typed refusals on the gentle-ai main line (commit a2d57117,
+// fix/capture-evidence-typed-refusal; exact strings from that branch's
+// published failure.schema.json 12-value operation enum). Additive forward
+// surface: every operation outside the published enum still rejects.
+const FAILURE_OPERATIONS = Object.freeze([
+	...REQUIRED_OPERATIONS,
+	"review.capture-result",
+	"review.capture-evidence",
+	"review.capture-refuter",
+	"review.capture-validation",
+]         );
 const REQUIRED_GATES = Object.freeze(["post-apply", "pre-commit", "pre-push", "pre-pr", "release"]         );
 const REQUIRED_PROJECTIONS = Object.freeze(Object.values(REVIEW_PROJECTION));
 // The schema floor shared by every accepted capabilities identity. Each minor
@@ -263,6 +275,17 @@ const REQUIRED_MANDATORY_FEATURES = Object.freeze(FEATURE_NAMES.filter((name) =>
 
 
 
+const REPOSITORY_CONTEXT_OUTCOMES = ["applied", "pending", "blocked_conflict", "durability_limited"]         ;
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -335,6 +358,14 @@ const REQUIRED_MANDATORY_FEATURES = Object.freeze(FEATURE_NAMES.filter((name) =>
 // tokens that submit the captured bytes; the host substitutes only the
 // artifact location into the declared {{value}} slot and never synthesizes
 // or filters the form itself.
+
+
+
+
+
+
+
+
 
 
 
@@ -498,6 +529,7 @@ export const REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS = Object.freeze(Object.valu
 
 
 
+	                      
 
 
 
@@ -523,6 +555,25 @@ export const REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS = Object.freeze(Object.valu
 
 
 
+
+
+
+
+
+
+
+
+// consent/v3 (gentle-ai >= 2.3.0, capabilities/v2.1+): the same per-candidate
+// blocking question with one net-new required member, the provider-fixed
+// `agent` runtime binding. Everything shared with v2 keeps its exact shape so
+// consumers of either identity read one structural surface.
+
+
+
+
+
+// Either accepted consent identity. Consumers that relay the envelope (rather
+// than decode it) accept both; each decoder still admits exactly one schema.
 
 
 const FAILURE_REQUIRED_INPUTS = [
@@ -547,6 +598,8 @@ const FAILURE_NEXT_ACTIONS = ["correct_request", "retry", "retry_with_bounded_ba
 // cause_category is diagnostic metadata (nothing routes on it), so unknown
 // snake_case values are tolerated for forward compatibility.
 const FAILURE_CAUSE_CATEGORIES = ["inventory_io_or_layout", "lock_ambiguous", "reset_residue", "record_or_graph_invalid", "inventory_incomplete", "incomplete_store_entry"]         ;
+
+
 
 
 
@@ -989,13 +1042,15 @@ export function decodeReviewStartV3(value         )                {
 
 	let repositoryContext                                       ;
 	if (body.repository_context !== undefined) {
-		const source = exactRecord(body.repository_context, "start.repository_context", ["capability", "handle", "revision", "target_identity"]);
+		const source = exactRecord(body.repository_context, "start.repository_context", ["capability", "handle", "revision", "target_identity"], ["event_id", "outcome"]);
 		if (source.capability !== "review.opaque_repository_context") throw new TypeError("start.repository_context.capability is unsupported");
 		repositoryContext = {
 			capability: "review.opaque_repository_context",
 			handle: text(source.handle, "start.repository_context.handle", { pattern: /^rctx1_[0-9a-f]{64}$/ }),
 			revision: sha256(source.revision, "start.repository_context.revision"),
 			targetIdentity: sha256(source.target_identity, "start.repository_context.target_identity"),
+			...(source.event_id === undefined ? {} : { eventId: sha256(source.event_id, "start.repository_context.event_id") }),
+			...(source.outcome === undefined ? {} : { outcome: enumeration(source.outcome, REPOSITORY_CONTEXT_OUTCOMES, "start.repository_context.outcome") }),
 		};
 	}
 
@@ -1174,7 +1229,31 @@ function decodeTransitionArguments(value         , label        )               
 	});
 }
 
-function decodeCaptureSubmission(value         , label        )                            {
+function decodeCaptureSubmission(value         , label        , v5         )                            {
+	// status/v5: the live 2.4.0-main binary emits the materialize
+	// capture-result submission as a SINGULAR `value` object carrying a
+	// `schema` key (captured 2026-08-16 from 2.4.0-main.b1afef46; the
+	// emitter has been singular since gentle-ai f1a95179). The form is
+	// closed to that exact captured shape and normalizes into the typed
+	// one-entry values array the host relay already consumes. A payload
+	// carrying both wire forms at once matches no captured shape and falls
+	// through to the legacy decoder, which rejects the unknown `value` key.
+	if (v5 && typeof value === "object" && value !== null && "value" in value && !("values" in value)) {
+		const submission = exactRecord(value, label, ["operation_token", "argument_tokens", "value"]);
+		if (submission.operation_token !== "capture-result") throw new TypeError(`${label}.operation_token must be capture-result for the singular value form`);
+		const argumentTokens = stringArray(submission.argument_tokens, `${label}.argument_tokens`, { minimum: 1 });
+		const row = exactRecord(submission.value, `${label}.value`, ["slot", "domain", "schema", "substitution_location"]);
+		return {
+			operationToken: "capture-result",
+			argumentTokens,
+			values: [{
+				slot: enumeration(row.slot, ["reviewer_result"]         , `${label}.value.slot`),
+				domain: nonempty(row.domain, `${label}.value.domain`),
+				schema: nonempty(row.schema, `${label}.value.schema`),
+				substitutionLocation: integer(row.substitution_location, `${label}.value.substitution_location`, 0, argumentTokens.length - 1),
+			}],
+		};
+	}
 	const submission = exactRecord(value, label, ["operation_token", "argument_tokens", "values"]);
 	const operationToken = text(submission.operation_token, `${label}.operation_token`, { minimum: 1, pattern: /^[a-z0-9-]+$/ });
 	const argumentTokens = stringArray(submission.argument_tokens, `${label}.argument_tokens`, { minimum: 1 });
@@ -1359,7 +1438,7 @@ function decodeCollectInput(value         , label        , v5         )         
 		if (v5 && (operationToken === "finalize" || operationToken === "capture-evidence")) {
 			submissionDescriptor = decodeSubmissionDescriptorV5(input.submission, `${label}.submission`, operationToken);
 		} else {
-			submission = decodeCaptureSubmission(input.submission, `${label}.submission`);
+			submission = decodeCaptureSubmission(input.submission, `${label}.submission`, v5);
 		}
 	}
 
@@ -1497,7 +1576,7 @@ export function decodeReviewStatusV3(value         )                 {
 	const v5 = typeof value === "object" && value !== null && (value                           ).schema === "gentle-ai.review-integration.status/v5";
 	const body = exactRecord(value, "status", [
 		"schema", "contract", "operation", "applicability", "receipt", "action", "replayability", "target_identity", "projection", "repair", "candidates",
-	], ["authority", "frozen", "reconciliation", "action_disposition", "eligibility", "next_transition", "authority_target_identity", "validation_request", "final_verification_retry", ...(v5 ? ["forecast"] : [])]);
+	], ["authority", "frozen", "reconciliation", "action_disposition", "eligibility", "next_transition", "authority_target_identity", "validation_request", "final_verification_retry", ...(v5 ? ["forecast", "repository_context"] : [])]);
 	requireIdentity(body, v5 ? "gentle-ai.review-integration.status/v5" : "gentle-ai.review-integration.status/v3", REVIEW_INTEGRATION_OPERATION.STATUS);
 
 	const applicability = enumeration(body.applicability, ["current_target", "unrelated", "ambiguous", "corrupted"]         , "status.applicability");
@@ -1578,6 +1657,24 @@ export function decodeReviewStatusV3(value         )                 {
 		throw new TypeError("status.final_verification_retry is only valid for the retry_final_verification action");
 	}
 
+	// status/v5 additive top-level repository context reference (captured
+	// 2026-08-16 from 2.4.0-main.b1afef46; missing from the published
+	// status-v5.schema.json, so the live capture is authoritative). Same
+	// reference shape as start/v3's repository_context.
+	let repositoryContext                                       ;
+	if (body.repository_context !== undefined) {
+		const source = exactRecord(body.repository_context, "status.repository_context", ["capability", "handle", "revision", "target_identity"], ["event_id", "outcome"]);
+		if (source.capability !== "review.opaque_repository_context") throw new TypeError("status.repository_context.capability is unsupported");
+		repositoryContext = {
+			capability: "review.opaque_repository_context",
+			handle: text(source.handle, "status.repository_context.handle", { pattern: /^rctx1_[0-9a-f]{64}$/ }),
+			revision: sha256(source.revision, "status.repository_context.revision"),
+			targetIdentity: sha256(source.target_identity, "status.repository_context.target_identity"),
+			...(source.event_id === undefined ? {} : { eventId: sha256(source.event_id, "status.repository_context.event_id") }),
+			...(source.outcome === undefined ? {} : { outcome: enumeration(source.outcome, REPOSITORY_CONTEXT_OUTCOMES, "status.repository_context.outcome") }),
+		};
+	}
+
 	return {
 		contract: REVIEW_INTEGRATION_CONTRACT,
 		applicability,
@@ -1597,6 +1694,7 @@ export function decodeReviewStatusV3(value         )                 {
 		...(validationRequest === undefined ? {} : { validationRequest }),
 		...(finalVerificationRetry === undefined ? {} : { finalVerificationRetry }),
 		...(forecast === undefined ? {} : { forecast }),
+		...(repositoryContext === undefined ? {} : { repositoryContext }),
 		raw: body,
 	};
 }
@@ -1617,11 +1715,10 @@ function decodeConsentChoice(value         , label        , answer              
 	};
 }
 
-export function decodeReviewConsentV2(value         )                  {
-	const body = exactRecord(value, "consent", [
-		"schema", "contract", "operation", "action", "blocking", "target_identity", "projection", "risk_level", "changed_files", "changed_lines", "headline", "reason", "value", "risk_evidence", "choices", "off_path",
-	]);
-	requireIdentity(body, "gentle-ai.review-integration.consent/v2", "review.start");
+// The semantic surface shared verbatim by both accepted consent identities.
+// Every label and guard predates consent/v3, so the v2 decode stays
+// byte-identical (test-locked) while v3 adds only its own identity gate.
+function decodeConsentSemantics(body                         )                                          {
 	if (body.action !== "consent_required") throw new TypeError("consent.action must be consent_required");
 	if (body.blocking !== true) throw new TypeError("consent.blocking must be true");
 
@@ -1638,7 +1735,6 @@ export function decodeReviewConsentV2(value         )                  {
 	if (offPathSource.command !== "gentle-ai review mode disable") throw new TypeError("consent.off_path.command is unsupported");
 
 	return {
-		schema: "gentle-ai.review-integration.consent/v2",
 		contract: REVIEW_INTEGRATION_CONTRACT,
 		operation: "review.start",
 		action: "consent_required",
@@ -1654,6 +1750,39 @@ export function decodeReviewConsentV2(value         )                  {
 		riskEvidence: stringArray(body.risk_evidence, "consent.risk_evidence"),
 		choices: [granted, declined],
 		offPath: { note: nonempty(offPathSource.note, "consent.off_path.note"), command: "gentle-ai review mode disable" },
+	};
+}
+
+const CONSENT_KEYS_V2 = Object.freeze([
+	"schema", "contract", "operation", "action", "blocking", "target_identity", "projection", "risk_level", "changed_files", "changed_lines", "headline", "reason", "value", "risk_evidence", "choices", "off_path",
+]         );
+
+export function decodeReviewConsentV2(value         )                  {
+	const body = exactRecord(value, "consent", CONSENT_KEYS_V2);
+	requireIdentity(body, "gentle-ai.review-integration.consent/v2", "review.start");
+	return {
+		schema: "gentle-ai.review-integration.consent/v2",
+		...decodeConsentSemantics(body),
+		raw: body,
+	};
+}
+
+// consent/v3 (gentle-ai >= 2.3.0): the v2 surface plus the required, fixed
+// `agent` runtime binding. Ground truth is the captured envelope from a
+// 2.4.0-main binary (tests/fixtures/devbinary/consent-v3.captured.json) plus
+// gentle-ai main contracts/review-integration/v2/schemas/consent-v3.schema.json.
+// The choice-invocation shape deliberately stays the shared v2 pattern: the
+// published v3 schema demands an `--agent claude-code` token that the live
+// emitter omits when the caller declared no --agent, so the capture is
+// authoritative and Pi replays whichever provider-owned invocation arrived.
+export function decodeReviewConsentV3(value         )                  {
+	const body = exactRecord(value, "consent", [...CONSENT_KEYS_V2, "agent"]);
+	requireIdentity(body, "gentle-ai.review-integration.consent/v3", "review.start");
+	if (body.agent !== "claude-code") throw new TypeError("consent.agent must be claude-code");
+	return {
+		schema: "gentle-ai.review-integration.consent/v3",
+		agent: "claude-code",
+		...decodeConsentSemantics(body),
 		raw: body,
 	};
 }
@@ -1717,7 +1846,7 @@ export function decodeReviewFailureV2(value         )                  {
 		"schema", "contract", "operation", "phase", "code", "message", "mutation_outcome", "authority_applicability", "retry_safe", "replayability", "required_inputs", "next_action",
 	], ["lineage_id", "request_digest", "progress_identity", "cause_category", "cause", "context"]);
 	requireIdentity(body, "gentle-ai.review-integration.failure/v2");
-	const operation = enumeration(body.operation, REQUIRED_OPERATIONS, "failure.operation");
+	const operation = enumeration(body.operation, FAILURE_OPERATIONS, "failure.operation");
 
 	if (body.progress_identity !== undefined) {
 		if (body.lineage_id === undefined || body.request_digest === undefined) throw new TypeError("failure.progress_identity requires lineage_id and request_digest");
@@ -1884,6 +2013,57 @@ export function decodeReviewRepairV2(value         )                 {
 		...(providerInputs === undefined ? {} : { providerInputs }),
 		requiredInputs,
 		...(execution === undefined ? {} : { execution }),
+		raw: body,
+	};
+}
+
+// ---------------------------------------------------------------------------
+// result-artifact/v2 — the `review capture-result` admission answer
+// ---------------------------------------------------------------------------
+
+// The provider's admitted-reviewer-result envelope, printed by `review
+// capture-result` when a reviewer result is admitted and re-discovered by
+// STATUS artifact discovery. Unlike the negotiated envelopes above it carries
+// no `contract`/`operation` identity pair — the schema constant plus the
+// capability constant are its complete identity (vendored ground truth:
+// contracts/review-integration/v1/schemas/result-artifact-v2.schema.json,
+// confirmed against a live 2.4.0-main capture; the v2.2.3 pinned emitter
+// shares the exact same struct). Exactly one locator is present: a
+// provider-owned store `path`, or the opaque `rart1_` `reference` minted for
+// repository-context captures.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+export function decodeReviewResultArtifactV2(value         )                         {
+	const body = exactRecord(value, "result_artifact", ["schema", "capability", "sha256", "lineage_id", "target_identity", "lens", "selected_order", "subject_hash", "admission_decision"], ["path", "reference"]);
+	if (body.schema !== "gentle-ai.review-result-artifact/v2") throw new TypeError("result_artifact.schema must be gentle-ai.review-result-artifact/v2");
+	if (body.capability !== "review.native_result_artifact") throw new TypeError("result_artifact.capability must be review.native_result_artifact");
+	if (body.admission_decision !== "completed") throw new TypeError("result_artifact.admission_decision must be completed");
+	if ((body.path === undefined) === (body.reference === undefined)) throw new TypeError("result_artifact must carry exactly one of path or reference");
+	return {
+		schema: "gentle-ai.review-result-artifact/v2",
+		capability: "review.native_result_artifact",
+		sha256: sha256(body.sha256, "result_artifact.sha256"),
+		lineageId: lineage(body.lineage_id, "result_artifact.lineage_id"),
+		targetIdentity: sha256(body.target_identity, "result_artifact.target_identity"),
+		lens: enumeration(body.lens, REVIEW_LENSES, "result_artifact.lens"),
+		selectedOrder: integer(body.selected_order, "result_artifact.selected_order", 0, 3),
+		subjectHash: sha256(body.subject_hash, "result_artifact.subject_hash"),
+		admissionDecision: "completed",
+		...(body.path === undefined ? {} : { path: nonempty(body.path, "result_artifact.path") }),
+		...(body.reference === undefined ? {} : { reference: text(body.reference, "result_artifact.reference", { pattern: /^rart1_[0-9a-f]{64}$/ }) }),
 		raw: body,
 	};
 }

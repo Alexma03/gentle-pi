@@ -11,6 +11,7 @@ import {
 	NativeReviewCliV214 as NativeReviewCliV214Production,
 	NativeReviewCliV216,
 	clearNativeReviewCapabilitiesCacheForTesting,
+	nativeReviewAbandonAuthorization,
 	nativeReviewLegacyAliasRepairAuthorization,
 	type ExecFileAdapter,
 	type NativeReviewCli,
@@ -69,7 +70,23 @@ const LEGACY_ALIAS_AUTHORIZATION = [
 	"actor=maintainer",
 	"reason=quarantine approved historical alias",
 ].join("\n");
+const ABANDON_DISCARDED_WORK = {
+	capturedLensResults: ["00-risk.json", "01-readability.json"],
+	findingsPresent: true,
+	evidenceRecordsPresent: false,
+} as const;
 const ABANDON_AUTHORIZATION = [
+	"gentle-ai.review-abandon-authorization/v2",
+	"lineage=pristine",
+	"revision=revision",
+	"snapshot_identity=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	"reason=retire pristine lineage",
+	"captured_lens_results=00-risk.json,01-readability.json",
+	"findings_present=true",
+	"evidence_records_present=false",
+	"actor=maintainer",
+].join("\n");
+const LEGACY_V1_ABANDON_AUTHORIZATION = [
 	"gentle-ai.review-abandon-authorization/v1",
 	"lineage=pristine",
 	"revision=revision",
@@ -77,6 +94,16 @@ const ABANDON_AUTHORIZATION = [
 	"actor=maintainer",
 	"reason=retire pristine lineage",
 ].join("\n");
+const ABANDON_REQUEST = {
+	cwd: "/repo",
+	lineage: "pristine",
+	expectedRevision: "revision",
+	snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	...ABANDON_DISCARDED_WORK,
+	actor: "maintainer",
+	reason: "retire pristine lineage",
+	maintainerAuthorization: ABANDON_AUTHORIZATION,
+} as const;
 const LEGACY_QUARANTINE_AUTHORIZATION = [
 	"gentle-ai.review-legacy-quarantine-authorization/v1",
 	"repository=/repo",
@@ -97,6 +124,26 @@ const RECONCILE_AUTHORIZATION = [
 	"reason=invalid recovery edge",
 ].join("\n");
 const COMBINED_RECONCILE_AUTHORIZATION = `${RECONCILE_AUTHORIZATION}\nanomalies=${COMBINED_RECONCILE_ANOMALIES}`;
+const RECOVER_TARGET_IDENTITY = `sha256:${"e".repeat(64)}`;
+// The six canonical native recovery inputs, and nothing else. INSPECT never
+// publishes the legacy RESET quartet for a compact-v2 recovery, so this is the
+// complete request a maintainer can actually assemble (issue #212).
+const RECOVER_INPUT = {
+	predecessorLineage: "broken",
+	expectedPredecessorRevision: "rev-1",
+	successorLineage: "successor",
+	disposition: "invalidated",
+	actor: "maintainer",
+	reason: "invalid authority",
+} as const;
+const RECOVER_AUTHORIZATION = [
+	"gentle-ai.review-recovery-authorization/v1",
+	"predecessor_lineage=broken",
+	"predecessor_revision=rev-1",
+	`target_identity=${RECOVER_TARGET_IDENTITY}`,
+	"actor=maintainer",
+	"reason=invalid authority",
+].join("\n");
 
 function scratchDir(prefix: string): string {
 	const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -106,8 +153,9 @@ function scratchDir(prefix: string): string {
 
 interface RecordedNativeCall { operation: "reclaim" | "recover" | "reconcileAuthority" | "abandon" | "quarantineLegacy"; request: Record<string, unknown>; }
 
-function fakeRecoveryNative(record: Record<string, unknown>): { native: NativeReviewCli; calls: RecordedNativeCall[] } {
+function fakeRecoveryNative(record: Record<string, unknown>): { native: NativeReviewCli; calls: RecordedNativeCall[]; statusReads: Array<string | undefined> } {
 	const calls: RecordedNativeCall[] = [];
+	const statusReads: Array<string | undefined> = [];
 	const native = {
 		async reclaim(request: Record<string, unknown>) {
 			calls.push({ operation: "reclaim", request });
@@ -130,14 +178,23 @@ function fakeRecoveryNative(record: Record<string, unknown>): { native: NativeRe
 			return { record };
 		},
 		async targetStatus(request: { lineageId?: string }) {
-			return {
-				action: "recover",
-				actionDisposition: "invalidated",
-				authority: { lineageId: request.lineageId ?? "broken", revision: "rev-1" },
-			} as unknown;
+			statusReads.push(request.lineageId);
+			return recoveryTargetStatus(request.lineageId ?? "broken");
 		},
 	} as unknown as NativeReviewCli;
-	return { native, calls };
+	return { native, calls, statusReads };
+}
+
+/** One recovery-eligible native target status, shaped as the provider publishes it. */
+function recoveryTargetStatus(lineageId: string, overrides: Record<string, unknown> = {}): unknown {
+	return {
+		action: "recover",
+		actionDisposition: "invalidated",
+		authority: { lineageId, revision: "rev-1" },
+		targetIdentity: RECOVER_TARGET_IDENTITY,
+		raw: { action: "recover", target_identity: RECOVER_TARGET_IDENTITY },
+		...overrides,
+	};
 }
 
 async function runControllerOperation(
@@ -155,6 +212,39 @@ async function runControllerOperation(
 		signal,
 	);
 }
+
+/**
+ * The registered `gentle_review` tool, driven exactly as Pi drives it. RECOVER
+ * regressions hide from `executeReviewControllerOperation` alone, because the
+ * defect in issue #212 lived in the authorization preflight the tool runs first.
+ */
+function recoveryController(native: NativeReviewCli, prefix: string): (id: string, parameters: Record<string, unknown>, context: ExtensionContext) => Promise<Record<string, unknown>> {
+	const tools = new Map<string, { execute: (id: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }>();
+	const pi = { on() {}, registerTool(definition: { name: string; execute: never }) { tools.set(definition.name, definition as never); }, registerCommand() {} } as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: native })(pi);
+	const controller = tools.get("gentle_review");
+	assert.ok(controller);
+	const cwd = scratchDir(prefix);
+	return async (id, parameters, context) => {
+		const result = await controller.execute(id, parameters, undefined, undefined, { ...context, cwd } as unknown as ExtensionContext) as { details: Record<string, unknown> };
+		return result.details;
+	};
+}
+
+/** An interactive Pi context that records every prompt it is shown. */
+function interactiveContext(prompts: string[], approve = true): ExtensionContext {
+	return {
+		hasUI: true,
+		ui: {
+			async confirm(_title: string, message: string) {
+				prompts.push(message);
+				return approve;
+			},
+		},
+	} as unknown as ExtensionContext;
+}
+
+const HEADLESS_CONTEXT = { hasUI: false, ui: { confirm: async () => true } } as unknown as ExtensionContext;
 
 test("native reclaim wrapper issues the exact review reclaim command and returns the audit record", async () => {
 	const { adapter, calls } = queuedAdapter([VERSION_219, { stdout: JSON.stringify(RECLAIM_RECORD) }]);
@@ -249,7 +339,7 @@ test("native v2.1.9 maintenance wrappers use exact argv and published authorizat
 		VERSION_219, { stdout: JSON.stringify({ operation: "review/reconcile-authority", record: RECONCILE_RECORD }) },
 	]);
 	const cli = new NativeReviewCliV214(adapter);
-	assert.deepEqual((await cli.abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION })).record, ABANDON_RECORD);
+	assert.deepEqual((await cli.abandon!({ ...ABANDON_REQUEST })).record, ABANDON_RECORD);
 	assert.deepEqual((await cli.quarantineLegacy!({ cwd: "/repo", repository: "/repo", lineage: "legacy", expectedRevision: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", diagnostic: LEGACY_FREEZE_DIAGNOSTIC, disposition: LEGACY_FREEZE_DISPOSITION, actor: "maintainer", reason: "quarantine malformed legacy freeze", maintainerAuthorization: LEGACY_QUARANTINE_AUTHORIZATION })).record, LEGACY_QUARANTINE_RECORD);
 	assert.deepEqual((await cli.reconcileAuthority!({ cwd: "/repo", predecessorLineage: "predecessor", expectedPredecessorRevision: "predecessor-revision", successorLineage: "successor", expectedSuccessorRevision: "successor-revision", actor: "maintainer", reason: "invalid recovery edge", anomalies: COMBINED_RECONCILE_ANOMALIES, maintainerAuthorization: COMBINED_RECONCILE_AUTHORIZATION })).record, RECONCILE_RECORD);
 	assert.deepEqual(calls.filter((call) => call.arguments[0] === "review").map((call) => call.arguments), [
@@ -350,7 +440,7 @@ test("native repair-legacy-alias fails closed for stale bindings, malformed outp
 
 test("native v2.1.9 maintenance wrappers fail closed before launch for unsupported versions and invalid bindings", async () => {
 	const unsupported = queuedAdapter([{ stdout: "gentle-ai 2.1.8\n" }]);
-	await assert.rejects(() => new NativeReviewCliV214(unsupported.adapter).abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION }), NativeReviewCliError);
+	await assert.rejects(() => new NativeReviewCliV214(unsupported.adapter).abandon!({ ...ABANDON_REQUEST }), NativeReviewCliError);
 	const invalid = queuedAdapter([]);
 	await assert.rejects(() => new NativeReviewCliV214(invalid.adapter).reconcileAuthority!({ cwd: "/repo", predecessorLineage: "predecessor", expectedPredecessorRevision: "predecessor-revision", successorLineage: "successor", expectedSuccessorRevision: "successor-revision", actor: "maintainer", reason: "invalid recovery edge", anomalies: "malformed_recovery_authorization,unchanged_target", maintainerAuthorization: COMBINED_RECONCILE_AUTHORIZATION }), TypeError);
 	assert.equal(invalid.calls.length, 0);
@@ -358,14 +448,14 @@ test("native v2.1.9 maintenance wrappers fail closed before launch for unsupport
 
 test("native v2.1.9 maintenance wrappers preserve only valid prepared audit records on partial failures", async () => {
 	for (const [operation, invoke, result] of [
-		["review/abandon", (cli: NativeReviewCliV214) => cli.abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION }), ABANDON_RECORD],
+		["review/abandon", (cli: NativeReviewCliV214) => cli.abandon!({ ...ABANDON_REQUEST }), ABANDON_RECORD],
 		["review/quarantine-legacy", (cli: NativeReviewCliV214) => cli.quarantineLegacy!({ cwd: "/repo", repository: "/repo", lineage: "legacy", expectedRevision: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", diagnostic: LEGACY_FREEZE_DIAGNOSTIC, disposition: LEGACY_FREEZE_DISPOSITION, actor: "maintainer", reason: "quarantine malformed legacy freeze", maintainerAuthorization: LEGACY_QUARANTINE_AUTHORIZATION }), LEGACY_QUARANTINE_RECORD],
 	] as const) {
 		const queue = queuedAdapter([VERSION_219, { stdout: JSON.stringify({ operation, record: result }), stderr: "quarantine interrupted", exitCode: 1 }]);
 		await assert.rejects(() => invoke(new NativeReviewCliV214(queue.adapter)), (error: unknown) => error instanceof NativeReviewCliError && error.mutationOutcome === "unknown" && error.nextAction === "review.status" && error.auditRecord?.schema === result.schema);
 	}
 	const malformed = queuedAdapter([VERSION_219, { stdout: JSON.stringify({ operation: "review/abandon" }), exitCode: 1 }]);
-	await assert.rejects(() => new NativeReviewCliV214(malformed.adapter).abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION }), (error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE && error.auditRecord === undefined);
+	await assert.rejects(() => new NativeReviewCliV214(malformed.adapter).abandon!({ ...ABANDON_REQUEST }), (error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE && error.auditRecord === undefined);
 });
 
 test("native abandon forwards cancellation and preserves the unknown mutation outcome", async () => {
@@ -379,7 +469,75 @@ test("native abandon forwards cancellation and preserves the unknown mutation ou
 		error.name = "AbortError";
 		throw error;
 	};
-	await assert.rejects(() => new NativeReviewCliV214(adapter).abandon!({ cwd: "/repo", lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage", maintainerAuthorization: ABANDON_AUTHORIZATION, signal: controller.signal }), (error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.CANCELLED && error.mutationOutcome === "unknown" && error.nextAction === "review.status");
+	await assert.rejects(() => new NativeReviewCliV214(adapter).abandon!({ ...ABANDON_REQUEST, signal: controller.signal }), (error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.CANCELLED && error.mutationOutcome === "unknown" && error.nextAction === "review.status");
+});
+
+test("native abandon authorization emits the exact nine-line v2 discarded-work binding", () => {
+	assert.equal(
+		nativeReviewAbandonAuthorization({
+			lineage: "pristine",
+			expectedRevision: "revision",
+			snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			actor: "  maintainer  ",
+			reason: "operator_disposition",
+			capturedLensResults: ["00-risk.json", "01-readability.json"],
+			findingsPresent: true,
+			evidenceRecordsPresent: false,
+		}),
+		[
+			"gentle-ai.review-abandon-authorization/v2",
+			"lineage=pristine",
+			"revision=revision",
+			"snapshot_identity=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"reason=operator_disposition",
+			"captured_lens_results=00-risk.json,01-readability.json",
+			"findings_present=true",
+			"evidence_records_present=false",
+			"actor=maintainer",
+		].join("\n"),
+	);
+	assert.equal(
+		nativeReviewAbandonAuthorization({
+			lineage: "pristine",
+			expectedRevision: "revision",
+			snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			actor: "maintainer",
+			reason: "retired_schema",
+			capturedLensResults: [],
+			findingsPresent: false,
+			evidenceRecordsPresent: true,
+		}),
+		[
+			"gentle-ai.review-abandon-authorization/v2",
+			"lineage=pristine",
+			"revision=revision",
+			"snapshot_identity=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"reason=retired_schema",
+			"captured_lens_results=",
+			"findings_present=false",
+			"evidence_records_present=true",
+			"actor=maintainer",
+		].join("\n"),
+	);
+});
+
+test("native abandon refuses the legacy v1 authorization binding before process launch", async () => {
+	const { adapter, calls } = queuedAdapter([]);
+	await assert.rejects(
+		() => new NativeReviewCliV214(adapter).abandon!({ ...ABANDON_REQUEST, maintainerAuthorization: LEGACY_V1_ABANDON_AUTHORIZATION }),
+		TypeError,
+	);
+	assert.equal(calls.length, 0);
+});
+
+test("native abandon validates discarded-work inputs before process launch", async () => {
+	const { adapter, calls } = queuedAdapter([]);
+	const cli = new NativeReviewCliV214(adapter);
+	await assert.rejects(() => cli.abandon!({ ...ABANDON_REQUEST, capturedLensResults: "00-risk.json" as unknown as string[] }), /capturedLensResults/);
+	await assert.rejects(() => cli.abandon!({ ...ABANDON_REQUEST, capturedLensResults: ["00-risk.json", " padded "] }), /capturedLensResults/);
+	await assert.rejects(() => cli.abandon!({ ...ABANDON_REQUEST, findingsPresent: "true" as unknown as boolean }), /findingsPresent/);
+	await assert.rejects(() => cli.abandon!({ ...ABANDON_REQUEST, evidenceRecordsPresent: undefined as unknown as boolean }), /evidenceRecordsPresent/);
+	assert.equal(calls.length, 0);
 });
 
 test("native reconcile-authority refuses a mismatched authorization before process launch", async () => {
@@ -524,24 +682,23 @@ test("RESET without a native client fails closed as unavailable", async () => {
 	assert.equal(details.mutation_performed, false);
 });
 
-test("RECOVER maps to native review recover with the successor authority binding", async () => {
-	const { native, calls } = fakeRecoveryNative(RECOVER_RECORD);
-	const details = await runControllerOperation({
-		operation: "recover",
-		input: JSON.stringify({
-			repositoryId: "repo-id",
-			commonDirHash: "c".repeat(64),
-			inventoryHash: "d".repeat(64),
-			confirmation: "DESTROY REVIEW AUTHORITY repo-id",
-			predecessorLineage: "broken",
-			expectedPredecessorRevision: "rev-1",
-			successorLineage: "successor",
-			disposition: "invalidated",
-			actor: "maintainer",
-			reason: "invalid authority",
-			maintainerAuthorization: "binding",
-		}),
-	}, native);
+// Issue #212: `authorizeDestructiveReviewOperation` classified native RECOVER as
+// a legacy repository-wide RESET, so a correct six-field native recovery was
+// refused with "Review controller recover requires an exact string repositoryId"
+// before it ever reached the native router. INSPECT does not publish that
+// quartet for compact-v2 recovery, which left the only supported flow
+// unreachable. Reported by @PwnLabsmx, independently reproduced on macOS by
+// @e-Evolution and again by the maintainer.
+//
+// Every RECOVER test below drives the registered tool rather than
+// `executeReviewControllerOperation`, because the defect lived in the
+// authorization preflight the tool runs before that function.
+test("RECOVER accepts the six canonical native inputs without the legacy RESET challenge", async () => {
+	const { native, calls, statusReads } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-six-field-");
+	const prompts: string[] = [];
+	const details = await run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, interactiveContext(prompts));
+	assert.equal(details.status, undefined, "the native six-field recovery contract is complete on its own");
 	assert.equal(details.native_operation, "review recover");
 	assert.equal(details.mutation_performed, true);
 	assert.deepEqual(details.result, RECOVER_RECORD);
@@ -551,26 +708,144 @@ test("RECOVER maps to native review recover with the successor authority binding
 	assert.equal(calls[0]?.request.expectedPredecessorRevision, "rev-1");
 	assert.equal(calls[0]?.request.successorLineage, "successor");
 	assert.equal(calls[0]?.request.disposition, "invalidated");
-	assert.equal(calls[0]?.request.maintainerAuthorization, "binding");
+	// Pi derives the binding; it is never the caller's to supply.
+	assert.equal(calls[0]?.request.maintainerAuthorization, RECOVER_AUTHORIZATION);
+	assert.equal(prompts.length, 1);
+	assert.match(prompts[0]!, /gentle-ai\.review-recovery-authorization\/v1/);
+	assert.match(prompts[0]!, new RegExp(`target_identity=${RECOVER_TARGET_IDENTITY}`));
+	assert.match(prompts[0]!, /Provider-selected disposition: invalidated/);
+	assert.equal(prompts[0]!.includes("repositoryId"), false, "the legacy reset challenge has no place in native recovery");
+	// Status is read before approval and read again before mutation.
+	assert.deepEqual(statusReads, ["broken", "broken"]);
+});
+
+test("RECOVER rejects a caller-supplied maintainerAuthorization before reading or prompting", async () => {
+	const { native, calls, statusReads } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-caller-authorization-");
+	const prompts: string[] = [];
+	const details = await run(
+		"recover",
+		{ operation: "recover", input: JSON.stringify({ ...RECOVER_INPUT, maintainerAuthorization: RECOVER_AUTHORIZATION }) },
+		interactiveContext(prompts),
+	);
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-recovery-caller-authorization-rejected");
+	assert.equal(details.mutation_performed, false);
+	assert.equal(details.mutation_outcome, "none");
+	assert.equal(details.next_action, "resubmit-without-maintainer-authorization");
+	assert.equal(calls.length, 0);
+	assert.deepEqual(statusReads, []);
+	assert.deepEqual(prompts, []);
+});
+
+test("RECOVER fails closed without an interactive Pi UI", async () => {
+	const { native, calls, statusReads } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-headless-");
+	await assert.rejects(
+		run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, HEADLESS_CONTEXT),
+		/Review controller RECOVER requires fresh explicit authorization through the interactive Pi UI; headless execution fails closed/,
+	);
+	assert.equal(calls.length, 0);
+	// Fresh native evidence is read, but nothing mutates without a human.
+	assert.deepEqual(statusReads, ["broken"]);
+});
+
+test("RECOVER refuses to mutate when the human declines the derived binding", async () => {
+	const { native, calls } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-declined-");
+	const prompts: string[] = [];
+	await assert.rejects(
+		run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, interactiveContext(prompts, false)),
+		/Review controller RECOVER was not explicitly authorized/,
+	);
+	assert.equal(prompts.length, 1);
+	assert.equal(calls.length, 0);
+});
+
+test("RECOVER refuses a foreign, stale, or no-longer-recoverable authority before prompting", async () => {
+	for (const [label, status] of [
+		["foreign", recoveryTargetStatus("someone-elses-lineage")],
+		["stale", recoveryTargetStatus("broken", { authority: { lineageId: "broken", revision: "rev-2" } })],
+		["not recovery-eligible", recoveryTargetStatus("broken", { action: "start", actionDisposition: undefined })],
+	] as const) {
+		const calls: Record<string, unknown>[] = [];
+		const native = {
+			async recover(request: Record<string, unknown>) { calls.push(request); return { record: RECOVER_RECORD }; },
+			async targetStatus() { return status; },
+		} as unknown as NativeReviewCli;
+		const run = recoveryController(native, `gentle-pi-recover-${label.replace(/[^a-z]+/g, "-")}-`);
+		const prompts: string[] = [];
+		const details = await run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, interactiveContext(prompts));
+		assert.equal(details.status, "blocked", label);
+		assert.equal(details.outcome, "native-recovery-status-mismatch", label);
+		assert.equal(details.mutation_performed, false, label);
+		assert.equal(calls.length, 0, label);
+		assert.deepEqual(prompts, [], label);
+	}
+});
+
+test("RECOVER refuses a disposition the provider did not select", async () => {
+	const { native, calls } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-disposition-");
+	const prompts: string[] = [];
+	const details = await run("recover", { operation: "recover", input: JSON.stringify({ ...RECOVER_INPUT, disposition: "escalated" }) }, interactiveContext(prompts));
+	assert.equal(details.status, "blocked");
+	assert.equal(details.outcome, "native-recovery-disposition-mismatch");
+	assert.equal(details.provider_disposition, "invalidated");
+	assert.equal(details.mutation_performed, false);
+	assert.equal(calls.length, 0);
+	assert.deepEqual(prompts, []);
+});
+
+// The human deliberates for an unbounded interval. An authority that advanced
+// while they were deciding was never the one they approved, so the approval and
+// its derived binding are pinned and re-checked against a fresh read.
+test("RECOVER refuses to mutate when the authority changes between approval and mutation", async () => {
+	for (const [label, drifted] of [
+		["revision advanced", recoveryTargetStatus("broken", { authority: { lineageId: "broken", revision: "rev-2" } })],
+		["target identity moved", recoveryTargetStatus("broken", { targetIdentity: `sha256:${"f".repeat(64)}` })],
+		["disposition changed", recoveryTargetStatus("broken", { actionDisposition: "escalated" })],
+		["no longer recoverable", recoveryTargetStatus("broken", { action: "start", actionDisposition: undefined })],
+	] as const) {
+		const calls: Record<string, unknown>[] = [];
+		let reads = 0;
+		const native = {
+			async recover(request: Record<string, unknown>) { calls.push(request); return { record: RECOVER_RECORD }; },
+			async targetStatus() {
+				reads += 1;
+				return reads === 1 ? recoveryTargetStatus("broken") : drifted;
+			},
+		} as unknown as NativeReviewCli;
+		const run = recoveryController(native, `gentle-pi-recover-toctou-${label.replace(/[^a-z]+/g, "-")}-`);
+		const prompts: string[] = [];
+		const details = await run("recover", { operation: "recover", input: JSON.stringify(RECOVER_INPUT) }, interactiveContext(prompts));
+		assert.equal(prompts.length, 1, label);
+		assert.equal(reads, 2, label);
+		assert.equal(details.status, "blocked", label);
+		assert.equal(details.outcome, "native-recovery-authority-changed", label);
+		assert.equal(details.mutation_performed, false, label);
+		assert.equal(details.mutation_outcome, "none", label);
+		assert.equal(details.next_action, "reinspect-and-reauthorize-recovery", label);
+		assert.equal(calls.length, 0, label);
+	}
 });
 
 test("RECOVER surfaces every missing successor input including an unsupported disposition", async () => {
-	const { native, calls } = fakeRecoveryNative(RECOVER_RECORD);
-	const details = await runControllerOperation({
-		operation: "recover",
-		input: JSON.stringify({
-			repositoryId: "repo-id",
-			commonDirHash: "c".repeat(64),
-			inventoryHash: "d".repeat(64),
-			confirmation: "DESTROY REVIEW AUTHORITY repo-id",
-			predecessorLineage: "broken",
-			disposition: "not-a-disposition",
-		}),
-	}, native);
+	const { native, calls, statusReads } = fakeRecoveryNative(RECOVER_RECORD);
+	const run = recoveryController(native, "gentle-pi-recover-missing-input-");
+	const prompts: string[] = [];
+	const details = await run(
+		"recover",
+		{ operation: "recover", input: JSON.stringify({ predecessorLineage: "broken", disposition: "not-a-disposition" }) },
+		interactiveContext(prompts),
+	);
 	assert.equal(details.outcome, "native-input-required");
 	assert.equal(details.native_operation, "review recover");
+	// The missing inputs are the native six, never the legacy reset quartet.
 	assert.deepEqual(details.missing_input, ["expectedPredecessorRevision", "successorLineage", "disposition", "actor", "reason"]);
 	assert.equal(calls.length, 0);
+	assert.deepEqual(statusReads, []);
+	assert.deepEqual(prompts, []);
 });
 
 test("RECONCILE_AUTHORITY routes one exact native mutation and returns its audit record", async () => {
@@ -720,6 +995,48 @@ test("destructive RESET still fails closed without fresh interactive authorizati
 	assert.equal(calls.length, 0);
 });
 
+// Regression guard for issue #212: separating RECOVER out must leave the legacy
+// repository-wide RESET challenge exactly as it was.
+test("RESET still demands the complete legacy repository challenge and its own fresh approval", async () => {
+	const tools = new Map<string, { execute: (id: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }>();
+	const pi = { on() {}, registerTool(definition: { name: string; execute: never }) { tools.set(definition.name, definition as never); }, registerCommand() {} } as unknown as ExtensionAPI;
+	const { native, calls } = fakeRecoveryNative(RECLAIM_RECORD);
+	createGentleAiExtension({ nativeReviewCli: native })(pi);
+	const controller = tools.get("gentle_review");
+	assert.ok(controller);
+	const cwd = scratchDir("gentle-pi-native-reset-challenge-");
+	const challenge = {
+		repositoryId: "repo-id",
+		commonDirHash: "c".repeat(64),
+		inventoryHash: "d".repeat(64),
+		confirmation: "DESTROY REVIEW AUTHORITY repo-id",
+	};
+	const reclaim = { lineage: "stuck", actor: "maintainer", reason: "incomplete" };
+	for (const key of ["repositoryId", "commonDirHash", "inventoryHash", "confirmation"] as const) {
+		const incomplete: Record<string, unknown> = { ...challenge, ...reclaim };
+		delete incomplete[key];
+		await assert.rejects(
+			controller.execute(`reset-missing-${key}`, { operation: "reset", input: JSON.stringify(incomplete) }, undefined, undefined, {
+				cwd, hasUI: true, ui: { confirm: async () => true },
+			} as unknown as ExtensionContext),
+			new RegExp(`Review controller reset requires an exact string ${key}`),
+		);
+	}
+	assert.equal(calls.length, 0);
+	let prompt = "";
+	const approved = await controller.execute("approved-reset", { operation: "reset", input: JSON.stringify({ ...challenge, ...reclaim }) }, undefined, undefined, {
+		cwd,
+		hasUI: true,
+		ui: { confirm: async (_title: string, message: string) => { prompt = message; return true; } },
+	} as unknown as ExtensionContext) as { details: Record<string, unknown> };
+	assert.match(prompt, /Repository: repo-id/);
+	assert.match(prompt, /Exact challenge: DESTROY REVIEW AUTHORITY repo-id/);
+	assert.match(prompt, /This invalidates all prior review authority for this repository\./);
+	assert.equal(approved.details.mutation_performed, true);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0]?.operation, "reclaim");
+});
+
 test("RECONCILE_AUTHORITY requires fresh Pi approval for the exact seven-line binding", async () => {
 	const tools = new Map<string, { execute: (id: string, params: unknown, signal: undefined, onUpdate: undefined, ctx: ExtensionContext) => Promise<unknown> }>();
 	const pi = {
@@ -767,12 +1084,26 @@ test("published maintenance controller actions require exact inputs and fresh UI
 	const controller = tools.get("gentle_review");
 	assert.ok(controller);
 	const cwd = scratchDir("gentle-pi-v219-maintenance-");
-	const abandon = { operation: "abandon", input: JSON.stringify({ lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage" }) };
+	const abandon = { operation: "abandon", input: JSON.stringify({ lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ...ABANDON_DISCARDED_WORK, actor: "maintainer", reason: "retire pristine lineage" }) };
 	await assert.rejects(controller.execute("headless-abandon", abandon, undefined, undefined, { cwd, hasUI: false, ui: { confirm: async () => true } } as unknown as ExtensionContext), /interactive Pi UI.*fails closed/i);
 	await assert.rejects(controller.execute("denied-abandon", abandon, undefined, undefined, { cwd, hasUI: true, ui: { confirm: async () => false } } as unknown as ExtensionContext), /not explicitly authorized/);
-	const approved = await controller.execute("approved-abandon", abandon, undefined, undefined, { cwd, hasUI: true, ui: { confirm: async () => true } } as unknown as ExtensionContext) as { details: Record<string, unknown> };
+	let abandonPrompt = "";
+	const approved = await controller.execute("approved-abandon", abandon, undefined, undefined, { cwd, hasUI: true, ui: { confirm: async (_title: string, message: string) => { abandonPrompt = message; return true; } } } as unknown as ExtensionContext) as { details: Record<string, unknown> };
 	assert.equal(approved.details.mutation_outcome, "committed");
+	assert.match(abandonPrompt, /gentle-ai\.review-abandon-authorization\/v2/);
+	assert.match(abandonPrompt, /captured_lens_results=00-risk\.json,01-readability\.json/);
+	assert.match(abandonPrompt, /findings_present=true\nevidence_records_present=false\nactor=maintainer/);
 	assert.equal(calls[0]?.operation, "abandon");
+	assert.equal((calls[0]?.request as { maintainerAuthorization?: string }).maintainerAuthorization, ABANDON_AUTHORIZATION);
+	assert.deepEqual(calls[0]?.request.capturedLensResults, ["00-risk.json", "01-readability.json"]);
+	assert.equal(calls[0]?.request.findingsPresent, true);
+	assert.equal(calls[0]?.request.evidenceRecordsPresent, false);
+	const missingDiscarded = await runControllerOperation({ operation: "abandon", input: JSON.stringify({ lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", actor: "maintainer", reason: "retire pristine lineage" }) }, native);
+	assert.equal(missingDiscarded.outcome, "native-input-required");
+	assert.deepEqual(missingDiscarded.missing_input, ["capturedLensResults", "findingsPresent", "evidenceRecordsPresent"]);
+	const invalidDiscarded = await runControllerOperation({ operation: "abandon", input: JSON.stringify({ lineage: "pristine", expectedRevision: "revision", snapshotIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", capturedLensResults: ["00-risk.json", " padded "], findingsPresent: true, evidenceRecordsPresent: false, actor: "maintainer", reason: "retire pristine lineage" }) }, native);
+	assert.equal(invalidDiscarded.outcome, "native-input-required");
+	assert.deepEqual(invalidDiscarded.missing_input, ["capturedLensResults"]);
 	const legacy = await controller.execute("approved-legacy-quarantine", { operation: "quarantine-legacy", input: JSON.stringify({ repository: "/repo", lineage: "legacy", expectedRevision: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", diagnostic: LEGACY_FREEZE_DIAGNOSTIC, disposition: LEGACY_FREEZE_DISPOSITION, actor: "maintainer", reason: "quarantine malformed legacy freeze" }) }, undefined, undefined, { cwd, hasUI: true, ui: { confirm: async () => true } } as unknown as ExtensionContext) as { details: Record<string, unknown> };
 	assert.equal(legacy.details.mutation_outcome, "committed");
 	assert.equal(calls[1]?.operation, "quarantineLegacy");
@@ -845,13 +1176,20 @@ test("REPAIR_LEGACY_ALIAS derives fixed inputs from fresh inventory and requires
 // Pi passes the transition's tokens through verbatim and adds only --input.
 test("captureResult passes the provider tokens through verbatim and carries no --contract", async (t) => {
 	t.after(() => clearNativeReviewCapabilitiesCacheForTesting());
+	// The full live envelope shape, confirmed against real capture-result runs
+	// on both the pinned line and gentle-ai main (tests/fixtures/devbinary/
+	// result-artifact-v2.captured.json): the opaque locator prefix is rart1_.
 	const manifest = {
 		schema: "gentle-ai.review-result-artifact/v2",
 		capability: "review.native_result_artifact",
+		reference: "rart1_" + "b".repeat(64),
+		sha256: "sha256:" + "f".repeat(64),
+		lineage_id: "review-1d5aadacc600e167",
+		target_identity: "sha256:" + "d".repeat(64),
+		lens: "review-reliability",
+		selected_order: 0,
 		subject_hash: "sha256:" + "a".repeat(64),
 		admission_decision: "completed",
-		lens: "review-reliability",
-		reference: "rref1_" + "b".repeat(64),
 	};
 	const { adapter, calls } = queuedAdapter([{ stdout: JSON.stringify(manifest) }]);
 	const cli = new NativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
@@ -882,6 +1220,45 @@ test("captureResult passes the provider tokens through verbatim and carries no -
 	assert.equal(argv.at(-2), "--input");
 	assert.match(argv.at(-1) as string, /\S/);
 	assert.equal(argv.length, 2 + tokens.length + 2);
+});
+
+// The admission answer routes through the exact-identity forward decoder:
+// a manifest missing its binding fields (the shape no real binary ever
+// emitted) or carrying a foreign locator prefix is refused, never partially
+// consumed. This is the decoder-freshness discipline reaching the consumer.
+test("captureResult refuses an under-specified or foreign-locator manifest", async (t) => {
+	t.after(() => clearNativeReviewCapabilitiesCacheForTesting());
+	const full = {
+		schema: "gentle-ai.review-result-artifact/v2",
+		capability: "review.native_result_artifact",
+		reference: "rart1_" + "b".repeat(64),
+		sha256: "sha256:" + "f".repeat(64),
+		lineage_id: "review-1d5aadacc600e167",
+		target_identity: "sha256:" + "d".repeat(64),
+		lens: "review-reliability",
+		selected_order: 0,
+		subject_hash: "sha256:" + "a".repeat(64),
+		admission_decision: "completed",
+	};
+	const legacyPartial = {
+		schema: full.schema,
+		capability: full.capability,
+		subject_hash: full.subject_hash,
+		admission_decision: full.admission_decision,
+		lens: full.lens,
+		reference: full.reference,
+	};
+	for (const body of [
+		legacyPartial,
+		{ ...full, reference: "rref1_" + "b".repeat(64) },
+		{ ...full, unadvertised: true },
+	]) {
+		const cli = new NativeReviewCliV216(async () => ({ stdout: JSON.stringify(body), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false }), "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
+		await assert.rejects(cli.captureResult({
+			argumentTokens: ["--lineage=review-1d5aadacc600e167", "--repository-context=rctx1_" + "e".repeat(64)],
+			resultDocument: JSON.stringify({ subject_hash: full.subject_hash, inspection: { status: "completed", paths: ["a.ts"] }, findings: [], evidence: ["reviewed the complete frozen candidate scope"] }),
+		}));
+	}
 });
 
 test("captureEvidence stages exact bytes, uses the closed outcome argv, and decodes the native record", async (t) => {
@@ -1044,4 +1421,137 @@ test("finalizeTransition runs the provider-rendered tokens verbatim and decodes 
 	const negotiated = await cli.finalizeTransition({ cwd: "/repo", argumentTokens: tokens });
 	assert.equal(negotiated.storeRevision, `sha256:${"f".repeat(64)}`);
 	await assert.rejects(cli.finalizeTransition({ cwd: "/repo", argumentTokens: [] }), /requires the provider-rendered argument tokens/);
+});
+
+// Field defect (fambig, 2026-08-16): the evidence collect slot renders the
+// exact `review capture-evidence` submission tokens — fix-diff `--target`,
+// `--expected-revision`, and an opaque cwd-independent `--repository-context` —
+// with `{{outcome}}`/`{{input}}` slots. Satisfying the slot means executing
+// those tokens verbatim with only the two slot substitutions, exactly like
+// captureResult; identities are never reconstructed on the client.
+test("captureEvidenceSubmission executes the provider-rendered submission tokens verbatim with slot substitution", async (t) => {
+	t.after(() => clearNativeReviewCapabilitiesCacheForTesting());
+	const capabilities = v2Fixture<Record<string, unknown>>("capabilities.fixture.json");
+	const capabilitiesBody = { ...capabilities, package: { ...(capabilities.package as Record<string, unknown>), version: GENTLE_AI_VERSION } };
+	const record = {
+		schema: "gentle-ai.review-verification-evidence/v2",
+		version: 2,
+		lineage_id: "review-evidence-lineage",
+		authority_revision: `sha256:${"a".repeat(64)}`,
+		target_identity: `sha256:${"b".repeat(64)}`,
+		candidate_tree: "c".repeat(40),
+		paths_digest: `sha256:${"d".repeat(64)}`,
+		paths: ["calc.go"],
+		ledger_ids: ["R3-1"],
+		raw_payload_sha256: `sha256:${"e".repeat(64)}`,
+		raw_payload_bytes: 24,
+		outcome: "passed",
+		record_digest: `sha256:${"f".repeat(64)}`,
+	};
+	const argumentTokens = [
+		`--lineage=${record.lineage_id}`,
+		`--expected-revision=${record.authority_revision}`,
+		`--target=${record.target_identity}`,
+		`--repository-context=rctx1_${"e".repeat(64)}`,
+		"--outcome={{outcome}}",
+		"--input={{input}}",
+	];
+	let staged = "";
+	const calls: Array<{ arguments: readonly string[] }> = [];
+	const cli = new NativeReviewCliV216(async (request) => {
+		calls.push({ arguments: request.arguments });
+		if (request.arguments[1] === "capabilities") return { stdout: JSON.stringify(capabilitiesBody), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+		const inputToken = request.arguments.find((token) => token.startsWith("--input="));
+		assert.ok(inputToken !== undefined);
+		staged = readFileSync(inputToken.slice("--input=".length), "utf8");
+		return { stdout: JSON.stringify(record), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+	}, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
+	const evidence = "verification: go test ./... passed\n";
+	const captured = await cli.captureEvidenceSubmission({
+		argumentTokens,
+		outcomeSubstitutionLocation: 4,
+		inputSubstitutionLocation: 5,
+		outcome: "passed",
+		evidenceDocument: evidence,
+	});
+	assert.equal(staged, evidence, "the evidence bytes must be staged exactly");
+	assert.equal(captured.recordDigest, record.record_digest);
+	assert.equal(captured.targetIdentity, record.target_identity);
+	const argv = calls[1]!.arguments;
+	assert.deepEqual(argv.slice(0, 2), ["review", "capture-evidence"]);
+	assert.deepEqual(argv.slice(2, 6), argumentTokens.slice(0, 4), "the identity-bearing tokens must pass through verbatim, in provider order");
+	assert.equal(argv[6], "--outcome=passed");
+	assert.match(String(argv[7]), /^--input=./);
+	assert.equal(argv.length, 8);
+	assert.equal(argv.includes("--cwd"), false, "the repository context is authoritative and cwd-independent");
+	assert.equal(argv.includes("--contract"), false);
+	await assert.rejects(
+		cli.captureEvidenceSubmission({ cwd: "/repo", argumentTokens, outcomeSubstitutionLocation: 4, inputSubstitutionLocation: 5, outcome: "passed", evidenceDocument: evidence }),
+		/repository context or --cwd, never both/,
+	);
+	await assert.rejects(
+		cli.captureEvidenceSubmission({ argumentTokens, outcomeSubstitutionLocation: 4, inputSubstitutionLocation: 5, outcome: "failed" as never, evidenceDocument: evidence }),
+		/outcome must be passed, verification_failed, or procedural_tooling_failed/,
+	);
+	await assert.rejects(
+		cli.captureEvidenceSubmission({ argumentTokens: argumentTokens.slice(0, 4), outcomeSubstitutionLocation: 0, inputSubstitutionLocation: 1, outcome: "passed", evidenceDocument: evidence }),
+		/\{\{outcome\}\}/,
+	);
+	assert.equal(calls.length, 2, "every rejected submission must fail before another native launch");
+});
+
+test("finalizeSubmission executes the rendered finalize submission tokens verbatim with the {{value}} substitution", async (t) => {
+	t.after(() => clearNativeReviewCapabilitiesCacheForTesting());
+	const capabilities = v2Fixture<Record<string, unknown>>("capabilities.fixture.json");
+	const capabilitiesBody = { ...capabilities, package: { ...(capabilities.package as Record<string, unknown>), version: GENTLE_AI_VERSION } };
+	const finalizeBody = {
+		schema: "gentle-ai.review-integration.operation/v2",
+		contract: "gentle-ai.review-integration/v2",
+		operation: "review.finalize",
+		result: { operation: "review/finalize", lineage_id: "review-1d5aadacc600e167", state: "correction_required", action: "continue the current review state", store_revision: `sha256:${"f".repeat(64)}` },
+	};
+	const planTokens = [
+		"--contract=gentle-ai.review-integration/v2",
+		"--lineage=review-1d5aadacc600e167",
+		`--expected-revision=sha256:${"a".repeat(64)}`,
+		`--target=sha256:${"b".repeat(64)}`,
+		`--request-hash=sha256:${"c".repeat(64)}`,
+		`--repository-context=rctx1_${"e".repeat(64)}`,
+		"--correction-lines={{value}}",
+	];
+	const calls: Array<{ arguments: readonly string[] }> = [];
+	let staged: string | undefined;
+	const cli = new NativeReviewCliV216(async (request) => {
+		calls.push({ arguments: request.arguments });
+		if (request.arguments[1] === "capabilities") return { stdout: JSON.stringify(capabilitiesBody), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+		const validationToken = request.arguments.find((token) => token.startsWith("--validation="));
+		if (validationToken !== undefined) staged = readFileSync(validationToken.slice("--validation=".length), "utf8");
+		return { stdout: JSON.stringify(finalizeBody), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+	}, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705");
+
+	// Plan form: literal substitution, every other token verbatim.
+	const planned = await cli.finalizeSubmission({ cwd: "/repo", argumentTokens: planTokens, valueSubstitutionLocation: 6, valueLiteral: "2" });
+	assert.equal(planned.state, "correction_required");
+	const planArgv = calls[1]!.arguments;
+	assert.deepEqual(planArgv.slice(0, 2), ["review", "finalize"]);
+	assert.deepEqual(planArgv.slice(2, 8), planTokens.slice(0, 6), "identity-bearing tokens must pass through verbatim, in provider order");
+	assert.equal(planArgv[8], "--correction-lines=2");
+	assert.equal(planArgv.length, 9);
+
+	// Validation form: the document is staged to a 0o600 artifact whose path substitutes {{value}}.
+	const validationTokens = [...planTokens.slice(0, 6), "--validation={{value}}"];
+	const document = JSON.stringify({ targeted_validation_request_hash: `sha256:${"9".repeat(64)}`, original_criteria: { passed: true, evidence: ["ok"] } });
+	await cli.finalizeSubmission({ cwd: "/repo", argumentTokens: validationTokens, valueSubstitutionLocation: 6, valueDocument: document });
+	assert.equal(staged, document, "the validation document must be staged byte-exact");
+
+	// Guards: exactly one substitution form, and a real {{value}} slot.
+	await assert.rejects(
+		cli.finalizeSubmission({ cwd: "/repo", argumentTokens: planTokens, valueSubstitutionLocation: 6, valueLiteral: "2", valueDocument: document }),
+		/exactly one of valueLiteral or valueDocument/,
+	);
+	await assert.rejects(
+		cli.finalizeSubmission({ cwd: "/repo", argumentTokens: planTokens.slice(0, 6), valueSubstitutionLocation: 0, valueLiteral: "2" }),
+		/\{\{value\}\}/,
+	);
+	assert.equal(calls.length, 3, "rejected submissions must fail before another native launch");
 });

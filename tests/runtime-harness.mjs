@@ -11,6 +11,7 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 import { domainHashV1 } from "../lib/review-canonical.ts";
+import { resolveGentleAiBinary } from "../lib/gentle-ai-binary.ts";
 import { NativeReviewCliV216, NATIVE_REVIEW_ERROR_CODE, NativeReviewCliError } from "../lib/native-review-cli.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -196,6 +197,23 @@ async function run() {
 	process.env.GENTLE_PI_CONFIG_HOME = globalConfigHome;
 	process.env.GENTLE_PI_AGENT_HOME = globalAgentHome;
 	process.env.GENTLE_PI_TEST_ASSETS_DIR = ambientTestAssetsDir;
+	// The harness already sandboxes its config and agent homes; the review kill
+	// switch is the one piece of machine state it was still inheriting. Several
+	// lifecycle-gate assertions below only reach their subject while
+	// receipt-driven development is on — with it off, gateLifecycleCommand
+	// returns undefined before deriving any target, which is correct behavior
+	// but not what those assertions are about.
+	//
+	// gentle-ai v2.4.0 made the switch opt-in, so an unconfigured machine now
+	// resolves to off. Until then the harness passed or failed on whatever the
+	// operator happened to have set, which made it green locally and red on a
+	// fresh CI runner from identical bytes. It now owns a sandbox HOME and opts
+	// in explicitly, the same way a user does, so the gates are what is under
+	// test rather than the machine.
+	const reviewHome = await tempWorkspace();
+	process.env.HOME = reviewHome;
+	const reviewModeEnable = execFileSync(resolveGentleAiBinary(ROOT, process.platform), ["review", "mode", "enable", "--scope", "global", "--json"], { cwd: ROOT, encoding: "utf8", env: { ...process.env, HOME: reviewHome } });
+	assert.match(reviewModeEnable, /"effective": "on"/, "the harness sandbox HOME must have receipt-driven development explicitly enabled");
 	const globalModelsPath = join(globalConfigHome, "models.json");
 	const globalSubagentsPath = join(globalAgentHome, "subagents.json");
 	const { pi, hooks, commands, flags, tools } = createPi();
@@ -537,7 +555,7 @@ async function run() {
 		const executableDigest = "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705";
 		const capabilitiesBody = {
 			...capabilitiesFixture,
-			package: { ...capabilitiesFixture.package, version: "2.2.3" },
+			package: { ...capabilitiesFixture.package, version: "2.4.0" },
 		};
 		const statusBody = {
 			schema: "gentle-ai.review-integration.status/v3",

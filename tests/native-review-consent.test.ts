@@ -296,3 +296,71 @@ test("declined consent decodes the provider's explicit empty authority fields wi
 	assert.equal("lineageId" in result, false);
 	assert.deepEqual(queue.calls.at(-1), consent.choices[1].invocation.split(" ").slice(1));
 });
+
+// --- consent/v3 (dev-binary field-test lane) ---
+//
+// Fixture provenance: consent-v3.captured.json, start-v3-consent-granted
+// .captured.json, and start-v3-consent-declined.captured.json were captured
+// 2026-08-16 from the real binary at /home/gentleman/.cargo/bin/gentle-ai
+// reporting "gentle-ai 2.4.0-main.b1afef46"; full capture commands are
+// documented in tests/review-integration-v2-forward.test.ts.
+
+const devbinaryFixtureRoot = join(process.cwd(), "tests", "fixtures", "devbinary");
+const devbinaryFixture = <T = Record<string, unknown>>(name: string): T => JSON.parse(readFileSync(join(devbinaryFixtureRoot, name), "utf8")) as T;
+
+test("negotiated START surfaces the captured consent/v3 envelope instead of failing schema-incompatible", async () => {
+	const consent = devbinaryFixture<Record<string, unknown>>("consent-v3.captured.json");
+	const target = String(consent.target_identity);
+	const queue = queuedAdapter([capabilities(), unrelatedStatus(target), consent]);
+	await assert.rejects(
+		() => client(queue.adapter).start({ cwd: "/repo" }),
+		(error: unknown) => {
+			assert.ok(error instanceof NativeReviewConsentRequiredError, `expected NativeReviewConsentRequiredError, got ${String(error)}`);
+			assert.deepEqual(error.consent.raw, consent);
+			assert.equal(error.consent.schema, "gentle-ai.review-integration.consent/v3");
+			assert.equal(error.consent.targetIdentity, target);
+			return true;
+		},
+	);
+	assert.deepEqual(queue.calls.at(-1), [
+		"review", "start", "--contract", "gentle-ai.review-integration/v2", "--cwd", "/repo",
+		"--target", target, "--projection", "workspace", "--consent", "relay",
+	]);
+
+	const runtimeQueue = queuedAdapter([capabilities(), unrelatedStatus(target), structuredClone(consent)]);
+	await assert.rejects(
+		() => runtimeClient(runtimeQueue.adapter).start({ cwd: "/repo" }),
+		(error: unknown) => (error as Error).name === "NativeReviewConsentRequiredError",
+	);
+});
+
+test("a granted consent/v3 answer decodes the captured start/v3 result with its event binding", async () => {
+	const decoded = (await import("../lib/review-integration-v2.ts")).decodeReviewConsentV3(devbinaryFixture<Record<string, unknown>>("consent-v3.captured.json"));
+	const cwd = decoded.choices[0].invocation.split(" --cwd ")[1]!.split(" ")[0]!;
+	const started = devbinaryFixture<Record<string, unknown>>("start-v3-consent-granted.captured.json");
+	const queue = queuedAdapter([capabilities(), started]);
+	const result = await client(queue.adapter).answerConsent!({ cwd, consent: decoded, answer: "granted" });
+	assert.equal(result.kind, "started");
+	assert.ok(result.kind === "started");
+	assert.equal(result.start.lineageId, "review-377c60e10b852cfc");
+	assert.equal(result.start.selectedLenses.length, 4);
+	// The follow-up runs the provider-owned invocation verbatim, exactly once.
+	assert.deepEqual(queue.calls.at(-1), decoded.choices[0].invocation.split(" ").slice(1));
+	assert.equal(queue.calls.filter((arguments_) => arguments_.includes("granted")).length, 1);
+
+	const runtimeQueue = queuedAdapter([capabilities(), structuredClone(started)]);
+	const runtimeResult = await runtimeClient(runtimeQueue.adapter).answerConsent({ cwd, consent: decoded, answer: "granted" });
+	assert.equal(runtimeResult.kind, "started");
+});
+
+test("a declined consent/v3 answer accepts the captured declined result and creates no authority", async () => {
+	const decoded = (await import("../lib/review-integration-v2.ts")).decodeReviewConsentV3(devbinaryFixture<Record<string, unknown>>("consent-v3.captured.json"));
+	const cwd = decoded.choices[1].invocation.split(" --cwd ")[1]!.split(" ")[0]!;
+	const declined = devbinaryFixture<Record<string, unknown>>("start-v3-consent-declined.captured.json");
+	const queue = queuedAdapter([capabilities(), declined]);
+	const result = await client(queue.adapter).answerConsent!({ cwd, consent: decoded, answer: "declined" });
+	assert.equal(result.kind, "declined");
+	assert.ok(result.kind === "declined");
+	assert.equal(result.consent, "declined_this_candidate");
+	assert.equal(result.targetIdentity, decoded.targetIdentity);
+});

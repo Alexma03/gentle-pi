@@ -119,13 +119,13 @@ const contractHashes = {
   "contracts/review-integration/v1/fixtures/capabilities-v1.4.fixture.json": "84e0db457b76b97b35c2be772dfc647f9eab66810ea98f64fed85645c3c266ba",
   "contracts/review-integration/v1/fixtures/capabilities-v1.5.fixture.json": "0cc952af3767c393bde9e4785e4071615a529fd672bc94da4fcc204780524a27",
   "contracts/review-integration/v1/fixtures/capabilities.fixture.json": "b3ca822189a236f2d891628c665ca23e308bf5185a1701e1f07231bd970461bb",
-  "contracts/review-integration/v1/fixtures/consent.fixture.json": "b2ff4809b9eb75a54206800dca13f96396976aca7387e45f765ac6ec98029cd1",
+  "contracts/review-integration/v1/fixtures/consent.fixture.json": "28c7c86b55f8c9dbae3a1baa8fe298c4f3a14664aba21cd4051c7f579a61a4e9",
   "contracts/review-integration/v1/fixtures/failure.fixture.json": "e72b6ab5e3c529abac47bd324444f84ca90f67ef0a67189f5fd8d24d199a2759",
   "contracts/review-integration/v1/fixtures/final-verification-incident.fixture.json": "f8bc06549e62b0bee5cf2ecde625e18da178dd18c9d3023b7d7e8fd0ebbba646",
   "contracts/review-integration/v1/fixtures/operation.fixture.json": "3547748a4df57382178064abbdb1cf12f1d58a75c0e9d6452fdd9beb3aaeac3a",
   "contracts/review-integration/v1/fixtures/repair-preflight.fixture.json": "7168cb53ad470066d0b3edc3b7911d1aebff91abd41ecc3d822f8ffa5cea6cb1",
-  "contracts/review-integration/v1/fixtures/start-v2.fixture.json": "388c7c21374b89afe2d42d64bd1987d17ec0e2c7151cab1c56a08969ffb2ea0e",
-  "contracts/review-integration/v1/fixtures/start.fixture.json": "f369160ac26eb3427b57de2dd01c9d8c81e51c8a2bd546446780129d31b1945b",
+  "contracts/review-integration/v1/fixtures/start-v2.fixture.json": "2699660832c0d944184d5d314f08774ab9a02f5b8a7a4c2a07983440e0e346ad",
+  "contracts/review-integration/v1/fixtures/start.fixture.json": "3b963b221cd1560eb8872cbabbb5407096f593ced2f13eb9cb06eb61e4cca4d1",
   "contracts/review-integration/v1/fixtures/status-ambiguous.fixture.json": "ee695fd58ba72adfb3b51dfd16432a177498173a45bfcb594d6bdc53bfa32e6e",
   "contracts/review-integration/v1/fixtures/status-corrupted.fixture.json": "4cfc0048c28a39cec8a32fecfaad66e56e5c1248263ceb4ce66b6717981880b2",
   "contracts/review-integration/v1/fixtures/status-recover.fixture.json": "714f762f72380ce93d567626cafbaa536ab3aae02af73d3d40ca123f1f30d8b0",
@@ -136,7 +136,7 @@ const contractHashes = {
   "contracts/review-integration/v1/fixtures/status-v2-recover.fixture.json": "178331fc7177d2316fd4f56610ac295f7da2780be96b233b72935d5f476610f2",
   "contracts/review-integration/v1/fixtures/status-v2-repair.fixture.json": "89083cad752fca38da09e919825d0b80641a8a029364ba1869e5b58ef2e59a1d",
   "contracts/review-integration/v1/fixtures/status-v2-unrelated.fixture.json": "c178b338dcd5d30888acef37a9d752bd0932d6dedfffb61b0596a9cceabeb692",
-  "contracts/review-integration/v1/fixtures/status-v2.fixture.json": "5410d8bbae1b7152a43b3a5c4c880e9e98a5e47b76d910456f5ef13f19836f3a",
+  "contracts/review-integration/v1/fixtures/status-v2.fixture.json": "33c5032dcd5d916b4bff73781495640da83893b2f2b334465cbb40c18e1b85f4",
   "contracts/review-integration/v1/fixtures/status.fixture.json": "555054d8046a896162995dcb117752f9cd1ef903fb9ebaad29af1b7e7f319bb3",
   "contracts/review-integration/v1/fixtures/verification-evidence.fixture.json": "b30e3863548845b90e256d92193435d02da458bf8f15a4c33d023cd1f6894a5f",
   "contracts/review-integration/v1/schemas/admitted-result.schema.json": "7796e8dbba331434594108c902dfab7ec46f691fa447a9259a78f2448111b0de",
@@ -149,32 +149,33 @@ const contractHashes = {
   "contracts/review-integration/v1/schemas/capabilities-v1.5.schema.json": "abc783821524dcc33339495284805a85f79b3352efb7358c95016ed164bd7f24",
   "contracts/review-integration/v1/schemas/capabilities.schema.json": "ad333177494a251beac153f74bd751fa77126a9968aad69e64fc2abf15cff0f7",
   "contracts/review-integration/v1/schemas/consent.schema.json": "f8f2edec17568124488482c2aee399909111fe0cce2cba426fb29efd2c7c1cd0",
+  "contracts/review-integration/v1/schemas/correction-plan-request.schema.json": "77bf357afc9bee288d64ce64e87b4e13347b1d0ed5e824a9cea6dc0621b40ed1",
   "contracts/review-integration/v1/schemas/failure.schema.json": "0ce29f61408fc21d72640fffdb215a608a820c29f3e5ff62d9cc295ed0451937",
   "contracts/review-integration/v1/schemas/final-verification-incident.schema.json": "39b1ec178b1d3bc8da9a3d92dadd8092385000f2a6930b5bfcb4a84dbc6493ca",
-  "contracts/review-integration/v1/schemas/operation.schema.json": "6cf15b54977fea7301b9a5c766e709f8a912fda33560365de6dfcab4d2ecbce0",
+  "contracts/review-integration/v1/schemas/operation.schema.json": "495d66c6cdb6b2b634bc580b80125073d802226186db9f000456e111315ac0da",
   "contracts/review-integration/v1/schemas/projection.schema.json": "7168a3eba929dde2b8f0b7723ee51d5a5421102bdeefe892578c263debd08db2",
-  "contracts/review-integration/v1/schemas/repair.schema.json": "febb747dc68f8ded5974b6dd94051ec3cfdb5a886ccb853b1ce53aaf2e41efc0",
+  "contracts/review-integration/v1/schemas/repair.schema.json": "2939a9f6e68e5b6964db541d7b1a75054113c75a6f836a158ce0f37e1c4ebe32",
   "contracts/review-integration/v1/schemas/result-artifact-v2.schema.json": "38895aae2f6ca4980b1a8e157fee8503920820d5f6be3c757c0fa04e8430cd6b",
   "contracts/review-integration/v1/schemas/result-artifact.schema.json": "91296bd2c261fd2fe03bffd63efe58badd4927e0d0d8480cd4213f651ecacdf6",
   "contracts/review-integration/v1/schemas/start-v2.schema.json": "ec8550cd93bbe84af1ce87dfd7abfa9e24692f42b20f8f0bf9cac1d4b88ea46c",
   "contracts/review-integration/v1/schemas/start.schema.json": "4296aebbd4128ce51945a2f6d3228aa77ac7215c802978d559bff5279ec56229",
-  "contracts/review-integration/v1/schemas/status-v2.schema.json": "63e8988ce276d948ea8305008a3d27c4e26dff664cf54fffed9e188f465d92d1",
-  "contracts/review-integration/v1/schemas/status.schema.json": "67f3bddf5f5feeb3213bce489de8548546163b2e1d49a0e3965c0091dabc8c39",
+  "contracts/review-integration/v1/schemas/status-v2.schema.json": "dd9914b647a1d9edc4ecdcbed4f0c800b39ec290912d5c2a4cc6ba3098d5f21e",
+  "contracts/review-integration/v1/schemas/status.schema.json": "250d2c646b8822b38eaefafd2bfdefa1134cc23a00e553a7201f33257573149a",
   "contracts/review-integration/v1/schemas/targeted-validation-request.schema.json": "52b91154693b4dd66983fc91ecf7197503555f2c9e85cac626cffd3035c53d65",
   "contracts/review-integration/v1/schemas/verification-evidence.schema.json": "fd15890bf2ef1db95d771ee7f468e9e64014351d7940f65604eb24f41e68a22f",
   "contracts/review-integration/v2/fixtures/capabilities.fixture.json": "17c150d851c15b3f0c20d18c2e2741eb2232ffa24f35aa71d6d30e90a85e42b7",
   "contracts/review-integration/v2/fixtures/consent.fixture.json": "203cc96d5c29ba0f27b5c4db04c2e88566e0a923d3a0cdb317f78d9065349075",
-  "contracts/review-integration/v2/fixtures/start.fixture.json": "34b21328fa910e03af2fac8e816c5b510ba146201da0cd4ef1693d39a6344ba0",
-  "contracts/review-integration/v2/fixtures/status.fixture.json": "d5438578f2969f17635fecea94c7ef46d14c78fa668e50df48c4254254d5e935",
+  "contracts/review-integration/v2/fixtures/start.fixture.json": "bd82bfb386c01809d8f1c5cb3a4b3b540f7cb23a55209505680daeb43b4e8642",
+  "contracts/review-integration/v2/fixtures/status.fixture.json": "4cd77906bacdca35d8f99773de147211d2b05fe34dd1b999011ead09e84be7a5",
   "contracts/review-integration/v2/schemas/admitted-result.schema.json": "c6a9c880191d65c46d9cfc8a0812af16b636573a8f6e57ea34aa16d6f6bb9735",
   "contracts/review-integration/v2/schemas/artifact-subject.schema.json": "3e71a81340ea6149b03afa71530d10ce654c415fa21d4e07f0c9c25b3d2d70a3",
   "contracts/review-integration/v2/schemas/capabilities.schema.json": "7ab061ed27bd3b929d6033cc20f56097e851f4454ca14a815255748b50191248",
   "contracts/review-integration/v2/schemas/consent.schema.json": "b2b4465338497f11927de91cb2e5da12b6cb4a1039afe05aebe1abbf53b21858",
-  "contracts/review-integration/v2/schemas/failure.schema.json": "1c53da8c543cc5e03fbbfc700d4fc80cadb3b0e5e72c6d77a7790008671d0962",
-  "contracts/review-integration/v2/schemas/operation.schema.json": "beee02046ec1d5b8c89e3d7de35f897c275830e43c67ecd162886bfd0138ace6",
-  "contracts/review-integration/v2/schemas/repair.schema.json": "9e842d1ded797a91ede16b2054a38708b2d1fc7a0d6217541f84c0f2f5a2e73e",
-  "contracts/review-integration/v2/schemas/start.schema.json": "86ddfcfe1912489abef7461613d692ea53a4d7d73d444d5f6dbbd7f9866a2c37",
-  "contracts/review-integration/v2/schemas/status.schema.json": "132b15dd7a0514aa451373bd4b3c02a1491b7b11cf5b9ce43bc300b549397ac9",
+  "contracts/review-integration/v2/schemas/failure.schema.json": "a56a2f715c3138d6f2cee37257cd6e758a15d4e0b1215745951d85831d148967",
+  "contracts/review-integration/v2/schemas/operation.schema.json": "1c0128a0576064d4338ee0a1945e9d0d0569c1a7a2140217b2539af5d1a9ed1e",
+  "contracts/review-integration/v2/schemas/repair.schema.json": "98a85fd45a8ae7f6211ffeeb3f9c478fa1dd1c17f385751f15f2111e6c3ab167",
+  "contracts/review-integration/v2/schemas/start.schema.json": "2991e3fcca672d9257d61b6a336fb34e58b15a8e03f8a09a7adf892cae6a8085",
+  "contracts/review-integration/v2/schemas/status.schema.json": "c4dcc736cfc6300560a3c4262d2d982368529d5c49d58d499552a3b0beef9212",
   "docs/review-integration.md": "189f9b128cafaf225d2b6be53111f893ca46eb687fb9e5e051a84727b6a34bbc",
 };
 
@@ -333,7 +334,7 @@ async function main() {
   });
 
   if (driftedContracts.length > 0) {
-    console.error("gentle-pi packaged review-integration/v1 and review-integration/v2 contract bytes drifted from the byte-identical Gentle AI v2.2.3 contract:");
+    console.error("gentle-pi packaged review-integration/v1 and review-integration/v2 contract bytes drifted from the byte-identical Gentle AI v2.4.0 contract:");
     for (const drift of driftedContracts) console.error(`- ${drift.relativePath}: expected ${drift.expected}, got ${drift.actual}`);
     process.exit(1);
   }
@@ -378,7 +379,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`gentle-pi package resource check passed (${requiredPaths.length} files; ${Object.keys(contractHashes).length} exact byte-identical v2.2.3 contract artifacts).`);
+  console.log(`gentle-pi package resource check passed (${requiredPaths.length} files; ${Object.keys(contractHashes).length} exact byte-identical v2.4.0 contract artifacts).`);
 }
 
 const isMainModule = process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;

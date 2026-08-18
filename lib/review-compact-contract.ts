@@ -60,6 +60,14 @@ export interface CompactFinalizeContractInput {
 	final_evidence?: string;
 	final_verification_passed?: boolean;
 	final_verification_outcome?: CorrectionOutcome;
+	/**
+	 * Explicit acknowledgement that this FINALIZE may spend real model tokens:
+	 * a provider host-relay slot runs one locked-down `pi` reviewer subprocess
+	 * per outstanding lens. Absent, FINALIZE forecasts the run and spends
+	 * nothing. Same shape as the existing `committedOnly` acknowledgement — the
+	 * caller states the consequence it accepts.
+	 */
+	reviewer_run_acknowledged?: boolean;
 }
 
 function fail(area: string, code: string, message: string): never {
@@ -122,7 +130,8 @@ function parseValidation(value: unknown, area: string): CompactTargetedValidatio
 }
 
 function parseCompactFinalizeInputValue(value: unknown): CompactFinalizeContractInput {
-	const input = exact(value, "review/finalize", ["cwd"], ["lineageId", "correction_line_forecast", "validation", "final_evidence", "final_verification_passed", "final_verification_outcome"]);
+	const input = exact(value, "review/finalize", ["cwd"], ["lineageId", "correction_line_forecast", "validation", "final_evidence", "final_verification_passed", "final_verification_outcome", "reviewer_run_acknowledged"]);
+	if (input.reviewer_run_acknowledged !== undefined && typeof input.reviewer_run_acknowledged !== "boolean") fail("review/finalize.reviewer_run_acknowledged", "type", "must be boolean");
 	const outcomeFields = Number(input.final_verification_passed !== undefined) + Number(input.final_verification_outcome !== undefined);
 	if ((input.final_evidence === undefined && outcomeFields !== 0) || (input.final_evidence !== undefined && outcomeFields !== 1)) fail("review/finalize", "field-pair", "final evidence requires exactly one verification result or outcome");
 	let correction_line_forecast: number | undefined;
@@ -145,7 +154,7 @@ function parseCompactFinalizeInputValue(value: unknown): CompactFinalizeContract
 		if (typeof input.final_evidence !== "string" || input.final_evidence.length === 0) fail("review/finalize.final_evidence", "empty", "must contain at least one byte");
 		final_evidence = input.final_evidence;
 	}
-	return { cwd: string(input.cwd, "review/finalize.cwd"), ...(optionalLineage(input.lineageId, "review/finalize.lineageId") === undefined ? {} : { lineageId: optionalLineage(input.lineageId, "review/finalize.lineageId")! }), ...(correction_line_forecast === undefined ? {} : { correction_line_forecast }), ...(input.validation === undefined ? {} : { validation: parseValidation(input.validation, "review/finalize.validation") }), ...(final_evidence === undefined ? {} : { final_evidence }), ...(input.final_verification_passed === undefined ? {} : { final_verification_passed: input.final_verification_passed }), ...(final_verification_outcome === undefined ? {} : { final_verification_outcome }) };
+	return { cwd: string(input.cwd, "review/finalize.cwd"), ...(optionalLineage(input.lineageId, "review/finalize.lineageId") === undefined ? {} : { lineageId: optionalLineage(input.lineageId, "review/finalize.lineageId")! }), ...(correction_line_forecast === undefined ? {} : { correction_line_forecast }), ...(input.validation === undefined ? {} : { validation: parseValidation(input.validation, "review/finalize.validation") }), ...(final_evidence === undefined ? {} : { final_evidence }), ...(input.final_verification_passed === undefined ? {} : { final_verification_passed: input.final_verification_passed }), ...(final_verification_outcome === undefined ? {} : { final_verification_outcome }), ...(input.reviewer_run_acknowledged === undefined ? {} : { reviewer_run_acknowledged: input.reviewer_run_acknowledged as boolean }) };
 }
 
 export function parseNativeCompactFinalizeInput(value: unknown): CompactFinalizeContractInput {

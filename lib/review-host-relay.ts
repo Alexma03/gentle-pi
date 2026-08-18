@@ -61,6 +61,11 @@ export const REVIEW_HOST_RELAY_FAILURE = {
 	EMPTY_PROMPT: "empty-prompt",
 	PI_LAUNCH_FAILED: "pi-launch-failed",
 	PI_FAILED: "pi-failed",
+	// gentle-pi#367: a reviewer killed by the relay bound is not a crash. It
+	// is the one failure class that a byte-identical relaunch cannot survive,
+	// so it carries its own kind, its own elapsed/limit evidence, and its own
+	// continuation instead of hiding inside `pi-failed`.
+	PI_TIMED_OUT: "pi-timed-out",
 	PI_EMPTY_OUTPUT: "pi-empty-output",
 	SUBMISSION_REFUSED: "submission-refused",
 } as const;
@@ -79,11 +84,17 @@ export class ReviewHostRelayError extends Error {
 	readonly exitCode: number | null;
 	readonly stderr: string;
 	readonly timedOut: boolean;
+	// Wall time the killed or failed child actually consumed, and the bound it
+	// was measured against. Both are null only when no child process ran.
+	// Without them a transport failure cannot be told apart from a crash, which
+	// is what forced the gentle-pi#367 reporter to measure the relay by hand.
+	readonly elapsedMs: number | null;
+	readonly timeoutMs: number | null;
 	// "none" until the submission invocation launches; a launched submission
 	// whose outcome could not be read is "unknown" and the caller reconciles
 	// through negotiated STATUS, never through a blind retry.
 	readonly mutationOutcome: "none" | "unknown";
-	constructor(kind: ReviewHostRelayFailureKind, stage: ReviewHostRelayStage, message: string, details?: { exitCode?: number | null; stderr?: string; timedOut?: boolean }) {
+	constructor(kind: ReviewHostRelayFailureKind, stage: ReviewHostRelayStage, message: string, details?: { exitCode?: number | null; stderr?: string; timedOut?: boolean; elapsedMs?: number; timeoutMs?: number }) {
 		super(message);
 		this.name = "ReviewHostRelayError";
 		this.kind = kind;
@@ -91,6 +102,8 @@ export class ReviewHostRelayError extends Error {
 		this.exitCode = details?.exitCode ?? null;
 		this.stderr = details?.stderr ?? "";
 		this.timedOut = details?.timedOut ?? false;
+		this.elapsedMs = details?.elapsedMs ?? null;
+		this.timeoutMs = details?.timeoutMs ?? null;
 		this.mutationOutcome = stage === "submit" ? "unknown" : "none";
 	}
 }
@@ -100,7 +113,7 @@ export class ReviewHostRelayError extends Error {
 // never version-sniffs. Two typed refusal classes are distinguished:
 //
 //   unknown-flag  the Go flag package's exact refusal for a flag the binary
-//                 does not define (an old binary, e.g. the pinned 2.2.3) —
+//                 does not define (any binary older than v2.4.0) —
 //                 the relay is unavailable and existing behavior stays
 //                 untouched.
 //   handshake     the provider's pre-authority pi admission refusal — always
@@ -245,6 +258,12 @@ export interface ReviewHostRelayRequest {
 	readonly piExecutable?: string;
 	readonly environment?: NodeJS.ProcessEnv;
 	readonly gentleAiTimeoutMs?: number;
+	/**
+	 * Overrides the reviewer bound entirely. Production leaves it unset and the
+	 * relay derives the bound from the materialized prompt bytes and
+	 * {@link REVIEW_HOST_RELAY_PI_TIMEOUT_ENV}; this seam exists so tests can
+	 * exercise the timeout leg without a wall-clock wait.
+	 */
 	readonly piTimeoutMs?: number;
 	readonly signal?: AbortSignal;
 }
@@ -259,13 +278,64 @@ export interface ReviewHostRelayResult {
 export type ReviewHostRelayRunner = (request: ReviewHostRelayRequest) => Promise<ReviewHostRelayResult>;
 
 const DEFAULT_GENTLE_AI_TIMEOUT_MS = 120_000;
-const DEFAULT_PI_TIMEOUT_MS = 600_000;
+
+// ---------------------------------------------------------------------------
+// The reviewer subprocess bound (gentle-pi#367).
+//
+// The previous bound was a single hardcoded 600_000 ms reachable only through
+// the test-injectable runner. A field-measured lens legitimately needed 478s
+// against a ~1.58 MB materialized prompt: it survived by hand and was killed
+// under the relay, and the sanctioned continuation then re-spent every lens to
+// reach the same wall. One fixed number cannot serve a prompt class that
+// varies by orders of magnitude, so the bound is derived instead:
+//
+//   floor + ceil(promptBytes / MiB * perMebibyte), clamped to the ceiling
+//
+// The floor covers model latency that does not depend on prompt size; the
+// linear term covers the part that does. At the measured 1.58 MB the derived
+// bound is ~37 minutes, roughly a 4.7x margin over the 478s the reviewer
+// actually needed — deliberately generous, because the reviewer model and
+// provider are user-owned and the relay cannot know their throughput.
+//
+// GENTLE_PI_REVIEW_RELAY_PI_TIMEOUT_MS replaces the derived bound entirely for
+// callers who know their own configuration. It follows the repository's
+// established numeric-override shape (GENTLE_PI_CANDIDATE_GIT_TIMEOUT_MS,
+// GENTLE_PI_REVIEW_MAX_BUFFER_BYTES): a positive decimal, silently ignored
+// when malformed, and clamped to the same hard ceiling so no configuration can
+// turn a foreground FINALIZE into an unbounded child process.
+// ---------------------------------------------------------------------------
+
+export const REVIEW_HOST_RELAY_PI_TIMEOUT_ENV = "GENTLE_PI_REVIEW_RELAY_PI_TIMEOUT_MS";
+export const REVIEW_HOST_RELAY_PI_TIMEOUT_FLOOR_MS = 900_000;
+export const REVIEW_HOST_RELAY_PI_TIMEOUT_PER_MEBIBYTE_MS = 900_000;
+export const REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS = 7_200_000;
+const BYTES_PER_MEBIBYTE = 1024 * 1024;
+
+export function resolveReviewHostRelayPiTimeoutMs(promptByteLength: number, environment: NodeJS.ProcessEnv = process.env): number {
+	const configured = environment[REVIEW_HOST_RELAY_PI_TIMEOUT_ENV];
+	if (configured !== undefined && /^[1-9]\d*$/.test(configured)) {
+		const parsed = Number(configured);
+		if (Number.isSafeInteger(parsed)) return Math.min(parsed, REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS);
+	}
+	const bytes = Number.isSafeInteger(promptByteLength) && promptByteLength > 0 ? promptByteLength : 0;
+	const scaled = REVIEW_HOST_RELAY_PI_TIMEOUT_FLOOR_MS + Math.ceil((bytes / BYTES_PER_MEBIBYTE) * REVIEW_HOST_RELAY_PI_TIMEOUT_PER_MEBIBYTE_MS);
+	return Math.min(scaled, REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS);
+}
+
+// The reviewer ran out of time; it did not crash. The message states both
+// measurements and names the two things that can change the outcome, because
+// the one thing that cannot is relaunching the identical slot.
+export function reviewHostRelayPiTimeoutMessage(elapsedMs: number, timeoutMs: number, promptByteLength: number): string {
+	return `pi reviewer subprocess exceeded the relay bound: killed after ${elapsedMs}ms against a ${timeoutMs}ms limit for a ${promptByteLength}-byte materialized prompt. `
+		+ `Relaunching the same slot unchanged reaches the same wall. Raise ${REVIEW_HOST_RELAY_PI_TIMEOUT_ENV} above the reviewer's real wall time (ceiling ${REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS}ms) or reduce the candidate scope so the materialized prompt is smaller.`;
+}
 
 interface ProcessCapture {
 	stdout: Buffer;
 	stderr: Buffer;
 	exitCode: number | null;
 	timedOut: boolean;
+	elapsedMs: number;
 }
 
 function collectProcess(
@@ -274,6 +344,7 @@ function collectProcess(
 	options: { cwd: string; env: NodeJS.ProcessEnv; stdin?: Buffer; timeoutMs: number; signal?: AbortSignal },
 ): Promise<ProcessCapture> {
 	return new Promise((resolve, reject) => {
+		const startedAt = Date.now();
 		const child = spawn(file, [...arguments_], {
 			cwd: options.cwd,
 			env: options.env,
@@ -305,7 +376,7 @@ function collectProcess(
 			if (settled) return;
 			settled = true;
 			if (timer !== undefined) clearTimeout(timer);
-			resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode: code, timedOut });
+			resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode: code, timedOut, elapsedMs: Date.now() - startedAt });
 		});
 		if (options.stdin === undefined) {
 			child.stdin.end();
@@ -342,7 +413,6 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 	// pi subprocess environment stays exactly as the user configured it.
 	const gentleAiEnvironment = { ...baseEnvironment, [GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV]: GENTLE_PI_REVIEW_RELAY_CONTRACT };
 	const gentleAiTimeoutMs = request.gentleAiTimeoutMs ?? DEFAULT_GENTLE_AI_TIMEOUT_MS;
-	const piTimeoutMs = request.piTimeoutMs ?? DEFAULT_PI_TIMEOUT_MS;
 
 	// (a) Materialize the Go-issued opaque prompt. This invocation is also the
 	// capability detection: an old binary's unknown-flag refusal proves the
@@ -362,18 +432,25 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 	if (materialized.exitCode !== 0 || materialized.timedOut) {
 		const stderr = materialized.stderr.toString("utf8");
 		const refusal = classifyReviewHostRelayRefusal(stderr);
+		const timing = { elapsedMs: materialized.elapsedMs, timeoutMs: gentleAiTimeoutMs };
 		if (refusal === "unknown-flag") {
-			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.RELAY_UNAVAILABLE, "materialize", REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE, { exitCode: materialized.exitCode, stderr, timedOut: materialized.timedOut });
+			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.RELAY_UNAVAILABLE, "materialize", REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE, { exitCode: materialized.exitCode, stderr, timedOut: materialized.timedOut, ...timing });
 		}
 		if (refusal === "handshake") {
-			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.HANDSHAKE_REFUSED, "materialize", stderr, { exitCode: materialized.exitCode, stderr, timedOut: materialized.timedOut });
+			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.HANDSHAKE_REFUSED, "materialize", stderr, { exitCode: materialized.exitCode, stderr, timedOut: materialized.timedOut, ...timing });
 		}
-		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.MATERIALIZE_FAILED, "materialize", "gentle-ai prompt materialization failed", { exitCode: materialized.exitCode, stderr, timedOut: materialized.timedOut });
+		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.MATERIALIZE_FAILED, "materialize", materialized.timedOut
+			? `gentle-ai prompt materialization exceeded its ${gentleAiTimeoutMs}ms bound after ${materialized.elapsedMs}ms`
+			: "gentle-ai prompt materialization failed", { exitCode: materialized.exitCode, stderr, timedOut: materialized.timedOut, ...timing });
 	}
 	const promptBytes = materialized.stdout;
 	if (promptBytes.length === 0) {
-		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.EMPTY_PROMPT, "materialize", "gentle-ai prompt materialization produced no bytes", { exitCode: 0, stderr: materialized.stderr.toString("utf8") });
+		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.EMPTY_PROMPT, "materialize", "gentle-ai prompt materialization produced no bytes", { exitCode: 0, stderr: materialized.stderr.toString("utf8"), elapsedMs: materialized.elapsedMs, timeoutMs: gentleAiTimeoutMs });
 	}
+	// The reviewer bound is derived from the prompt the provider actually
+	// materialized, so it can only be resolved here. An explicit request
+	// timeout (the test seam) still wins over both the override and the scale.
+	const piTimeoutMs = request.piTimeoutMs ?? resolveReviewHostRelayPiTimeoutMs(promptBytes.length, baseEnvironment);
 
 	// (b)/(c) Fresh locked-down pi subprocess in an empty scratch directory.
 	const scratchDirectory = await mkdtemp(join(tmpdir(), "gentle-pi-host-relay-scratch-"));
@@ -393,12 +470,18 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 		} catch (error) {
 			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.PI_LAUNCH_FAILED, "pi", `pi subprocess could not start: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		if (piRun.exitCode !== 0 || piRun.timedOut) {
-			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.PI_FAILED, "pi", "pi subprocess failed", { exitCode: piRun.exitCode, stderr: piRun.stderr.toString("utf8"), timedOut: piRun.timedOut });
+		const piTiming = { elapsedMs: piRun.elapsedMs, timeoutMs: piTimeoutMs };
+		// A reviewer that ran out of time is reported as exactly that, with both
+		// measurements, and never as an unexplained crash.
+		if (piRun.timedOut) {
+			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT, "pi", reviewHostRelayPiTimeoutMessage(piRun.elapsedMs, piTimeoutMs, promptBytes.length), { exitCode: piRun.exitCode, stderr: piRun.stderr.toString("utf8"), timedOut: true, ...piTiming });
+		}
+		if (piRun.exitCode !== 0) {
+			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.PI_FAILED, "pi", "pi subprocess failed", { exitCode: piRun.exitCode, stderr: piRun.stderr.toString("utf8"), timedOut: false, ...piTiming });
 		}
 		const resultBytes = piRun.stdout;
 		if (resultBytes.length === 0) {
-			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.PI_EMPTY_OUTPUT, "pi", "pi subprocess produced no output bytes", { exitCode: 0, stderr: piRun.stderr.toString("utf8") });
+			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.PI_EMPTY_OUTPUT, "pi", "pi subprocess produced no output bytes", { exitCode: 0, stderr: piRun.stderr.toString("utf8"), ...piTiming });
 		}
 
 		// (d) Submit the raw final bytes untouched through the provider-owned
@@ -422,7 +505,7 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED, "submit", `gentle-ai capture submission could not start: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		if (submission.exitCode !== 0 || submission.timedOut || submission.stdout.length === 0) {
-			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED, "submit", "gentle-ai refused the relayed capture submission", { exitCode: submission.exitCode, stderr: submission.stderr.toString("utf8"), timedOut: submission.timedOut });
+			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED, "submit", "gentle-ai refused the relayed capture submission", { exitCode: submission.exitCode, stderr: submission.stderr.toString("utf8"), timedOut: submission.timedOut, elapsedMs: submission.elapsedMs, timeoutMs: gentleAiTimeoutMs });
 		}
 		return {
 			promptByteLength: promptBytes.length,

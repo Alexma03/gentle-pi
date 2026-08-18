@@ -65,7 +65,7 @@ Permanent Pi-owned consumer infrastructure is limited to canonical identity prim
 
 ## Lifecycle gates
 
-Pre-commit, pre-push, pre-PR, and release validate an approved receipt against one exact typed command target with zero actors. Native validation uses `gentle-ai.review-integration/v1`, loads authority and receipt, derives live target/publication evidence, then immediately reloads authority and re-derives target/publication evidence before allow. Authorized direct commit uses the durable hook/native-validation transaction and unresolved recovery blocks publication. The Pi-owned `review-publication-gate` module isolates command projection and publication revalidation from graph-v1 authority storage without changing these guarantees.
+Pre-commit, pre-push, pre-PR, and release validate an approved receipt against one exact typed command target with zero actors. Native validation uses `gentle-ai.review-integration/v2`, loads authority and receipt, derives live target/publication evidence, then immediately reloads authority and re-derives target/publication evidence before allow. Authorized direct commit uses the durable hook/native-validation transaction and unresolved recovery blocks publication. The Pi-owned `review-publication-gate` module isolates command projection and publication revalidation from graph-v1 authority storage without changing these guarantees.
 
 PR #1216 introduced the v2.1.1 `<remote>/<branch>` selector contract that v2.1.2 inherits unchanged.
 

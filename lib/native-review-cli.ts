@@ -11,13 +11,15 @@ import {
 	REVIEW_INTEGRATION_CONTRACT,
 	decodeReviewCapabilitiesV2,
 	decodeReviewConsentV2,
+	decodeReviewConsentV3,
 	decodeReviewFailureV2,
 	decodeReviewOperationV2,
 	decodeReviewRepairV2,
+	decodeReviewResultArtifactV2,
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
 	type ReviewCapabilitiesV2,
-	type ReviewConsentV2,
+	type ReviewConsentEnvelope,
 	type ReviewFailureV2,
 	type ReviewRepairV2,
 	type ReviewStartState,
@@ -137,6 +139,10 @@ export interface NativeReviewCli {
 	// evidence-first correction lifecycle's collection step.
 	repair?(request: NativeReviewRepairRequest): Promise<ReviewRepairV2>;
 	captureEvidence?(request: NativeReviewCaptureEvidenceRequest): Promise<NativeReviewVerificationEvidenceV2>;
+	// Executes one provider-rendered capture-evidence submission exactly as
+	// rendered (verbatim tokens with only the {{outcome}}/{{input}} slot
+	// substitutions); the preferred form whenever the collect slot renders one.
+	captureEvidenceSubmission?(request: NativeReviewCaptureEvidenceSubmissionRequest): Promise<NativeReviewVerificationEvidenceV2>;
 	// gentle-pi#311 P4-roles: executes one provider-rendered self-contained
 	// role capture vector exactly as rendered (verbatim tokens, foreground).
 	captureProviderRole?(request: NativeReviewProviderRoleCaptureRequest): Promise<NativeReviewProviderRoleCaptureArtifact>;
@@ -145,6 +151,10 @@ export interface NativeReviewCli {
 	// --captured-results=true`); the host never assembles reviewer, refuter,
 	// or validator documents for it.
 	finalizeTransition?(request: NativeReviewFinalizeTransitionRequest): Promise<NativeFinalizeResult>;
+	// Executes one provider-rendered `finalize` submission descriptor exactly
+	// as rendered, substituting only its {{value}} slot (plan line-count
+	// literal, or a staged validation artifact path).
+	finalizeSubmission?(request: NativeReviewFinalizeSubmissionRequest): Promise<NativeFinalizeResult>;
 	// Dark until a negotiated version reports the `mode` capability true
 	// (Design Decision #7, organic-rdd-parity). Plain versioned CLI operation,
 	// outside the negotiated review-integration protocol — same shape as
@@ -202,18 +212,24 @@ export interface NativeReviewModeResult {
 
 // Exact-match tolerated-stderr allowlist for START only, gated on the `mode`
 // capability being true (Design Decision #6, organic-rdd-parity). Byte-exact
-// against gentle-ai's headless notice (internal/cli/review_mode.go
-// reviewConsentSkippedNotice) written when the switch is on but no interactive
-// terminal answered the one-time consent question — which is always true when
-// Pi spawns gentle-ai without a TTY. Any other text still fails closed as
-// UNEXPECTED_STDERR.
-// Each entry is one whole line gentle-ai may write to the console stream while
-// still succeeding. The provenance line rides with the skip notice whenever the
-// resolved mode source is `default`, so a headless START legitimately emits two
-// lines; they are separate Fprintln calls, never one joined string.
+// against gentle-ai's headless notices (internal/cli/review_mode.go
+// reviewConsentSkippedNotice and its siblings) written when the switch is on
+// but no interactive terminal answered the one-time consent question — which
+// is always true when Pi spawns gentle-ai without a TTY. Any other text still
+// fails closed as UNEXPECTED_STDERR.
+//
+// Each entry is one whole line the PINNED gentle-ai may write to the console
+// stream while still succeeding. That last qualifier is what keeps this list
+// honest: v2.4.0 deleted reviewConsentSkippedDefaultProvenance ("Reviews are
+// on by default; this was never explicitly chosen. ..."), which used to ride
+// with the skip notice whenever the resolved mode source was `default`. Under
+// opt-in receipt-driven development a default-source clone is refused long
+// before the consent ceremony runs, so the pinned binary can no longer emit
+// that line and it is removed here rather than left as dead tolerance. Multi-
+// line stderr is still expected in principle — these are separate Fprintln
+// calls, never one joined string — which is why membership is per line.
 export const REVIEW_CONSENT_NOTICES = Object.freeze([
 	"Gentle AI reviewed this change without asking, because this session has no terminal to answer on. Run 'gentle-ai review mode disable' to turn reviews off, or 'gentle-ai review mode status' to see the current setting.",
-	"Reviews are on by default; this was never explicitly chosen. Run 'gentle-ai review mode enable' to make reviews an explicit choice, or 'gentle-ai review mode disable' to turn them off.",
 	"Gentle AI could not read an answer, so it reviewed this change and will ask again next time.",
 	"Gentle AI did not recognize that answer, so it reviewed this change and will ask again next time.",
 	"Review skipped for this candidate at your request. It will be offered again on the next change.",
@@ -287,6 +303,9 @@ export interface NativeReviewAbandonRequest {
 	lineage: string;
 	expectedRevision: string;
 	snapshotIdentity: string;
+	capturedLensResults: readonly string[];
+	findingsPresent: boolean;
+	evidenceRecordsPresent: boolean;
 	actor: string;
 	reason: string;
 	maintainerAuthorization: string;
@@ -425,6 +444,27 @@ export interface NativeReviewCaptureEvidenceRequest {
 	signal?: AbortSignal;
 }
 
+// Field defect (fambig, 2026-08-16): the evidence collect slot renders the
+// exact submission tokens native admits — fix-diff `--target`,
+// `--expected-revision`, and an opaque cwd-independent `--repository-context` —
+// with `{{outcome}}`/`{{input}}` substitution slots. Satisfying the slot means
+// executing those tokens verbatim with only the two slot substitutions, the
+// same discipline captureResult uses; identities are never reconstructed from
+// top-level status fields.
+export interface NativeReviewCaptureEvidenceSubmissionRequest {
+	/** Process working directory; forbidden when the tokens carry --repository-context (the context is cwd-independent). */
+	cwd?: string;
+	/** Provider-rendered submission argument tokens, verbatim, in provider order. */
+	argumentTokens: readonly string[];
+	/** Index of the token carrying the {{outcome}} substitution slot. */
+	outcomeSubstitutionLocation: number;
+	/** Index of the token carrying the {{input}} substitution slot. */
+	inputSubstitutionLocation: number;
+	outcome: NativeReviewCaptureOutcome;
+	evidenceDocument: string;
+	signal?: AbortSignal;
+}
+
 export interface NativeReviewVerificationEvidenceV2 {
 	schema: "gentle-ai.review-verification-evidence/v2";
 	version: 2;
@@ -444,7 +484,7 @@ export interface NativeReviewVerificationEvidenceV2 {
 export interface NativeStartRequest { cwd: string; baseRef?: string; committedOnly?: boolean; lineageId?: string; policyPath?: string; focus?: string; targetIdentity?: string; projection?: "workspace" | "staged"; signal?: AbortSignal; }
 export const NATIVE_REVIEW_CONSENT_ANSWER = { GRANTED: "granted", DECLINED: "declined" } as const;
 export type NativeReviewConsentAnswer = (typeof NATIVE_REVIEW_CONSENT_ANSWER)[keyof typeof NATIVE_REVIEW_CONSENT_ANSWER];
-export interface NativeReviewConsentAnswerRequest { cwd: string; consent: ReviewConsentV2; answer: NativeReviewConsentAnswer; signal?: AbortSignal; }
+export interface NativeReviewConsentAnswerRequest { cwd: string; consent: ReviewConsentEnvelope; answer: NativeReviewConsentAnswer; signal?: AbortSignal; }
 export interface NativeReviewConsentDeclinedResult {
 	kind: "declined";
 	targetIdentity: string;
@@ -483,12 +523,46 @@ export interface NativeReviewFinalizeTransitionRequest {
 	readonly signal?: AbortSignal;
 }
 
+// The provider-rendered `finalize` submission descriptor forms (status/v5):
+// the correction PLAN slot substitutes a positive line-count literal into its
+// {{value}} token; the TARGETED VALIDATION slot substitutes a staged validator
+// artifact path. The tokens are self-contained and execute verbatim.
+export interface NativeReviewFinalizeSubmissionRequest {
+	/** Process working directory only; the rendered tokens are self-contained. */
+	readonly cwd: string;
+	/** Provider-rendered submission argument tokens, verbatim, in provider order. */
+	readonly argumentTokens: readonly string[];
+	/** Index of the token carrying the {{value}} substitution slot. */
+	readonly valueSubstitutionLocation: number;
+	/** The literal substitution (correction_lines). Exactly one of valueLiteral/valueDocument. */
+	readonly valueLiteral?: string;
+	/** The document to stage as a 0o600 artifact whose path substitutes {{value}} (validation). */
+	readonly valueDocument?: string;
+	readonly signal?: AbortSignal;
+}
+
 export interface NativeValidateRequest { cwd: string; gate: string; lineageId?: string; flags?: readonly string[]; signal?: AbortSignal; }
 export interface NativeBindSddRequest { cwd: string; change: string; lineage: string; expectedBindingRevision: string; signal?: AbortSignal; }
 export interface NativeSddStatusRequest { cwd: string; change: string; signal?: AbortSignal; }
 export interface NativeReviewStatusRequest { cwd: string; signal?: AbortSignal; }
 export interface NativeCapabilitiesRequest { cwd?: string; signal?: AbortSignal; }
-export interface NativeTargetStatusRequest { cwd: string; lineageId?: string; baseRef?: string; projection?: "workspace" | "staged"; signal?: AbortSignal; }
+export interface NativeTargetStatusRequest {
+	cwd: string;
+	lineageId?: string;
+	baseRef?: string;
+	projection?: "workspace" | "staged";
+	/**
+	 * The immutable reviewer runtime this host provides. Measured against the
+	 * live 2.4.0-main provider: the materialize-marked relay slot (agent=pi,
+	 * materialize=true, plus the provider submission) is offered ONLY when the
+	 * caller names its agent; an agent-less status returns a bare
+	 * capture-result input the host relay cannot consume. Providers older than
+	 * v2.4.0 do not define the flag and refuse it, so callers probe and fall
+	 * back rather than version-sniff.
+	 */
+	agent?: "pi";
+	signal?: AbortSignal;
+}
 export interface NativeGateContext { lineageId: string; storeRevision: string; raw: Record<string, unknown>; }
 
 export const NATIVE_REVIEW_AUTHORITY_STATUS = {
@@ -750,6 +824,16 @@ export const NATIVE_CLI_CONTRACTS = Object.freeze({
 	// protocol 2.0 with the same operation set and closed START fields consumed
 	// by Pi, so the existing capability columns are unchanged.
 	"2.2.3": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
+	// Ground-truthed against the released v2.4.0 binary: the v2 lane advertises
+	// capabilities/v2.2 and answers status/v5 and consent/v3, all of which the
+	// existing decoders already read, and the START envelope Pi consumes is
+	// still `start/v3` carrying `risk_reasons` with no `risk_evidence` and no
+	// `hint`, so the existing capability columns are unchanged. v2.4.0 also
+	// made receipt-driven development opt-in, which changes what the mode
+	// envelope reports, not whether it reports it. v2.2.4 and v2.3.0 shipped
+	// while Pi stayed on 2.2.3; they were never pinned or probed, so they get
+	// no row.
+	"2.4.0": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
 });
 type NativeCliCapability = keyof (typeof NATIVE_CLI_CONTRACTS)[keyof typeof NATIVE_CLI_CONTRACTS];
 
@@ -1637,7 +1721,11 @@ export class NativeReviewCliV214 {
 		for (const [name, value] of [["lineage", request.lineage], ["expectedRevision", request.expectedRevision], ["snapshotIdentity", request.snapshotIdentity], ["actor", request.actor], ["reason", request.reason]] as const) {
 			if (!isCanonicalProcessString(value)) throw new TypeError(`Native ABANDON ${name} must be a non-empty, trimmed, NUL-free string`);
 		}
-		if (request.maintainerAuthorization !== nativeReviewAbandonAuthorization(request)) throw new TypeError("Native ABANDON maintainerAuthorization must match the exact lineage, revision, snapshot, actor, and reason binding");
+		if (!Array.isArray(request.capturedLensResults) || request.capturedLensResults.some((entry) => !isCanonicalProcessString(entry))) throw new TypeError("Native ABANDON capturedLensResults must be an array of non-empty, trimmed, NUL-free strings");
+		for (const [name, value] of [["findingsPresent", request.findingsPresent], ["evidenceRecordsPresent", request.evidenceRecordsPresent]] as const) {
+			if (typeof value !== "boolean") throw new TypeError(`Native ABANDON ${name} must be a boolean`);
+		}
+		if (request.maintainerAuthorization !== nativeReviewAbandonAuthorization(request)) throw new TypeError("Native ABANDON maintainerAuthorization must match the exact lineage, revision, snapshot, reason, discarded-work, and actor binding");
 		await this.verifyVersion(request.cwd, request.signal, ["abandon"]);
 		const execution = await this.execute(NATIVE_REVIEW_OPERATION.ABANDON, request.cwd, [
 			"review", "abandon", "--cwd", request.cwd,
@@ -1731,14 +1819,17 @@ export class NativeReviewCliV214 {
 	}
 }
 
-export function nativeReviewAbandonAuthorization(request: Pick<NativeReviewAbandonRequest, "lineage" | "expectedRevision" | "snapshotIdentity" | "actor" | "reason">): string {
+export function nativeReviewAbandonAuthorization(request: Pick<NativeReviewAbandonRequest, "lineage" | "expectedRevision" | "snapshotIdentity" | "capturedLensResults" | "findingsPresent" | "evidenceRecordsPresent" | "actor" | "reason">): string {
 	return [
-		"gentle-ai.review-abandon-authorization/v1",
+		"gentle-ai.review-abandon-authorization/v2",
 		`lineage=${request.lineage}`,
 		`revision=${request.expectedRevision}`,
 		`snapshot_identity=${request.snapshotIdentity}`,
-		`actor=${request.actor}`,
 		`reason=${request.reason}`,
+		`captured_lens_results=${request.capturedLensResults.join(",")}`,
+		`findings_present=${request.findingsPresent}`,
+		`evidence_records_present=${request.evidenceRecordsPresent}`,
+		`actor=${request.actor.trim()}`,
 	].join("\n");
 }
 
@@ -1752,6 +1843,32 @@ export function nativeReviewLegacyQuarantineAuthorization(request: Pick<NativeRe
 		`disposition=${request.disposition}`,
 		`actor=${request.actor}`,
 		`reason=${request.reason}`,
+	].join("\n");
+}
+
+/**
+ * The exact native `gentle-ai.review-recovery-authorization/v1` binding for one
+ * recovery edge.
+ *
+ * Native `review recover` accepts a caller-supplied authorization only when it
+ * reproduces this binding byte for byte, because it is copied verbatim into the
+ * recovery provenance and read afterwards as a maintainer attestation. Pi
+ * therefore derives it from freshly read native target status and never
+ * forwards a caller-supplied one: a wrong binding is worse than an absent one,
+ * since an absent field cannot lie about who approved what.
+ *
+ * `targetIdentity` is the live target identity the provider itself publishes in
+ * the `review.recover` eligibility binding (`status.target_identity`), which is
+ * the identity the successor's initial snapshot takes.
+ */
+export function nativeReviewRecoverAuthorization(request: Pick<NativeReviewRecoverRequest, "predecessorLineage" | "expectedPredecessorRevision" | "actor" | "reason"> & { targetIdentity: string }): string {
+	return [
+		"gentle-ai.review-recovery-authorization/v1",
+		`predecessor_lineage=${request.predecessorLineage}`,
+		`predecessor_revision=${request.expectedPredecessorRevision}`,
+		`target_identity=${request.targetIdentity}`,
+		`actor=${request.actor.trim()}`,
+		`reason=${request.reason.trim()}`,
 	].join("\n");
 }
 
@@ -1795,15 +1912,16 @@ export class NativeReviewIntegrationError extends Error {
 	}
 }
 
-// Raised when negotiated START answers `consent/v2` (action:
+// Raised when negotiated START answers a consent question (`consent/v2` from
+// the pinned line, `consent/v3` from gentle-ai >= 2.3.0; action:
 // "consent_required") instead of `start/v3`. The provider has frozen no
 // authority yet: Pi must relay this complete candidate-scoped question and may
 // answer only through one of the exact invocations carried by the envelope.
 export class NativeReviewConsentRequiredError extends Error {
-	readonly consent: ReviewConsentV2;
+	readonly consent: ReviewConsentEnvelope;
 	readonly launchAttempted = true;
 	readonly mutationOutcome = "none";
-	constructor(consent: ReviewConsentV2) {
+	constructor(consent: ReviewConsentEnvelope) {
 		super(consent.headline);
 		this.name = "NativeReviewConsentRequiredError";
 		this.consent = consent;
@@ -1971,27 +2089,19 @@ interface NegotiatedExecution {
 }
 
 function decodeNativeAdmittedResultManifest(value: unknown): NativeReviewAdmittedResultManifest {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("native capture-result manifest must be an object");
-	const body = value as Record<string, unknown>;
-	const text = (key: string): string => {
-		const found = body[key];
-		if (typeof found !== "string" || found.trim() !== found || found.length === 0) throw new TypeError(`native capture-result manifest ${key} must be a non-empty trimmed string`);
-		return found;
-	};
-	const schema = text("schema");
-	if (schema !== "gentle-ai.review-result-artifact/v2") throw new TypeError(`native capture-result manifest schema must be gentle-ai.review-result-artifact/v2, received ${schema}`);
-	const admission = text("admission_decision");
-	if (admission !== "completed") throw new TypeError(`native capture-result manifest admission_decision must be completed, received ${admission}`);
-	// Exactly one locator: a provider-owned path OR an opaque reference. Both or
-	// neither means the manifest cannot be handed to FINALIZE.
-	const hasPath = body.path !== undefined, hasReference = body.reference !== undefined;
-	if (hasPath === hasReference) throw new TypeError("native capture-result manifest must carry exactly one of path or reference");
+	// The admission answer routes through the exact-identity forward decoder
+	// (decoder-freshness discipline): the complete live envelope — identity
+	// constants, binding fields, and the exactly-one-locator rule — is
+	// validated before anything is handed to FINALIZE, and an unknown field
+	// grown by gentle-ai main is rejected instead of silently dropped.
+	const artifact = decodeReviewResultArtifactV2(value);
 	return Object.freeze({
-		schema,
-		subjectHash: text("subject_hash"),
-		admissionDecision: admission,
-		...(body.lens === undefined ? {} : { lens: text("lens") }),
-		...(hasPath ? { path: text("path") } : { reference: text("reference") }),
+		schema: artifact.schema,
+		subjectHash: artifact.subjectHash,
+		admissionDecision: artifact.admissionDecision,
+		lens: artifact.lens,
+		...(artifact.path === undefined ? {} : { path: artifact.path }),
+		...(artifact.reference === undefined ? {} : { reference: artifact.reference }),
 	});
 }
 
@@ -2188,12 +2298,20 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			...(request.focus === undefined ? [] : ["--focus", request.focus]),
 			"--consent", "relay",
 		], true, request.signal);
-		// A negotiated v2 START may answer `consent/v2` (action:
+		// A negotiated v2 START may answer a consent question (action:
 		// "consent_required") instead of `start/v3` when the provider needs an
 		// explicit answer it cannot infer. Discriminate before decode and surface
-		// the complete envelope; only the caller can map a human answer.
+		// the complete envelope; only the caller can map a human answer. The
+		// body's own schema string selects the identity-exact decoder: the
+		// pinned 2.2.x line emits consent/v2, gentle-ai >= 2.3.0 (capabilities
+		// v2.1+) emits consent/v3, and any other identity fails closed inside
+		// the v3 decoder's exact identity gate.
 		if (execution.body.action === "consent_required") {
-			const consent = decode(NATIVE_REVIEW_OPERATION.START, true, () => decodeReviewConsentV2(execution.body));
+			const consent = decode(NATIVE_REVIEW_OPERATION.START, true, () => (
+				execution.body.schema === "gentle-ai.review-integration.consent/v2"
+					? decodeReviewConsentV2(execution.body)
+					: decodeReviewConsentV3(execution.body)
+			));
 			if (consent.targetIdentity !== targetIdentity || consent.projection !== projection) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native consent target binding mismatch");
 			throw new NativeReviewConsentRequiredError(consent);
 		}
@@ -2369,6 +2487,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			"--projection", request.projection ?? "workspace",
 			...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef]),
 			...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
+			...(request.agent === undefined ? [] : ["--agent", request.agent]),
 			"--next-transition",
 		], false, request.signal);
 		assertSupportedNextTransitionOperation(execution.body);
@@ -2469,6 +2588,49 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			"review", "finalize",
 			...request.argumentTokens,
 		], true, request.signal);
+		return this.decodeFinalizeTransitionExecution(execution);
+	}
+
+	// Same misbinding class as capture-evidence (live smoke, 2026-08-16): the
+	// correction PLAN and TARGETED VALIDATION collect slots render `finalize`
+	// submission descriptors whose tokens are self-contained (--contract,
+	// --lineage, --expected-revision, --target, --request-hash,
+	// --repository-context) plus exactly one {{value}} slot. Executing anything
+	// other than those rendered tokens fails the live emitter's committed-
+	// intent reconciliation, so the tokens pass through verbatim with only the
+	// {{value}} substitution: a literal for correction_lines, a staged 0o600
+	// artifact path for a validation document.
+	async finalizeSubmission(request: NativeReviewFinalizeSubmissionRequest): Promise<NativeFinalizeResult> {
+		if (request.argumentTokens.length === 0) throw new TypeError("Native FINALIZE submission requires the provider-rendered argument tokens");
+		if (request.argumentTokens.some((token) => typeof token !== "string" || token.length === 0)) throw new TypeError("Native FINALIZE submission argument tokens must all be non-empty strings");
+		if ((request.valueLiteral === undefined) === (request.valueDocument === undefined)) throw new TypeError("Native FINALIZE submission takes exactly one of valueLiteral or valueDocument");
+		const valueToken = request.argumentTokens[request.valueSubstitutionLocation];
+		if (valueToken === undefined || !valueToken.includes("{{value}}")) throw new TypeError("Native FINALIZE submission must render exactly one {{value}} slot token");
+		if (request.valueDocument !== undefined && request.valueDocument.length === 0) throw new TypeError("Native FINALIZE submission value document must contain at least one byte");
+		const directory = request.valueDocument === undefined ? undefined : await mkdtemp(join(tmpdir(), "gentle-ai-finalize-submission-"));
+		try {
+			let substituted: string;
+			if (directory !== undefined) {
+				await chmod(directory, 0o700);
+				const valueFile = join(directory, "value.json");
+				await writeFile(valueFile, request.valueDocument!, { encoding: "utf8", mode: 0o600 });
+				await chmod(valueFile, 0o600);
+				substituted = valueFile;
+			} else {
+				substituted = request.valueLiteral!;
+			}
+			const resolved = request.argumentTokens.map((token, index) => index === request.valueSubstitutionLocation ? token.replaceAll("{{value}}", substituted) : token);
+			const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.FINALIZE, request.cwd, [
+				"review", "finalize",
+				...resolved,
+			], true, request.signal);
+			return this.decodeFinalizeTransitionExecution(execution);
+		} finally {
+			if (directory !== undefined) await this.cleanupDirectory(directory).catch(() => undefined);
+		}
+	}
+
+	private decodeFinalizeTransitionExecution(execution: { body: unknown }): NativeFinalizeResult {
 		return decode(NATIVE_REVIEW_OPERATION.FINALIZE, true, () => {
 			const body = object(execution.body);
 			// A transition rendered with `--contract` answers with the negotiated
@@ -2518,6 +2680,45 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 				"--expected-revision", request.expectedRevision,
 				"--outcome", request.outcome,
 				"--input", evidenceFile,
+			], true, request.signal);
+			return decode(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, true, () => decodeNativeReviewVerificationEvidence(execution.body));
+		} finally {
+			await this.cleanupDirectory(directory).catch(() => undefined);
+		}
+	}
+
+	// Field defect (fambig, 2026-08-16): at every evidence-pending sub-state
+	// the collect slot renders the identity native demands — for a correction
+	// that is the fix-diff `--target`, not the live workspace snapshot — so the
+	// slot's rendered submission tokens execute verbatim, with only the
+	// {{outcome}} and {{input}} slots substituted. Same verbatim-token
+	// discipline as captureResult; --repository-context is authoritative and
+	// mutually exclusive with a path.
+	async captureEvidenceSubmission(request: NativeReviewCaptureEvidenceSubmissionRequest): Promise<NativeReviewVerificationEvidenceV2> {
+		if (!(NATIVE_REVIEW_CAPTURE_OUTCOME as readonly string[]).includes(request.outcome)) throw new TypeError("Native CAPTURE_EVIDENCE outcome must be passed, verification_failed, or procedural_tooling_failed");
+		if (request.evidenceDocument.length === 0) throw new TypeError("Native CAPTURE_EVIDENCE evidence must contain at least one byte");
+		if (request.argumentTokens.length === 0) throw new TypeError("Native CAPTURE_EVIDENCE submission requires the provider-rendered argument tokens");
+		if (request.argumentTokens.some((token) => typeof token !== "string" || token.length === 0)) throw new TypeError("Native CAPTURE_EVIDENCE submission argument tokens must all be non-empty strings");
+		const outcomeToken = request.argumentTokens[request.outcomeSubstitutionLocation];
+		const inputToken = request.argumentTokens[request.inputSubstitutionLocation];
+		if (request.outcomeSubstitutionLocation === request.inputSubstitutionLocation || outcomeToken === undefined || !outcomeToken.includes("{{outcome}}")) throw new TypeError("Native CAPTURE_EVIDENCE submission must render exactly one {{outcome}} slot token");
+		if (inputToken === undefined || !inputToken.includes("{{input}}")) throw new TypeError("Native CAPTURE_EVIDENCE submission must render exactly one {{input}} slot token");
+		const carriesContext = request.argumentTokens.some((token) => token === "--repository-context" || token.startsWith("--repository-context="));
+		if (carriesContext && request.cwd !== undefined) throw new TypeError("Native CAPTURE_EVIDENCE submission takes a repository context or --cwd, never both");
+		const directory = await mkdtemp(join(tmpdir(), "gentle-ai-capture-evidence-"));
+		try {
+			await chmod(directory, 0o700);
+			const evidenceFile = await this.stageEvidence(directory, request.evidenceDocument);
+			const resolved = request.argumentTokens.map((token, index) =>
+				index === request.outcomeSubstitutionLocation
+					? token.replaceAll("{{outcome}}", request.outcome)
+					: index === request.inputSubstitutionLocation
+						? token.replaceAll("{{input}}", evidenceFile)
+						: token);
+			const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, request.cwd ?? process.cwd(), [
+				"review", "capture-evidence",
+				...resolved,
+				...(carriesContext || request.cwd === undefined ? [] : ["--cwd", request.cwd]),
 			], true, request.signal);
 			return decode(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, true, () => decodeNativeReviewVerificationEvidence(execution.body));
 		} finally {
