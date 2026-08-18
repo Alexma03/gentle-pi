@@ -90,7 +90,7 @@ const nativeReviewCli = {
 
 const parameters = mode === "inspect"
 	? { operation: "inspect" }
-	: { operation: "finalize", lineageId: "relay-lineage", input: JSON.stringify({}) };
+	: { operation: "finalize", lineageId: "relay-lineage", input: JSON.stringify({ reviewer_run_acknowledged: true }) };
 
 let result;
 let error;
