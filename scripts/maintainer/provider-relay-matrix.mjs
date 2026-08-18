@@ -11,7 +11,7 @@
 // positive journey after a user-visible forecast.
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, resolveReviewHostRelaySubmission, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 export const DESCRIPTOR_SCHEMA = "gentle-pi.maintainer.provider-relay-descriptor/v1";
 export const CASE_KINDS = Object.freeze(["relay-unavailable", "positive-lens"]);
@@ -109,12 +109,14 @@ export function loadDescriptor(path) {
 	return validateDescriptor(parsed);
 }
 // Resolves a declared executable without a shell: absolute path checked
-// verbatim, bare name searched on PATH. Never re-resolves production.
+// verbatim, bare name searched on PATH. Never re-resolves production. PATH
+// matches are normalized to absolute paths (a relative component like `.`
+// must not yield a relative candidate; the relay launches from scratch).
 export function resolveDeclaredExecutable(executable) {
 	if (isAbsolute(executable)) return existsSync(executable) && statSync(executable).isFile() ? executable : null;
-	for (const directory of (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":")) {
+	for (const directory of (process.env.PATH ?? "").split(delimiter)) {
 		if (!directory) continue;
-		const candidate = join(directory, executable);
+		const candidate = resolve(directory, executable);
 		if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
 	}
 	return null;
@@ -132,6 +134,11 @@ function unlaunchablePi() {
 // `blocked` (never `pass`); `fail` is an armed case whose outcome mismatched.
 export async function runMatrix(descriptor, options = {}) {
 	const positiveArmed = options.armPositive ?? (process.env[ARM_POSITIVE_ENV] === "1");
+	// Smallest test seam: an optional injected relay function. Defaults to
+	// the real relay so production CLI behavior is identical when unset; tests
+	// inject a fake to assert the exact resolved path reaches the boundary
+	// without executing a real subprocess (platform-neutral #324 evidence).
+	const relay = options.relay ?? runReviewHostRelaySlot;
 	const verdicts = [];
 	for (const caseEntry of descriptor.cases) {
 		const gentleAiPath = resolveDeclaredExecutable(descriptor.gentleAiExecutable);
@@ -140,9 +147,15 @@ export async function runMatrix(descriptor, options = {}) {
 			continue;
 		}
 		// The positive lens needs a real pi AND an explicit arm; the negative
-		// control never launches pi (fails closed at materialize).
+		// control never launches pi (fails closed at materialize). The precheck
+		// resolves the declared Pi executable ONCE and reuses that exact
+		// concrete path for launch; a bare declaration is never re-resolved
+		// between precheck and spawn, so the relay launches exactly the
+		// executable the harness checked (issue #324).
+		let piPath = null;
 		if (caseEntry.kind === "positive-lens") {
-			if (resolveDeclaredExecutable(descriptor.piExecutable) === null) {
+			piPath = resolveDeclaredExecutable(descriptor.piExecutable);
+			if (piPath === null) {
 				verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "blocked", reason: missingReason(descriptor.piExecutable, "piExecutable"), command: POSITIVE_JOURNEY_COMMAND });
 				continue;
 			}
@@ -164,9 +177,9 @@ export async function runMatrix(descriptor, options = {}) {
 		// stage as kind=pi-launch-failed stage=pi mutationOutcome=none, with
 		// zero pi launch and zero submission.
 		const negativeControl = caseEntry.kind === "relay-unavailable" ? unlaunchablePi() : null;
-		const request = { captureArgumentTokens: caseEntry.captureArgumentTokens, submission: caseEntry.submission, gentleAiExecutable: gentleAiPath, piExecutable: negativeControl === null ? descriptor.piExecutable : negativeControl.executable, ...(options.signal === undefined ? {} : { signal: options.signal }) };
+		const request = { captureArgumentTokens: caseEntry.captureArgumentTokens, submission: caseEntry.submission, gentleAiExecutable: gentleAiPath, piExecutable: negativeControl === null ? piPath : negativeControl.executable, ...(options.signal === undefined ? {} : { signal: options.signal }) };
 		try {
-			const result = await runReviewHostRelaySlot(request);
+			const result = await relay(request);
 			if (caseEntry.kind === "relay-unavailable") {
 				verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "fail", reason: "expected relay-unavailable (runtime without --materialize) but the relay succeeded; the descriptor's binary is unexpectedly capable" });
 			} else {
