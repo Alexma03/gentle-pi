@@ -9,26 +9,27 @@
 // `pnpm test` never imports it; `pnpm run test:maintainer` runs the tests;
 // the CLI is the entry point the separate verifier uses for the real organic
 // positive journey after a user-visible forecast.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, classifyReviewHostRelayRefusal, resolveReviewHostRelaySubmission, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "../../lib/review-relay-contract.ts";
 export const DESCRIPTOR_SCHEMA = "gentle-pi.maintainer.provider-relay-descriptor/v1";
-export const CASE_KINDS = Object.freeze(["relay-unavailable", "positive-lens", "provider-role-refuter", "provider-role-validator"]);
-// P7 role vectors are self-contained provider --execute invocations: Go
-// materializes, runs locked-down pi, and admits the verdict. The host executes
-// the exact rendered command and never handles role prompt or result bytes.
 export const PROVIDER_ROLE_VECTOR_KINDS = Object.freeze(["provider-role-refuter", "provider-role-validator"]);
+export const CASE_KINDS = Object.freeze(["relay-unavailable", "positive-lens", ...PROVIDER_ROLE_VECTOR_KINDS]);
 export const PROVIDER_ROLE_VECTOR_VERB = Object.freeze({ "provider-role-refuter": "capture-refuter", "provider-role-validator": "capture-validation" });
 export const PROVIDER_ROLE_VECTOR_ROLE = Object.freeze({ "provider-role-refuter": "refuter", "provider-role-validator": "targeted-validator" });
 export const PROVIDER_ROLE_CAPTURE_ARTIFACT_SCHEMA = "gentle-ai.review-provider-role-capture/v1";
+export const ROLE_STREAM_MAX_BYTES = 1024 * 1024;
 export const ROLE_VECTOR_FAILURE = Object.freeze({
 	ROLE_SURFACE_UNAVAILABLE: "role-surface-unavailable",
 	ROLE_LAUNCH_FAILED: "role-launch-failed",
 	ROLE_FAILED: "role-failed",
 	ROLE_TIMED_OUT: "role-timed-out",
+	ROLE_OUTPUT_OVERFLOW: "role-output-overflow",
+	ROLE_TERMINATION_FAILED: "role-termination-failed",
+	ROLE_ABORTED: "role-aborted",
 	EMPTY_ARTIFACT: "empty-artifact",
 	HANDSHAKE_REFUSED: "handshake-refused",
 });
@@ -38,8 +39,7 @@ const RCTX_RE = /^rctx1_[0-9a-f]{64}$/;
 // sole authority for lineage and target identity. Each must appear exactly
 // once; the matrix later compares the returned artifact against these values.
 const ROLE_BINDING_RE = Object.freeze({ "--lineage=": /^.+$/, "--expected-revision=": REQUEST_HASH_RE, "--target=": REQUEST_HASH_RE, "--repository-context=": RCTX_RE });
-// The provider owns a 600s role deadline; this outer watchdog starts earlier and
-// must leave setup/cancellation margin without pretending to know prompt bytes.
+// The 900s watchdog FIRES after the provider-owned 600s deadline and leaves setup/cancellation margin.
 export const DEFAULT_ROLE_VECTOR_TIMEOUT_MS = 900_000;
 export class ProviderRoleVectorError extends Error {
 	kind;
@@ -59,7 +59,7 @@ export class ProviderRoleVectorError extends Error {
 		this.exitCode = details?.exitCode ?? null;
 		this.stderr = details?.stderr ?? "";
 		this.timedOut = details?.timedOut ?? false;
-		this.mutationOutcome = kind === ROLE_VECTOR_FAILURE.ROLE_FAILED || kind === ROLE_VECTOR_FAILURE.ROLE_TIMED_OUT ? "unknown" : "none";
+		this.mutationOutcome = details?.mutationOutcome ?? (kind === ROLE_VECTOR_FAILURE.ROLE_FAILED || kind === ROLE_VECTOR_FAILURE.ROLE_TIMED_OUT || kind === ROLE_VECTOR_FAILURE.ROLE_OUTPUT_OVERFLOW ? "unknown" : "none");
 	}
 }
 // The positive lens runs only when explicitly armed: the organic journey
@@ -104,7 +104,7 @@ export function validateDescriptor(value) {
 			if (seen.has(entry.name)) fail(`descriptor.cases[${index}].name "${entry.name}" is duplicated`);
 			seen.add(entry.name);
 			if (!CASE_KINDS.includes(entry.kind)) fail(`descriptor.cases[${index}].kind must be one of ${JSON.stringify([...CASE_KINDS])}`);
-			if (entry.kind === "provider-role-refuter" || entry.kind === "provider-role-validator") {
+			if (PROVIDER_ROLE_VECTOR_KINDS.includes(entry.kind)) {
 				return validateRoleCaseEntry(entry, index);
 			}
 			exactKeys(entry, new Set(["name", "kind", "captureArgumentTokens", "submission"]), `descriptor.cases[${index}]`);
@@ -180,9 +180,8 @@ function validateRoleCaseEntry(entry, index) {
 		if (vr.schema !== "gentle-ai.review-targeted-validation-request/v1") fail(`${label}.validationRequest.schema must be exactly "gentle-ai.review-targeted-validation-request/v1"`);
 		if (!isStr(vr.requestHash) || !REQUEST_HASH_RE.test(vr.requestHash)) fail(`${label}.validationRequest.requestHash must be a sha256 digest`);
 		const expectedToken = `--request-hash=${vr.requestHash}`;
-		if (!entry.argumentTokens.includes(expectedToken)) {
-			fail(`${label}.argumentTokens must include the provider-issued "${expectedToken}" token that binds the embedded validation_request`);
-		}
+		const requestHashTokens = entry.argumentTokens.filter((token) => token.startsWith("--request-hash="));
+		if (requestHashTokens.length !== 1 || requestHashTokens[0] !== expectedToken) fail(`${label}.argumentTokens must include exactly one provider-issued "${expectedToken}" token that binds the embedded validation_request`);
 		result.validationRequest = { schema: vr.schema, requestHash: vr.requestHash };
 	}
 	return Object.freeze(result);
@@ -224,66 +223,53 @@ function unlaunchablePi() {
 	chmodSync(directory, 0o700);
 	return { directory, executable: join(directory, "pi-must-never-launch") };
 }
-// Runs the exact provider role command once with the relay handshake. Go owns
-// prompt materialization, locked-down pi execution, and admission; the host only
-// decodes the typed artifact and never overrides model/provider/profile.
+function terminateRoleProcessTree(child) {
+	if (child.pid === undefined) return false;
+	if (process.platform === "win32") {
+		try { const result = spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", shell: false, windowsHide: true, timeout: 5_000 }); if (result.error === undefined && result.status === 0) return true; } catch {}
+		child.kill("SIGKILL"); return false;
+	}
+	try { process.kill(-child.pid, "SIGKILL"); return true; } catch (error) { if (error?.code === "ESRCH") return true; child.kill("SIGKILL"); return false; }
+}
 export async function runProviderRoleVector(request) {
 	const verb = PROVIDER_ROLE_VECTOR_VERB[request.kind];
 	if (verb === undefined) throw new TypeError(`runProviderRoleVector received an unknown role vector kind: ${request.kind}`);
-	const argv = ["review", verb, ...request.argumentTokens];
-	const env = { ...process.env, [GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV]: GENTLE_PI_REVIEW_RELAY_CONTRACT };
-	let capture;
+	if (request.signal?.aborted) throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_ABORTED, "launch", "gentle-ai role vector was aborted before launch", { mutationOutcome: "none" });
+	const argv = ["review", verb, ...request.argumentTokens], env = { ...process.env, ...request.env, [GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV]: GENTLE_PI_REVIEW_RELAY_CONTRACT };
+	let capture, launched = false;
 	try {
 		capture = await new Promise((resolve, reject) => {
-			const child = spawn(request.gentleAiExecutable, argv, {
-				cwd: process.cwd(),
-				env,
-				stdio: ["ignore", "pipe", "pipe"],
-				shell: false,
-				windowsHide: true,
-				...(request.signal === undefined ? {} : { signal: request.signal }),
-			});
-			const stdout = [];
-			const stderr = [];
-			let timedOut = false;
-			let settled = false;
-			const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, request.timeoutMs ?? DEFAULT_ROLE_VECTOR_TIMEOUT_MS);
-			timer.unref();
-			child.stdout.on("data", (chunk) => stdout.push(chunk));
-			child.stderr.on("data", (chunk) => stderr.push(chunk));
-			child.on("error", (error) => { if (settled) return; settled = true; clearTimeout(timer); reject(error); });
-			child.on("close", (code) => { if (settled) return; settled = true; clearTimeout(timer); resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode: code, timedOut }); });
+			const child = spawn(request.gentleAiExecutable, argv, { cwd: process.cwd(), env, stdio: ["ignore", "pipe", "pipe"], shell: false, windowsHide: true, ...(process.platform === "win32" ? {} : { detached: true }) });
+			launched = child.pid !== undefined;
+			const stdout = [], stderr = []; let stdoutBytes = 0, stderrBytes = 0, terminationCause = null, treeTerminationFailed = false, settled = false;
+			const terminate = (cause) => { if (terminationCause === null) { terminationCause = cause; treeTerminationFailed = !terminateRoleProcessTree(child); } }, abort = () => terminate("abort"), cleanup = () => { clearTimeout(timer); request.signal?.removeEventListener("abort", abort); };
+			const timer = setTimeout(() => terminate("timeout"), request.timeoutMs ?? DEFAULT_ROLE_VECTOR_TIMEOUT_MS); timer.unref();
+			if (request.signal?.aborted) abort(); else request.signal?.addEventListener("abort", abort, { once: true });
+			const collect = (stream, chunks) => (chunk) => { if (terminationCause !== null) return; const bytes = chunk.length; if ((stream === "stdout" ? stdoutBytes : stderrBytes) + bytes > ROLE_STREAM_MAX_BYTES) { terminate(stream); return; } if (stream === "stdout") stdoutBytes += bytes; else stderrBytes += bytes; chunks.push(chunk); };
+			child.stdout.on("data", collect("stdout", stdout)); child.stderr.on("data", collect("stderr", stderr));
+			child.on("error", (error) => { if (settled) return; settled = true; cleanup(); if (terminationCause === null) reject(error); else resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode: null, terminationCause, treeTerminationFailed }); });
+			child.on("close", (code) => { if (settled) return; settled = true; cleanup(); resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode: code, terminationCause, treeTerminationFailed }); });
 		});
 	} catch (error) {
+		if (request.signal?.aborted && launched) throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_ABORTED, "execute", "gentle-ai role vector was aborted after launch", { mutationOutcome: "unknown" });
 		throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_LAUNCH_FAILED, "launch", `gentle-ai role vector could not start: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	const stderrText = capture.stderr.toString("utf8");
-	if (capture.timedOut) {
-		throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_TIMED_OUT, "execute", "gentle-ai role vector exceeded its outer watchdog; re-query negotiated STATUS before any retry, and the same transcript must not relaunch blindly", { exitCode: capture.exitCode, stderr: stderrText, timedOut: true });
-	}
+	if (capture.treeTerminationFailed) throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_TERMINATION_FAILED, "execute", "gentle-ai role vector tree termination could not be confirmed; re-query negotiated STATUS before any retry", { exitCode: capture.exitCode, stderr: stderrText, mutationOutcome: "unknown" });
+	if (capture.terminationCause === "abort") throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_ABORTED, "execute", "gentle-ai role vector was aborted after launch", { exitCode: capture.exitCode, stderr: stderrText, mutationOutcome: "unknown" });
+	if (capture.terminationCause === "stdout" || capture.terminationCause === "stderr") throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_OUTPUT_OVERFLOW, "execute", `gentle-ai role vector ${capture.terminationCause} exceeded the ${ROLE_STREAM_MAX_BYTES}-byte limit; re-query negotiated STATUS before any retry`, { exitCode: capture.exitCode, stderr: stderrText });
+	if (capture.terminationCause === "timeout") throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_TIMED_OUT, "execute", "gentle-ai role vector exceeded its outer watchdog; re-query negotiated STATUS before any retry, and the same transcript must not relaunch blindly", { exitCode: capture.exitCode, stderr: stderrText, timedOut: true });
 	if (capture.exitCode !== 0) {
 		const refusal = classifyReviewHostRelayRefusal(stderrText);
-		if (refusal === "handshake") {
-			throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.HANDSHAKE_REFUSED, "execute", stderrText, { exitCode: capture.exitCode, stderr: stderrText, timedOut: capture.timedOut });
-		}
-		if (refusal === "unknown-flag") {
-			throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_SURFACE_UNAVAILABLE, "execute", "the declared gentle-ai binary lacks the provider role capture surface", { exitCode: capture.exitCode, stderr: stderrText, timedOut: capture.timedOut });
-		}
-		throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_FAILED, "execute", "gentle-ai role vector failed", { exitCode: capture.exitCode, stderr: stderrText, timedOut: capture.timedOut });
+		if (refusal === "handshake") throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.HANDSHAKE_REFUSED, "execute", stderrText, { exitCode: capture.exitCode, stderr: stderrText });
+		if (refusal === "unknown-flag") throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_SURFACE_UNAVAILABLE, "execute", "the declared gentle-ai binary lacks the provider role capture surface", { exitCode: capture.exitCode, stderr: stderrText });
+		throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_FAILED, "execute", "gentle-ai role vector failed", { exitCode: capture.exitCode, stderr: stderrText });
 	}
-	if (capture.stdout.length === 0) {
-		throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.EMPTY_ARTIFACT, "execute", "gentle-ai role vector produced no artifact bytes", { exitCode: 0, stderr: stderrText });
-	}
+	if (capture.stdout.length === 0) throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.EMPTY_ARTIFACT, "execute", "gentle-ai role vector produced no artifact bytes", { exitCode: 0, stderr: stderrText });
 	let artifact;
-	try {
-		artifact = JSON.parse(capture.stdout.toString("utf8"));
-	} catch (error) {
-		throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_FAILED, "execute", `gentle-ai role vector returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`, { exitCode: 0, stderr: stderrText });
-	}
+	try { artifact = JSON.parse(capture.stdout.toString("utf8")); } catch (error) { throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_FAILED, "execute", `gentle-ai role vector returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`, { exitCode: 0, stderr: stderrText }); }
 	const expectedRole = PROVIDER_ROLE_VECTOR_ROLE[request.kind];
-	if (!isObj(artifact) || artifact.schema !== PROVIDER_ROLE_CAPTURE_ARTIFACT_SCHEMA || artifact.role !== expectedRole || artifact.captured !== true) {
-		throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_FAILED, "execute", "gentle-ai role vector returned an artifact that does not match the expected typed shape", { exitCode: 0, stderr: stderrText });
-	}
+	if (!isObj(artifact) || artifact.schema !== PROVIDER_ROLE_CAPTURE_ARTIFACT_SCHEMA || artifact.role !== expectedRole || artifact.captured !== true || !isStr(artifact.lineage_id) || !REQUEST_HASH_RE.test(artifact.target_identity)) throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_FAILED, "execute", "gentle-ai role vector returned an artifact that does not match the expected typed shape", { exitCode: 0, stderr: stderrText });
 	return { schema: artifact.schema, lineageId: artifact.lineage_id, targetIdentity: artifact.target_identity, role: artifact.role, captured: true };
 }
 // Runs the matrix against the REAL relay. A case that cannot run honestly is
@@ -311,7 +297,7 @@ export async function runMatrix(descriptor, options = {}) {
 		// admits the raw verdict. Like the positive lens, they need a real
 		// capable binary and an explicit arm; the runner never synthesizes a
 		// provider result.
-		if (caseEntry.kind === "provider-role-refuter" || caseEntry.kind === "provider-role-validator") {
+		if (PROVIDER_ROLE_VECTOR_KINDS.includes(caseEntry.kind)) {
 			if (!positiveArmed) {
 				verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "blocked", reason: `${caseEntry.kind} case is not explicitly armed; set ${ARM_POSITIVE_ENV}=1 with a real capable gentle-ai binary, a real pi, and a real review session (real binding tokens from \`gentle-ai review status --next-transition\`) to run the organic role vector. The runner never synthesizes a provider verdict.`, command: POSITIVE_JOURNEY_COMMAND });
 				continue;
@@ -324,7 +310,9 @@ export async function runMatrix(descriptor, options = {}) {
 				verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "pass", role: artifact.role, lineageId: artifact.lineageId, targetIdentity: artifact.targetIdentity, captured: artifact.captured });
 			} catch (error) {
 				if (error instanceof ProviderRoleVectorError) {
-					if (error.kind === ROLE_VECTOR_FAILURE.ROLE_SURFACE_UNAVAILABLE || error.kind === ROLE_VECTOR_FAILURE.HANDSHAKE_REFUSED) {
+					if (error.kind === ROLE_VECTOR_FAILURE.HANDSHAKE_REFUSED) {
+						verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "blocked", stage: error.stage, mutationOutcome: error.mutationOutcome, reason: `the declared gentle-ai binary refused relay-contract negotiation: ${error.message}`, command: POSITIVE_JOURNEY_COMMAND });
+					} else if (error.kind === ROLE_VECTOR_FAILURE.ROLE_SURFACE_UNAVAILABLE) {
 						verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "blocked", stage: error.stage, mutationOutcome: error.mutationOutcome, reason: `the declared gentle-ai binary lacks the provider role capture surface: ${error.message}`, command: POSITIVE_JOURNEY_COMMAND });
 					} else {
 						verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "fail", reason: `role vector error kind=${error.kind} stage=${error.stage} mutationOutcome=${error.mutationOutcome}: ${error.message}`, stderr: error.stderr, timedOut: error.timedOut });
