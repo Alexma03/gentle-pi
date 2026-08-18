@@ -236,7 +236,7 @@ test("INSPECT after a transport failure reoffers the exact pending binding; FINA
 	assert.equal(relaunch.result.host_relay.transport, "pi_host_relay");
 });
 
-test("a drifted INSPECT reoffer is NOT equal to the observed binding; the parent does NOT relaunch and no relay/finalize fires", async (t) => {
+test("every provider-owned binding drift forbids relaunch and no relay/finalize fires", async (t) => {
 	const cwd = repository(t);
 
 	// Process A: observe the original binding, transport fails.
@@ -244,21 +244,36 @@ test("a drifted INSPECT reoffer is NOT equal to the observed binding; the parent
 	assert.equal(failure.relayRequests.length, 1);
 	assert.equal(failure.result.outcome, "pi-host-relay-transport-failure");
 	const observedBinding = failure.relayRequests[0];
+	const baseInput = relayCollectInput(LINEAGE, LENS, ORDER);
+	const driftArgument = (name, value, token) => {
+		const input = structuredClone(baseInput);
+		const argument = input.arguments.find((candidate) => candidate.name === name);
+		assert.ok(argument !== undefined);
+		const originalToken = argument.token;
+		Object.assign(argument, { value, token });
+		input.submission.argumentTokens = input.submission.argumentTokens.map((candidate) => candidate === originalToken ? token : candidate);
+		return input;
+	};
+	const driftedSubmission = structuredClone(baseInput);
+	driftedSubmission.submission.values[0]!.slot = "drifted_reviewer_result";
+	const driftSha = `sha256:${"f".repeat(64)}`;
+	const driftCases = [
+		{ field: "submission", input: driftedSubmission },
+		{ field: "captureArgumentTokens", input: driftArgument("expected-revision", driftSha, `--expected-revision=${driftSha}`) },
+		{ field: "order", input: driftArgument("order", String(ORDER + 1), `--order=${ORDER + 1}`) },
+		{ field: "subjectHash", input: driftArgument("subject-hash", driftSha, `--subject-hash=${driftSha}`) },
+		{ field: "lens", input: driftArgument("lens", "review-risk", "--lens=review-risk") },
+	];
 
-	// Process B (fresh): INSPECT reoffers a DRIFTED binding (different lens).
-	const driftedPending = finalizeStatus(LINEAGE, [relayCollectInput(LINEAGE, "review-risk", ORDER)]);
-	const inspect = runWorker(t, cwd, [driftedPending], "inspect");
-	assert.equal(inspect.relayRequests.length, 0, "INSPECT never launches the relay");
-	assert.equal(inspect.finalizeCalls, 0, "INSPECT never invokes native finalize");
-	const inspectSlot = inspectRelaySlot(inspect.result);
-	assert.ok(inspectSlot !== undefined);
-
-	// The parent confirms the drifted reoffer is NOT deep-equal to the
-	// observed binding, so the retry discipline FORBIDS relaunch. No
-	// finalize/relaunch process is spawned.
-	assert.notDeepEqual(inspectSlot, observedBinding, "the drifted reoffer must NOT deep-equal the observed binding");
-	assert.equal(inspectSlot.captureArgumentTokens.some((token) => token === "--lens=review-risk"), true);
-	assert.equal(inspectSlot.captureArgumentTokens.some((token) => token === `--lens=${LENS}`), false);
+	for (const { field, input } of driftCases) {
+		// Process B (fresh): INSPECT reoffers one independently drifted binding.
+		const inspect = runWorker(t, cwd, [finalizeStatus(LINEAGE, [input])], "inspect");
+		assert.equal(inspect.relayRequests.length, 0, `${field}: INSPECT never launches the relay`);
+		assert.equal(inspect.finalizeCalls, 0, `${field}: INSPECT never invokes native finalize`);
+		const inspectSlot = inspectRelaySlot(inspect.result);
+		assert.ok(inspectSlot !== undefined, `${field}: INSPECT exposes the drifted slot for comparison`);
+		assert.notDeepEqual(inspectSlot, observedBinding, `${field}: the drifted reoffer must not equal the observed binding`);
+	}
 });
 
 test("a missing INSPECT reoffer exposes no matching slot; the parent does NOT relaunch and no relay/finalize fires", async (t) => {
