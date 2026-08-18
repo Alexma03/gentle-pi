@@ -47,21 +47,14 @@ const SUBMISSION = Object.freeze({
 	values: Object.freeze([{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitutionLocation: BINDING_TOKENS.length }]),
 });
 
-const ROLE_LINEAGE = "review-fixture-role-vector";
-const ROLE_REVISION = `sha256:${"a".repeat(64)}`;
+const ROLE_LINEAGE = "review-fixture-role-vector", ROLE_REVISION = `sha256:${"a".repeat(64)}`;
 const ROLE_TARGET = `sha256:${"b".repeat(64)}`;
 const ROLE_CONTEXT = `rctx1_${"c".repeat(64)}`;
 const ROLE_REQUEST_HASH = `sha256:${"9".repeat(64)}`;
 const REFUTER_TOKENS = Object.freeze([`--lineage=${ROLE_LINEAGE}`, `--expected-revision=${ROLE_REVISION}`, `--target=${ROLE_TARGET}`, `--repository-context=${ROLE_CONTEXT}`, "--agent=pi", "--execute=true"]);
 const VALIDATOR_TOKENS = Object.freeze([`--lineage=${ROLE_LINEAGE}`, `--expected-revision=${ROLE_REVISION}`, `--target=${ROLE_TARGET}`, `--repository-context=${ROLE_CONTEXT}`, `--request-hash=${ROLE_REQUEST_HASH}`, "--agent=pi", "--execute=true"]);
 const VALIDATION_REQUEST = Object.freeze({ schema: "gentle-ai.review-targeted-validation-request/v1", requestHash: ROLE_REQUEST_HASH });
-const ROLE_ARTIFACT = Object.freeze({
-	schema: "gentle-ai.review-provider-role-capture/v1",
-	lineage_id: ROLE_LINEAGE,
-	target_identity: ROLE_TARGET,
-	role: "refuter",
-	captured: true,
-});
+const ROLE_ARTIFACT = Object.freeze({ schema: "gentle-ai.review-provider-role-capture/v1", lineage_id: ROLE_LINEAGE, target_identity: ROLE_TARGET, role: "refuter", captured: true });
 
 function descriptor(overrides = {}) {
 	return {
@@ -146,9 +139,14 @@ test("role vector descriptors validate and return a normalized copy with exact p
 	assert.deepEqual(validator.argumentTokens, [...VALIDATOR_TOKENS]);
 	assert.deepEqual(validator.validationRequest, VALIDATION_REQUEST);
 });
-test("role vector descriptors reject missing --agent=pi / --execute=true and reject --materialize=true (self-contained, never a lens slot)", () => {
-	rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: [...REFUTER_TOKENS].filter((t) => t !== "--agent=pi") }] }), "--agent=pi");
-	rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: [...REFUTER_TOKENS].filter((t) => t !== "--execute=true") }] }), "--execute=true");
+test("role vector descriptors require exactly one --agent=pi and --execute=true, never a lens slot", () => {
+	for (const [name, argumentTokens, expected] of [
+		["missing agent", REFUTER_TOKENS.filter((t) => t !== "--agent=pi"), "--agent=pi"], ["duplicate agent", [...REFUTER_TOKENS, "--agent=pi"], "--agent=pi"],
+		["conflicting agent", [...REFUTER_TOKENS, "--agent=other"], "--agent=pi"], ["missing execute", REFUTER_TOKENS.filter((t) => t !== "--execute=true"), "--execute=true"],
+		["duplicate execute", [...REFUTER_TOKENS, "--execute=true"], "--execute=true"], ["conflicting execute", [...REFUTER_TOKENS, "--execute=false"], "--execute=true"],
+	] as const) {
+		rejects(roleDescriptor("provider-role-refuter", { cases: [{ name, kind: "provider-role-refuter", argumentTokens: [...argumentTokens] }] }), expected);
+	}
 	rejects(roleDescriptor("provider-role-refuter", { cases: [{ name: "r", kind: "provider-role-refuter", argumentTokens: [...REFUTER_TOKENS, "--materialize=true"] }] }), "--materialize=true");
 });
 test("targeted-validator descriptor requires exactly one request hash matching validationRequest", () => {
@@ -249,10 +247,8 @@ test("runProviderRoleVector treats a prelaunch abort as not-started with no muta
 	await assert.rejects(runProviderRoleVector({ kind: "provider-role-refuter", argumentTokens: REFUTER_TOKENS, gentleAiExecutable: process.execPath, signal: controller.signal }), (error) => error instanceof ProviderRoleVectorError && error.kind === ROLE_VECTOR_FAILURE.ROLE_ABORTED && error.stage === "launch" && error.mutationOutcome === "none");
 });
 function roleChild(t: test.TestContext, name: string, source: string) {
-	const path = sandboxPath(`${name} preload.cjs`), savedNodeOptions = process.env.NODE_OPTIONS;
-	writeFileSync(path, `const roleArgv = ["review", ...process.argv.slice(2)], Module = require("node:module"), resolveFilename = Module._resolveFilename; Module._resolveFilename = function (request, ...args) { return /[\\\\/]review$/.test(request) ? ${JSON.stringify(path)} : resolveFilename.call(this, request, ...args); }; ${source}`);
-	t.after(() => { if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = savedNodeOptions; rmSync(path, { force: true }); });
-	return { executable: process.execPath, env: { NODE_OPTIONS: `--require=${JSON.stringify(path)}` } };
+	const path = sandboxPath(`${name} preload.cjs`), savedNodeOptions = process.env.NODE_OPTIONS; writeFileSync(path, `const roleArgv = ["review", ...process.argv.slice(2)], Module = require("node:module"), resolveFilename = Module._resolveFilename; Module._resolveFilename = function (request, ...args) { return /[\\\\/]review$/.test(request) ? ${JSON.stringify(path)} : resolveFilename.call(this, request, ...args); }; ${source}`);
+	t.after(() => { if (savedNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = savedNodeOptions; rmSync(path, { force: true }); }); return { executable: process.execPath, env: { NODE_OPTIONS: `--require=${JSON.stringify(path)}` } };
 }
 test("runProviderRoleVector executes both real stub-child verbs and decodes snake_case artifacts", async (t) => {
 	for (const kind of PROVIDER_ROLE_VECTOR_KINDS) {
@@ -268,6 +264,12 @@ test("runProviderRoleVector rejects malformed artifact binding shape before stal
 		await assert.rejects(runProviderRoleVector({ kind: "provider-role-refuter", argumentTokens: REFUTER_TOKENS, gentleAiExecutable: child.executable, env: child.env }), (error) => error instanceof ProviderRoleVectorError && error.kind === ROLE_VECTOR_FAILURE.ROLE_FAILED && /typed shape/.test(error.message));
 	}
 });
+test("runProviderRoleVector classifies an empty successful artifact as unknown and requires STATUS re-query", async (t) => {
+	const child = roleChild(t, "empty-artifact.cjs", "process.exit(0);");
+	await assert.rejects(runProviderRoleVector({ kind: "provider-role-refuter", argumentTokens: REFUTER_TOKENS, gentleAiExecutable: child.executable, env: child.env }), (caught) => {
+		assert.ok(caught instanceof ProviderRoleVectorError); assert.equal(caught.kind, ROLE_VECTOR_FAILURE.EMPTY_ARTIFACT); assert.equal(caught.stage, "execute"); assert.equal(caught.mutationOutcome, "unknown"); assert.match(caught.message, /re-query negotiated STATUS before any retry/); return true;
+	});
+});
 test("runProviderRoleVector bounds each output stream before JSON or exit handling", async (t) => {
 	for (const stream of ["stdout", "stderr"] as const) {
 		const child = roleChild(t, `overflow-${stream}.cjs`, `process.${stream}.write("x".repeat(${ROLE_STREAM_MAX_BYTES + 1})); setInterval(() => {}, 1_000);`);
@@ -280,8 +282,7 @@ async function descendantPid(path: string) {
 	assert.fail("fixture did not report a positive descendant PID");
 }
 async function assertReaped(pid: number) {
-	assert.ok(pid > 0, "only a positive descendant PID may be probed");
-	for (let attempt = 0; attempt < 50; attempt += 1) try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 10)); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return; throw error; }
+	assert.ok(pid > 0, "only a positive descendant PID may be probed"); for (let attempt = 0; attempt < 50; attempt += 1) try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 10)); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") return; throw error; }
 	assert.fail("role termination left a deterministic child-process descendant running");
 }
 test("role watchdog and abort reap descendants on every platform", async (t) => {
@@ -294,6 +295,14 @@ test("role watchdog and abort reap descendants on every platform", async (t) => 
 		await assert.rejects(run, (error) => error instanceof ProviderRoleVectorError && error.kind === (mode === "abort" ? ROLE_VECTOR_FAILURE.ROLE_ABORTED : ROLE_VECTOR_FAILURE.ROLE_TIMED_OUT) && error.mutationOutcome === "unknown");
 		await assertReaped(pid);
 	});
+});
+test("failed tree termination settles despite a surviving descendant retaining inherited pipes", async (t) => {
+	const grandchild = sandboxPath("role-pipe-holder.pid"), controller = new AbortController();
+	const child = roleChild(t, "pipe-holder-role-child.cjs", `const fs = require("node:fs"), { spawn } = require("node:child_process"), grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "inherit", env: { ...process.env, NODE_OPTIONS: "" } }); fs.writeFileSync(${JSON.stringify(sandboxPath("ROLE_PID_PLACEHOLDER"))}.replace("ROLE_PID_PLACEHOLDER", ${JSON.stringify("role-pipe-holder.pid")}), String(grandchild.pid)); setInterval(() => {}, 1000);`);
+	const run = runProviderRoleVector({ kind: "provider-role-refuter", argumentTokens: REFUTER_TOKENS, gentleAiExecutable: child.executable, env: child.env, signal: controller.signal, terminateProcessTree: (process) => { process.kill("SIGKILL"); return false; } });
+	const pid = await descendantPid(grandchild); t.after(() => { try { process.kill(pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; } });
+	const started = Date.now(); controller.abort(); await assert.rejects(run, (error) => error instanceof ProviderRoleVectorError && error.kind === ROLE_VECTOR_FAILURE.ROLE_TERMINATION_FAILED && error.stage === "execute" && error.mutationOutcome === "unknown");
+	assert.ok(Date.now() - started < 500, "failed tree termination must not wait for descendant-held pipes to close"); assert.doesNotThrow(() => process.kill(pid, 0), "the fixture descendant must survive while retaining inherited pipes");
 });
 test("stale-target fail-closed: missing or duplicate required binding tokens are rejected before runner invocation", () => {
 	const drop = (tokens: readonly string[], prefix: string) => tokens.filter((t) => !t.startsWith(prefix));
