@@ -7,10 +7,15 @@ import { createNodeExecFileAdapter } from "../lib/native-review-cli.ts";
 import {
 	REVIEW_HOST_RELAY_FAILURE,
 	REVIEW_HOST_RELAY_PI_ARGV,
+	REVIEW_HOST_RELAY_PI_TIMEOUT_ENV,
+	REVIEW_HOST_RELAY_PI_TIMEOUT_FLOOR_MS,
+	REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS,
+	REVIEW_HOST_RELAY_PI_TIMEOUT_PER_MEBIBYTE_MS,
 	REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
 	REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
 	ReviewHostRelayError,
 	classifyReviewHostRelayRefusal,
+	resolveReviewHostRelayPiTimeoutMs,
 	resolveReviewHostRelaySubmission,
 	reviewHostRelaySlots,
 	runReviewHostRelaySlot,
@@ -305,10 +310,84 @@ test("empty pi stdout fails closed with a typed error and no submission", async 
 
 test("pi timeout fails closed with a typed error and no submission", async (t) => {
 	const fixture = harness(t, { RELAY_FAKE_PI_MODE: "hang" });
-	const error = await rejectsWithRelayError(runReviewHostRelaySlot(relayRequest(fixture, { piTimeoutMs: 300 })), REVIEW_HOST_RELAY_FAILURE.PI_FAILED, "pi");
+	const error = await rejectsWithRelayError(runReviewHostRelaySlot(relayRequest(fixture, { piTimeoutMs: 300 })), REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT, "pi");
 	assert.equal(error.timedOut, true);
 	assert.equal(readLog(fixture.logPath).length, 1);
 	assert.equal(existsSync(fixture.submitCapturePath), false);
+});
+
+// ---------------------------------------------------------------------------
+// gentle-pi#367 — the reviewer bound is reachable from production, and a
+// reviewer killed by it says so with both measurements.
+// ---------------------------------------------------------------------------
+
+test("the reviewer bound scales with materialized prompt bytes instead of one fixed number", () => {
+	const empty: NodeJS.ProcessEnv = {};
+	// A tiny prompt still gets the model-latency floor.
+	assert.equal(resolveReviewHostRelayPiTimeoutMs(0, empty), REVIEW_HOST_RELAY_PI_TIMEOUT_FLOOR_MS);
+	assert.equal(resolveReviewHostRelayPiTimeoutMs(1, empty), REVIEW_HOST_RELAY_PI_TIMEOUT_FLOOR_MS + 1);
+	// One mebibyte of prompt buys exactly one linear allowance.
+	assert.equal(
+		resolveReviewHostRelayPiTimeoutMs(1024 * 1024, empty),
+		REVIEW_HOST_RELAY_PI_TIMEOUT_FLOOR_MS + REVIEW_HOST_RELAY_PI_TIMEOUT_PER_MEBIBYTE_MS,
+	);
+	// The reported field candidate: ~1.58 MB of prompt, whose reviewer needed
+	// 478s and was killed by the old fixed 600s bound. The derived bound must
+	// clear that measurement with real margin.
+	const reported = resolveReviewHostRelayPiTimeoutMs(1_580_000, empty);
+	assert.ok(reported > 600_000, `derived bound ${reported} must exceed the old fixed 600000ms bound`);
+	assert.ok(reported > 478_000 * 3, `derived bound ${reported} must keep real margin over the measured 478000ms reviewer run`);
+	// Never unbounded, however large the prompt gets.
+	assert.equal(resolveReviewHostRelayPiTimeoutMs(Number.MAX_SAFE_INTEGER, empty), REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS);
+});
+
+test("the reviewer bound honours the environment override and ignores malformed values", () => {
+	const bytes = 4 * 1024 * 1024;
+	assert.equal(resolveReviewHostRelayPiTimeoutMs(bytes, { [REVIEW_HOST_RELAY_PI_TIMEOUT_ENV]: "1234" }), 1234);
+	// The override is clamped by the same hard ceiling as the derived bound.
+	assert.equal(resolveReviewHostRelayPiTimeoutMs(bytes, { [REVIEW_HOST_RELAY_PI_TIMEOUT_ENV]: "999999999" }), REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS);
+	const derived = resolveReviewHostRelayPiTimeoutMs(bytes, {});
+	for (const malformed of ["", "0", "-1", "12.5", "abc", " 600000", "1e6"]) {
+		assert.equal(resolveReviewHostRelayPiTimeoutMs(bytes, { [REVIEW_HOST_RELAY_PI_TIMEOUT_ENV]: malformed }), derived, `malformed ${JSON.stringify(malformed)} must fall back to the derived bound`);
+	}
+});
+
+test("the production relay path resolves the reviewer bound from the environment, with no injected timeout", async (t) => {
+	// The regression: piTimeoutMs was reachable only through the test seam, so
+	// production always ran against the fixed 600s bound. This request injects
+	// no timeout at all — the override must reach the real spawn.
+	const fixture = harness(t, { RELAY_FAKE_PI_MODE: "hang", [REVIEW_HOST_RELAY_PI_TIMEOUT_ENV]: "300" });
+	const error = await rejectsWithRelayError(
+		runReviewHostRelaySlot(relayRequest(fixture, { piTimeoutMs: undefined })),
+		REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT,
+		"pi",
+	);
+	assert.equal(error.timeoutMs, 300);
+	assert.equal(error.timedOut, true);
+	assert.equal(readLog(fixture.logPath).length, 1, "no submission after a reviewer timeout");
+	assert.equal(existsSync(fixture.submitCapturePath), false);
+});
+
+test("a killed reviewer reports elapsed, limit, and what to change instead of an opaque transport failure", async (t) => {
+	const fixture = harness(t, { RELAY_FAKE_PI_MODE: "hang" });
+	const error = await rejectsWithRelayError(runReviewHostRelaySlot(relayRequest(fixture, { piTimeoutMs: 300 })), REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT, "pi");
+	assert.equal(error.timeoutMs, 300);
+	assert.ok(error.elapsedMs !== null && error.elapsedMs >= 250, `elapsed ${error.elapsedMs} must record the real wall time`);
+	assert.ok(error.elapsedMs! < 10_000, "the reviewer was killed at the bound, not left to finish");
+	assert.match(error.message, /exceeded the relay bound/);
+	assert.match(error.message, new RegExp(String(error.elapsedMs)));
+	assert.match(error.message, /limit for a \d+-byte materialized prompt/);
+	assert.match(error.message, new RegExp(REVIEW_HOST_RELAY_PI_TIMEOUT_ENV));
+	assert.equal(error.mutationOutcome, "none");
+});
+
+test("a crashed reviewer stays distinguishable from a killed one and still carries its measurements", async (t) => {
+	const fixture = harness(t, { RELAY_FAKE_PI_MODE: "fail" });
+	const error = await rejectsWithRelayError(runReviewHostRelaySlot(relayRequest(fixture, { piTimeoutMs: 30_000 })), REVIEW_HOST_RELAY_FAILURE.PI_FAILED, "pi");
+	assert.equal(error.timedOut, false);
+	assert.equal(error.exitCode, 4);
+	assert.equal(error.timeoutMs, 30_000);
+	assert.ok(error.elapsedMs !== null && error.elapsedMs >= 0);
 });
 
 test("submission refusal is a typed error whose outcome is unknown pending STATUS", async (t) => {
