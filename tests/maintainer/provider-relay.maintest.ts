@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import test from "node:test";
 import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
-import { ARM_POSITIVE_ENV, CASE_KINDS, DESCRIPTOR_SCHEMA, DescriptorValidationError, POSITIVE_JOURNEY_COMMAND, PROVIDER_ROLE_CAPTURE_ARTIFACT_SCHEMA, PROVIDER_ROLE_VECTOR_KINDS, ProviderRoleVectorError, ROLE_VECTOR_FAILURE, loadDescriptor, resolveDeclaredExecutable, runMatrix, validateDescriptor } from "../../scripts/maintainer/provider-relay-matrix.mjs";
+import { ARM_POSITIVE_ENV, CASE_KINDS, DEFAULT_ROLE_VECTOR_TIMEOUT_MS, DESCRIPTOR_SCHEMA, DescriptorValidationError, POSITIVE_JOURNEY_COMMAND, PROVIDER_ROLE_CAPTURE_ARTIFACT_SCHEMA, PROVIDER_ROLE_VECTOR_KINDS, ProviderRoleVectorError, ROLE_VECTOR_FAILURE, loadDescriptor, resolveDeclaredExecutable, runMatrix, runProviderRoleVector, validateDescriptor } from "../../scripts/maintainer/provider-relay-matrix.mjs";
 const BASELINE_ENV = "GENTLE_PI_MAINTAINER_BASELINE_BINARY";
 const CAPABLE_ENV = "GENTLE_PI_MAINTAINER_CAPABLE_BINARY";
 const REQUIRE_ENV = "GENTLE_PI_REQUIRE_MAINTAINER";
@@ -192,10 +192,9 @@ test("targeted-validator descriptor preserves the provider request hash / valida
 });
 
 // ---------------------------------------------------------------------------
-// Provider-role vector execution (stub-injected roleRunner) — proves the
-// matrix reaches the boundary with the exact kind, verb, argument tokens, and
-// preserved validation_request binding, exactly once, without launching a
-// model. Deterministic; always runs.
+// Provider-role execution proves the stub-injected boundary receives the exact
+// kind, verb, tokens, and validation_request once, without launching a model.
+// Deterministic; always runs.
 // ---------------------------------------------------------------------------
 test("refuter vector: runMatrix executes exactly once through review.capture-refuter with exact provider tokens and returns the typed artifact", async () => {
 	const calls: Array<{ kind: string; argumentTokens: readonly string[]; gentleAiExecutable: string; validationRequest?: unknown }> = [];
@@ -273,6 +272,21 @@ test("negative control: a role vector failure (not surface-unavailable) is repor
 	});
 	assert.equal(verdict!.verdict, "fail");
 	assert.match(verdict!.reason, /role-failed/);
+});
+test("role vector outer timeout is longer than the provider deadline and fails explicitly without a blind retry", async (t) => {
+	const preload = sandboxPath("hang-role-child.cjs");
+	writeFileSync(preload, "while (true) {}\n");
+	const previousNodeOptions = process.env.NODE_OPTIONS;
+	process.env.NODE_OPTIONS = `--require=${JSON.stringify(preload)}`;
+	t.after(() => { if (previousNodeOptions === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previousNodeOptions; });
+	assert.ok(DEFAULT_ROLE_VECTOR_TIMEOUT_MS > 600_000, "the outer watchdog must not race the provider-owned 600s deadline");
+	await assert.rejects(runProviderRoleVector({ kind: "provider-role-refuter", argumentTokens: REFUTER_TOKENS, gentleAiExecutable: process.execPath, timeoutMs: 50 }), (error) => {
+		assert.ok(error instanceof ProviderRoleVectorError);
+		assert.equal(error.kind, ROLE_VECTOR_FAILURE.ROLE_TIMED_OUT); assert.equal(error.stage, "execute");
+		assert.equal(error.timedOut, true); assert.equal(error.mutationOutcome, "unknown");
+		assert.match(error.message, /re-query negotiated STATUS.*must not relaunch/i);
+		return true;
+	});
 });
 test("stale-target fail-closed: missing or duplicate required binding tokens are rejected before runner invocation", () => {
 	const drop = (tokens: readonly string[], prefix: string) => tokens.filter((t) => !t.startsWith(prefix));

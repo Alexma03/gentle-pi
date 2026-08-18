@@ -17,13 +17,9 @@ import { REVIEW_HOST_RELAY_FAILURE, ReviewHostRelayError, classifyReviewHostRela
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "../../lib/review-relay-contract.ts";
 export const DESCRIPTOR_SCHEMA = "gentle-pi.maintainer.provider-relay-descriptor/v1";
 export const CASE_KINDS = Object.freeze(["relay-unavailable", "positive-lens", "provider-role-refuter", "provider-role-validator"]);
-// gentle-pi#311 P7 — the two organic provider-role vectors that remain. Unlike
-// the lens capture-result slots, these are SELF-CONTAINED: the provider renders
-// binding tokens plus `--agent=pi --execute=true` (no submission descriptor),
-// and executing the exact rendered invocation makes Go materialize the role
-// prompt, spawn its own locked-down pi subprocess, and admit the raw verdict.
-// The host runs one CLI invocation verbatim; it never materializes, launches
-// pi, or submits anything for these slots.
+// P7 role vectors are self-contained provider --execute invocations: Go
+// materializes, runs locked-down pi, and admits the verdict. The host executes
+// the exact rendered command and never handles role prompt or result bytes.
 export const PROVIDER_ROLE_VECTOR_KINDS = Object.freeze(["provider-role-refuter", "provider-role-validator"]);
 export const PROVIDER_ROLE_VECTOR_VERB = Object.freeze({ "provider-role-refuter": "capture-refuter", "provider-role-validator": "capture-validation" });
 export const PROVIDER_ROLE_VECTOR_ROLE = Object.freeze({ "provider-role-refuter": "refuter", "provider-role-validator": "targeted-validator" });
@@ -32,6 +28,7 @@ export const ROLE_VECTOR_FAILURE = Object.freeze({
 	ROLE_SURFACE_UNAVAILABLE: "role-surface-unavailable",
 	ROLE_LAUNCH_FAILED: "role-launch-failed",
 	ROLE_FAILED: "role-failed",
+	ROLE_TIMED_OUT: "role-timed-out",
 	EMPTY_ARTIFACT: "empty-artifact",
 	HANDSHAKE_REFUSED: "handshake-refused",
 });
@@ -41,7 +38,9 @@ const RCTX_RE = /^rctx1_[0-9a-f]{64}$/;
 // sole authority for lineage and target identity. Each must appear exactly
 // once; the matrix later compares the returned artifact against these values.
 const ROLE_BINDING_RE = Object.freeze({ "--lineage=": /^.+$/, "--expected-revision=": REQUEST_HASH_RE, "--target=": REQUEST_HASH_RE, "--repository-context=": RCTX_RE });
-const DEFAULT_ROLE_VECTOR_TIMEOUT_MS = 600_000;
+// The provider owns a 600s role deadline; this outer watchdog starts earlier and
+// must leave setup/cancellation margin without pretending to know prompt bytes.
+export const DEFAULT_ROLE_VECTOR_TIMEOUT_MS = 900_000;
 export class ProviderRoleVectorError extends Error {
 	kind;
 	stage;
@@ -60,7 +59,7 @@ export class ProviderRoleVectorError extends Error {
 		this.exitCode = details?.exitCode ?? null;
 		this.stderr = details?.stderr ?? "";
 		this.timedOut = details?.timedOut ?? false;
-		this.mutationOutcome = kind === ROLE_VECTOR_FAILURE.ROLE_FAILED ? "unknown" : "none";
+		this.mutationOutcome = kind === ROLE_VECTOR_FAILURE.ROLE_FAILED || kind === ROLE_VECTOR_FAILURE.ROLE_TIMED_OUT ? "unknown" : "none";
 	}
 }
 // The positive lens runs only when explicitly armed: the organic journey
@@ -225,12 +224,9 @@ function unlaunchablePi() {
 	chmodSync(directory, 0o700);
 	return { directory, executable: join(directory, "pi-must-never-launch") };
 }
-// Default role vector runner: spawns `gentle-ai review <verb> <tokens>` once,
-// in the foreground, with the relay handshake environment. Go materializes the
-// role prompt, spawns its own locked-down pi subprocess, and admits the raw
-// verdict; the host runs one CLI invocation verbatim and decodes the typed
-// artifact. Model/provider/profile stay user-owned: no --model/--provider is
-// added, and the pi subprocess environment is exactly the user's own.
+// Runs the exact provider role command once with the relay handshake. Go owns
+// prompt materialization, locked-down pi execution, and admission; the host only
+// decodes the typed artifact and never overrides model/provider/profile.
 export async function runProviderRoleVector(request) {
 	const verb = PROVIDER_ROLE_VECTOR_VERB[request.kind];
 	if (verb === undefined) throw new TypeError(`runProviderRoleVector received an unknown role vector kind: ${request.kind}`);
@@ -262,7 +258,10 @@ export async function runProviderRoleVector(request) {
 		throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_LAUNCH_FAILED, "launch", `gentle-ai role vector could not start: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	const stderrText = capture.stderr.toString("utf8");
-	if (capture.exitCode !== 0 || capture.timedOut) {
+	if (capture.timedOut) {
+		throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.ROLE_TIMED_OUT, "execute", "gentle-ai role vector exceeded its outer watchdog; re-query negotiated STATUS before any retry, and the same transcript must not relaunch blindly", { exitCode: capture.exitCode, stderr: stderrText, timedOut: true });
+	}
+	if (capture.exitCode !== 0) {
 		const refusal = classifyReviewHostRelayRefusal(stderrText);
 		if (refusal === "handshake") {
 			throw new ProviderRoleVectorError(ROLE_VECTOR_FAILURE.HANDSHAKE_REFUSED, "execute", stderrText, { exitCode: capture.exitCode, stderr: stderrText, timedOut: capture.timedOut });
@@ -328,7 +327,7 @@ export async function runMatrix(descriptor, options = {}) {
 					if (error.kind === ROLE_VECTOR_FAILURE.ROLE_SURFACE_UNAVAILABLE || error.kind === ROLE_VECTOR_FAILURE.HANDSHAKE_REFUSED) {
 						verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "blocked", stage: error.stage, mutationOutcome: error.mutationOutcome, reason: `the declared gentle-ai binary lacks the provider role capture surface: ${error.message}`, command: POSITIVE_JOURNEY_COMMAND });
 					} else {
-						verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "fail", reason: `role vector error kind=${error.kind} stage=${error.stage} mutationOutcome=${error.mutationOutcome}: ${error.message}`, stderr: error.stderr });
+						verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "fail", reason: `role vector error kind=${error.kind} stage=${error.stage} mutationOutcome=${error.mutationOutcome}: ${error.message}`, stderr: error.stderr, timedOut: error.timedOut });
 					}
 				} else {
 					verdicts.push({ name: caseEntry.name, kind: caseEntry.kind, verdict: "fail", reason: `unexpected non-role error: ${error instanceof Error ? error.message : String(error)}` });
