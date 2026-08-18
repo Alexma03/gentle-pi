@@ -54,6 +54,8 @@ import { canonicalJsonV1, domainHashV1 } from "../lib/review-canonical.ts";
 import { parseNativeCompactFinalizeInput, toNativeValidatorDocument } from "../lib/review-compact-contract.ts";
 import {
 	REVIEW_HOST_RELAY_FAILURE,
+	REVIEW_HOST_RELAY_PI_TIMEOUT_ENV,
+	REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS,
 	REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
 	REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
 	ReviewHostRelayError,
@@ -5514,6 +5516,35 @@ function setReviewHostRelayRunnerForTesting(runner?: ReviewHostRelayRunner): voi
 const REVIEW_HOST_RELAY_RETRY_ACTION =
 	"Re-query negotiated STATUS and relaunch only if the exact same bound slot is reoffered; never rerun from transcript inference.";
 
+// gentle-pi#367: the ordinary continuation above is wrong for exactly one
+// failure class. A reviewer killed by the relay bound is deterministic — the
+// same slot, the same prompt and the same bound reach the same wall — so
+// telling the caller to relaunch it re-spends real model tokens to buy the
+// identical failure. The honest outcome stays blocked, never fabricates a
+// capture, and names the two things that can actually change the result.
+function reviewHostRelayTimeoutNextAction(error: ReviewHostRelayError, capturedCount: number): string {
+	const admitted = capturedCount === 0
+		? "No reviewer result was admitted in this run."
+		: `${capturedCount} reviewer result${capturedCount === 1 ? " is" : "s are"} already admitted in this lineage; negotiated STATUS reoffers only the outstanding slots, so those are not re-run.`;
+	const measured = error.elapsedMs === null || error.timeoutMs === null
+		? ""
+		: ` The reviewer was killed after ${error.elapsedMs}ms against a ${error.timeoutMs}ms bound.`;
+	return `Do not relaunch this slot unchanged: the same bound kills the same reviewer run again and re-spends the model tokens for nothing.${measured} ${admitted} `
+		+ `Change one of two things first: export ${REVIEW_HOST_RELAY_PI_TIMEOUT_ENV}=<milliseconds> above the reviewer's real wall time (hard ceiling ${REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS}), or reduce the candidate scope so the materialized prompt is smaller. `
+		+ "Then re-query negotiated STATUS and relaunch only the slot it reoffers.";
+}
+
+function reviewHostRelayFailureReport(error: ReviewHostRelayError): Record<string, unknown> {
+	return {
+		kind: error.kind,
+		stage: error.stage,
+		exit_code: error.exitCode,
+		timed_out: error.timedOut,
+		...(error.elapsedMs === null ? {} : { elapsed_ms: error.elapsedMs }),
+		...(error.timeoutMs === null ? {} : { timeout_ms: error.timeoutMs }),
+	};
+}
+
 async function executeReviewHostRelayCollection(
 	operation: ReviewControllerOperation,
 	lineageId: string,
@@ -5567,10 +5598,19 @@ async function executeReviewHostRelayCollection(
 					next_action: REVIEW_HOST_RELAY_RETRY_ACTION,
 				};
 			}
+			if (error.kind === REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT) {
+				return {
+					...base,
+					outcome: "pi-host-relay-timeout",
+					failure: reviewHostRelayFailureReport(error),
+					reason: error.message,
+					next_action: reviewHostRelayTimeoutNextAction(error, captured.length),
+				};
+			}
 			return {
 				...base,
 				outcome: "pi-host-relay-transport-failure",
-				failure: { kind: error.kind, stage: error.stage, exit_code: error.exitCode, timed_out: error.timedOut },
+				failure: reviewHostRelayFailureReport(error),
 				reason: error.message,
 				next_action: REVIEW_HOST_RELAY_RETRY_ACTION,
 			};
