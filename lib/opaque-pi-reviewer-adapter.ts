@@ -45,6 +45,10 @@ export interface OpaquePiReviewerTransportDetails {
 	readonly stderr?: Buffer;
 	readonly timedOut?: boolean;
 	readonly cancelled?: boolean;
+	/** Wall time for a launched Pi process; absent when no process was launched. */
+	readonly elapsedMs?: number;
+	/** The bound applied to a launched Pi process; absent when no process was launched. */
+	readonly timeoutMs?: number;
 }
 
 export class OpaquePiReviewerTransportError extends Error {
@@ -53,6 +57,8 @@ export class OpaquePiReviewerTransportError extends Error {
 	readonly stderr: Buffer;
 	readonly timedOut: boolean;
 	readonly cancelled: boolean;
+	readonly elapsedMs: number | null;
+	readonly timeoutMs: number | null;
 
 	constructor(kind: OpaquePiReviewerTransportFailureKind, message: string, details: OpaquePiReviewerTransportDetails = {}) {
 		super(message);
@@ -62,6 +68,8 @@ export class OpaquePiReviewerTransportError extends Error {
 		this.stderr = details.stderr ?? Buffer.alloc(0);
 		this.timedOut = details.timedOut ?? false;
 		this.cancelled = details.cancelled ?? false;
+		this.elapsedMs = details.elapsedMs ?? null;
+		this.timeoutMs = details.timeoutMs ?? null;
 	}
 }
 
@@ -71,6 +79,8 @@ interface OpaquePiProcessResult {
 	readonly exitCode: number | null;
 	readonly timedOut: boolean;
 	readonly cancelled: boolean;
+	readonly elapsedMs: number;
+	readonly timeoutMs: number;
 }
 
 const DEFAULT_OPAQUE_PI_TIMEOUT_MS = 600_000;
@@ -81,6 +91,7 @@ function errorMessage(error: unknown): string {
 
 function runPiProcess(prompt: Buffer, scratchDirectory: string, options: OpaquePiReviewerOptions): Promise<OpaquePiProcessResult> {
 	return new Promise((resolve, reject) => {
+		const startedAt = Date.now();
 		const child = spawn(options.piExecutable ?? "pi", [...OPAQUE_PI_REVIEWER_ARGV], {
 			cwd: scratchDirectory,
 			env: options.environment ?? process.env,
@@ -122,7 +133,15 @@ function runPiProcess(prompt: Buffer, scratchDirectory: string, options: OpaqueP
 			if (settled) return;
 			settled = true;
 			clear();
-			resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode: code, timedOut, cancelled });
+			resolve({
+				stdout: Buffer.concat(stdout),
+				stderr: Buffer.concat(stderr),
+				exitCode: code,
+				timedOut,
+				cancelled,
+				elapsedMs: Date.now() - startedAt,
+				timeoutMs,
+			});
 		});
 		if (options.signal?.aborted) cancel();
 		else options.signal?.addEventListener("abort", cancel, { once: true });
@@ -169,32 +188,36 @@ export async function runOpaquePiReviewer(prompt: Buffer, options: OpaquePiRevie
 				`Pi process could not start: ${errorMessage(error)}`,
 			);
 		}
+		const timing = {
+			elapsedMs: processResult.elapsedMs,
+			timeoutMs: processResult.timeoutMs,
+		};
 		if (processResult.timedOut) {
 			throw new OpaquePiReviewerTransportError(
 				OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.TIMED_OUT,
 				"Pi process timed out",
-				{ exitCode: processResult.exitCode, stderr: processResult.stderr, timedOut: true },
+				{ exitCode: processResult.exitCode, stderr: processResult.stderr, timedOut: true, ...timing },
 			);
 		}
 		if (processResult.cancelled) {
 			throw new OpaquePiReviewerTransportError(
 				OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.CANCELLED,
 				"Pi process was cancelled",
-				{ exitCode: processResult.exitCode, stderr: processResult.stderr, cancelled: true },
+				{ exitCode: processResult.exitCode, stderr: processResult.stderr, cancelled: true, ...timing },
 			);
 		}
 		if (processResult.exitCode !== 0) {
 			throw new OpaquePiReviewerTransportError(
 				OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.NONZERO_EXIT,
 				"Pi process failed",
-				{ exitCode: processResult.exitCode, stderr: processResult.stderr },
+				{ exitCode: processResult.exitCode, stderr: processResult.stderr, ...timing },
 			);
 		}
 		if (processResult.stdout.length === 0) {
 			throw new OpaquePiReviewerTransportError(
 				OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.EMPTY_OUTPUT,
 				"Pi process produced no output bytes",
-				{ exitCode: 0, stderr: processResult.stderr },
+				{ exitCode: 0, stderr: processResult.stderr, ...timing },
 			);
 		}
 		return {

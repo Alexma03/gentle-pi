@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { __testing } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
-import { REVIEW_HOST_RELAY_FAILURE, REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE, REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE, ReviewHostRelayError, type ReviewHostRelayRequest } from "../lib/review-host-relay.ts";
+import { REVIEW_HOST_RELAY_FAILURE, REVIEW_HOST_RELAY_PI_TIMEOUT_ENV, REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS, REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE, REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE, ReviewHostRelayError, type ReviewHostRelayRequest } from "../lib/review-host-relay.ts";
 import type { ReviewCaptureSubmissionV1, ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 
 // Wiring contract (gentle-pi#311 P4): the compact controller FINALIZE lane
@@ -265,6 +265,78 @@ test("a transport failure mid-collection stops immediately and directs STATUS re
 	assert.match(String(result.next_action), /exact same bound slot/);
 	assert.equal(harness.finalizeCalls, 0);
 	assert.equal(harness.statusCalls.length, 1, "no automatic relaunch after transport failure");
+});
+
+// gentle-pi#367: a reviewer killed by the relay bound is deterministic, so the
+// generic "relaunch the same slot" continuation would re-spend model tokens to
+// buy the identical failure. It gets its own outcome, its own measurements, and
+// a continuation that names what must change — while staying blocked.
+test("a relay timeout reports elapsed and limit and refuses to encourage an unchanged relaunch", async (t) => {
+	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
+	const cwd = repository(t);
+	const lineageId = "relay-lineage";
+	const inputs = [
+		relayCollectInput(lineageId, "review-risk", 0),
+		relayCollectInput(lineageId, "review-reliability", 1),
+	];
+	const harness = nativeHarness([finalizeStatus(lineageId, inputs)]);
+	let calls = 0;
+	__testing.setReviewHostRelayRunnerForTesting(async () => {
+		calls += 1;
+		if (calls === 1) return { promptByteLength: 8, resultByteLength: 8, submission: '{"admission_decision":"completed"}' };
+		throw new ReviewHostRelayError(
+			REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT,
+			"pi",
+			"pi reviewer subprocess exceeded the relay bound",
+			{ exitCode: null, timedOut: true, elapsedMs: 2_256_004, timeoutMs: 2_256_000 },
+		);
+	});
+
+	const result = await runFinalize(cwd, harness, lineageId);
+
+	assert.equal(result.status, "blocked", "a timeout is never reported as a completed capture");
+	assert.equal(result.outcome, "pi-host-relay-timeout");
+	assert.deepEqual(result.failure, {
+		kind: "pi-timed-out",
+		stage: "pi",
+		exit_code: null,
+		timed_out: true,
+		elapsed_ms: 2_256_004,
+		timeout_ms: 2_256_000,
+	});
+	// The lens that did complete stays admitted; only the outstanding one is
+	// outstanding.
+	assert.equal((result.captured_slots as unknown[]).length, 1);
+	assert.equal(result.mutation_performed, true);
+	assert.equal(result.mutation_outcome, "committed");
+
+	const nextAction = String(result.next_action);
+	assert.match(nextAction, /Do not relaunch this slot unchanged/);
+	assert.match(nextAction, /2256004ms against a 2256000ms bound/);
+	assert.match(nextAction, new RegExp(`${REVIEW_HOST_RELAY_PI_TIMEOUT_ENV}=<milliseconds>`));
+	assert.match(nextAction, new RegExp(String(REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS)));
+	assert.match(nextAction, /reduce the candidate scope/);
+	assert.equal(/relaunch only if the exact same bound slot is reoffered/.test(nextAction), false,
+		"the unconditional retry continuation must not be offered for a deterministic timeout");
+
+	assert.equal(harness.finalizeCalls, 0);
+	assert.equal(harness.statusCalls.length, 1, "no automatic relaunch after a relay timeout");
+});
+
+test("a non-timeout transport failure keeps its generic continuation and now carries its measurements", async (t) => {
+	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
+	const cwd = repository(t);
+	const lineageId = "relay-lineage";
+	const harness = nativeHarness([finalizeStatus(lineageId, [relayCollectInput(lineageId, "review-reliability", 0)])]);
+	__testing.setReviewHostRelayRunnerForTesting(async () => {
+		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.PI_FAILED, "pi", "pi subprocess failed", { exitCode: 4, elapsedMs: 1_200, timeoutMs: 900_000 });
+	});
+
+	const result = await runFinalize(cwd, harness, lineageId);
+
+	assert.equal(result.outcome, "pi-host-relay-transport-failure");
+	assert.deepEqual(result.failure, { kind: "pi-failed", stage: "pi", exit_code: 4, timed_out: false, elapsed_ms: 1_200, timeout_ms: 900_000 });
+	assert.match(String(result.next_action), /Re-query negotiated STATUS/);
 });
 
 test("materialize tokens without a provider submission fail closed as a typed contract mismatch", async (t) => {
