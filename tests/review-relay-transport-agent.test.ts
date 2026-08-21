@@ -158,14 +158,14 @@ function transportAwareNative(options: { refusalCode?: string } = {}): {
 async function runFinalize(cwd: string, native: NativeReviewCli, lineageId: string, input: Record<string, unknown> = { reviewer_run_acknowledged: true }): Promise<Record<string, unknown>> {
 	return await __testing.executeReviewControllerOperation(
 		{ operation: "finalize", lineageId, input: JSON.stringify(input) },
-		cwd, new Map(), native, undefined, undefined, undefined, new CandidateViewRegistry(),
+		cwd, native, undefined, new CandidateViewRegistry(),
 	) as Record<string, unknown>;
 }
 
 async function runStatus(cwd: string, native: NativeReviewCli, lineageId: string): Promise<Record<string, unknown>> {
 	return await __testing.executeReviewControllerOperation(
 		{ operation: "status", lineageId },
-		cwd, new Map(), native, undefined, undefined, undefined, new CandidateViewRegistry(),
+		cwd, native, undefined, new CandidateViewRegistry(),
 	) as Record<string, unknown>;
 }
 

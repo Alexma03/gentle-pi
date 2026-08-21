@@ -20,7 +20,7 @@ import { decodeReviewNextTransitionV3, type ReviewCaptureSubmissionV1, type Revi
 
 // ---------------------------------------------------------------------------
 // Fake binaries. Following the repo's fake-executable idiom (shell/git
-// wrappers in review-gate/git-commit-transaction tests), these are
+// wrappers in related review tests), these are
 // shebang scripts written into a scratch directory; node scripts are used so
 // binary-unsafe bytes survive verbatim.
 // ---------------------------------------------------------------------------

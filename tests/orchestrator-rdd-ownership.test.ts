@@ -69,7 +69,8 @@ test("review integration documents the opaque Pi adapter and Go-owned authority 
 		"Buffer → Buffer/error",
 		"exact Go-issued materialize/submission tokens",
 		"typed Pi transport refusal fails closed",
-		"Go owns worktree, lineage, candidate freeze, lens selection, correction, validator, approval burn, and gate semantics",
+		"Go owns worktree, lineage, candidate freeze, lens selection, correction, validator, approval burn, and review semantics",
+		"Delivery commands remain ordinary repository-policy operations.",
 		"package has no durable receipt or policy authority",
 		"static assets intentionally omit lifecycle instructions",
 	]) {

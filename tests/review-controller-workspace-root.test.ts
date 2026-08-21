@@ -106,6 +106,7 @@ function targetStatusFixture(options: {
 	baseTree?: string;
 	currentCandidateTree?: string;
 	paths?: readonly string[];
+	intendedUntracked?: readonly string[];
 } = {}): ReviewStatusV3 {
 	const applicability = options.applicability ?? "current_target";
 	const action = options.action ?? (applicability === "current_target" ? "finalize" : "start");
@@ -115,6 +116,7 @@ function targetStatusFixture(options: {
 	const tree = options.currentCandidateTree ?? "b".repeat(40);
 	const baseTree = options.baseTree ?? tree;
 	const paths = options.paths ?? ["app.ts"];
+	const intendedUntracked = options.intendedUntracked ?? [];
 	const projection = {
 		schema: "gentle-ai.review-integration.projection/v1" as const,
 		kind: "current-changes" as const,
@@ -124,7 +126,7 @@ function targetStatusFixture(options: {
 		currentCandidateTree: tree,
 		pathsDigest: sha,
 		paths,
-		intendedUntracked: [],
+		intendedUntracked,
 		intendedUntrackedProof: sha,
 		initialSnapshotIdentity: sha,
 		currentSnapshotIdentity: sha,
@@ -158,7 +160,7 @@ function targetStatusFixture(options: {
 			current_candidate_tree: tree,
 			paths_digest: sha,
 			paths,
-			intended_untracked: [],
+			intended_untracked: intendedUntracked,
 			intended_untracked_proof: sha,
 			initial_snapshot_identity: sha,
 			current_snapshot_identity: sha,
@@ -191,6 +193,7 @@ function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReview
 		candidate = new CandidateViewRegistry().create({
 			contributorRoot: request.cwd,
 			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef, committedOnly: true }),
+			...(request.intendedUntracked === undefined ? {} : { intendedUntracked: request.intendedUntracked }),
 		});
 		return targetStatusFixture({
 			applicability: "unrelated",
@@ -198,6 +201,7 @@ function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReview
 			baseTree: candidate.baseTree,
 			currentCandidateTree: candidate.candidateTree,
 			paths: candidate.paths,
+			intendedUntracked: request.intendedUntracked,
 		});
 	} finally {
 		candidate?.cleanup();
@@ -219,19 +223,37 @@ function candidateFinalizeTargetStatus(request: Parameters<NonNullable<NativeRev
 	}
 }
 
-test("same-session registrations retain untracked selection for validation-only FINALIZE", async (t) => {
+test("same-session registrations retain START selection for validation-only FINALIZE", async (t) => {
 	const cwd = repository(t);
-	const target = targetStatusFixture({ lineageId: "retained-untracked", authorityState: "correction_required" });
+	writeFileSync(join(cwd, "selected.ts"), "export const selected = true;\n");
+	const selection = { untrackedScope: "select" as const, expectedUntrackedInventory: `sha256:${"e".repeat(64)}`, intendedUntracked: ["selected.ts"] };
+	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd, intendedUntracked: selection.intendedUntracked });
+	const target = targetStatusFixture({
+		lineageId: "retained-untracked",
+		authorityState: "correction_required",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+		intendedUntracked: selection.intendedUntracked,
+	});
+	frozen.cleanup();
 	const request = { schema: "gentle-ai.review-targeted-validation-request/v1" as const, requestHash: `sha256:${"9".repeat(64)}`, lineageId: target.authority!.lineageId, expectedRevision: target.authority!.revision, targetIdentity: target.targetIdentity, fixFindingIds: [], projection: "workspace" as const, correctionCandidateTree: target.projection.currentCandidateTree, correctionTargetIdentity: target.targetIdentity, correctionPaths: target.projection.paths, correctionPathsDigest: target.projection.pathsDigest };
 	target.validationRequest = request;
 	target.nextTransition = { kind: "collect", reasonCode: "targeted_validation_required", collect: { inputs: [{ name: "targeted_validation", schema: request.schema, captureOperation: "external.run_targeted_validation", arguments: [], validationRequest: request }] } };
-	const selection = { untrackedScope: "select" as const, expectedUntrackedInventory: `sha256:${"e".repeat(64)}`, intendedUntracked: ["selected.ts"] };
 	const calls: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
-	const targetStatus: NonNullable<NativeReviewCli["targetStatus"]> = async (status) => { calls.push(status); if (status.untrackedScope !== "select") target.nextTransition!.collect!.inputs = []; return target; };
-	const ctx = { ...context(cwd), sessionManager: { getSessionId: () => "cross-registration-untracked-selection" } } as ExtensionContext;
-	const { controller: status } = runtime(fakeNative({ targetStatus }));
+	const targetStatus: NonNullable<NativeReviewCli["targetStatus"]> = async (status) => {
+		calls.push(status);
+		return status.lineageId === undefined ? candidateStartTargetStatus(status) : target;
+	};
+	const sessionId = "cross-registration-untracked-selection";
+	const ctx = { ...context(cwd), sessionManager: { getSessionId: () => sessionId } } as ExtensionContext;
+	const { controller: start } = runtime(fakeNative({
+		targetStatus,
+		start: async () => ({ lineageId: "retained-untracked", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true }),
+	}));
 	const { controller: finalize } = runtime(fakeNative({ targetStatus }));
-	await status.execute("retained-status", { operation: "status", lineageId: "retained-untracked", input: JSON.stringify(selection) }, undefined, undefined, ctx);
+	const started = await start.execute("retained-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", ...selection }) }, undefined, undefined, ctx);
+	assert.equal((started.details as { result: { lineage_id: string } }).result.lineage_id, "retained-untracked");
 	const completed = await finalize.execute("retained-finalize", { operation: "finalize", lineageId: "retained-untracked", input: JSON.stringify({ validation: { request_hash: request.requestHash.slice(7), correction_ids: [], original_criteria: { passed: true, evidence: ["acceptance passes"] }, correction_regression: { passed: true, evidence: ["regression passes"] }, fix_caused_findings: [], follow_ups: [] } }) }, undefined, undefined, ctx);
 	assert.doesNotMatch(JSON.stringify(completed.details), /evidence-first-ordering/);
 	assert.ok(calls.length > 1 && calls.every(({ untrackedScope, expectedUntrackedInventory, intendedUntracked }) => untrackedScope === selection.untrackedScope && expectedUntrackedInventory === selection.expectedUntrackedInventory && JSON.stringify(intendedUntracked) === JSON.stringify(selection.intendedUntracked)));

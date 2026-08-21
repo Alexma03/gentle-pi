@@ -1,15 +1,21 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import test from "node:test";
 import {
 	GENTLE_AI_BINARY_MISSING_CODE,
+	GENTLE_AI_DEV_BINARY_ENV,
 	GENTLE_AI_VERSION,
+	gentleAiDevBinaryRegistrationPath,
 	PackageLocalGentleAiBinaryMissingError,
+	registerGentleAiDevBinary,
 	resolveGentleAiBinary,
+	setGentleAiDevBinaryEnvironmentForTesting,
+	unregisterGentleAiDevBinary,
+	type GentleAiDevBinaryEnvironment,
 } from "../lib/gentle-ai-binary.ts";
 import { NativeReviewCliV213, createNativeReviewCli, type ExecFileAdapter } from "../lib/native-review-cli.ts";
 import { GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM, resolveGentleAiReleaseAsset } from "../scripts/gentle-ai-installer.mjs";
@@ -28,6 +34,46 @@ const nativeBinaryGate = requireNativeBinary({
 });
 if (!nativeBinaryGate.run) console.log(`gentle-ai-binary: ${nativeBinaryGate.reason}`);
 const verifiedBinaryTest = nativeBinaryGate.run && process.platform !== "win32" ? test : test.skip;
+
+interface PinnedBinaryIsolation {
+	environment: GentleAiDevBinaryEnvironment;
+	savedEnvironmentValue: string | undefined;
+	savedRegistration: string | undefined;
+}
+
+let pinnedBinaryIsolation: PinnedBinaryIsolation | undefined;
+
+test.beforeEach((t) => {
+	const home = mkdtempSync(join(tmpdir(), "gentle-pi-pinned-binary-home-"));
+	const environment: GentleAiDevBinaryEnvironment = { env: { ...process.env }, home };
+	const savedEnvironmentValue = environment.env[GENTLE_AI_DEV_BINARY_ENV];
+	const registrationPath = gentleAiDevBinaryRegistrationPath(environment);
+	const savedRegistration = existsSync(registrationPath)
+		? readFileSync(registrationPath, "utf8")
+		: undefined;
+
+	delete environment.env[GENTLE_AI_DEV_BINARY_ENV];
+	unregisterGentleAiDevBinary(environment);
+	setGentleAiDevBinaryEnvironmentForTesting(environment);
+	pinnedBinaryIsolation = { environment, savedEnvironmentValue, savedRegistration };
+
+	t.after(() => {
+		if (savedEnvironmentValue === undefined) {
+			delete environment.env[GENTLE_AI_DEV_BINARY_ENV];
+		} else {
+			environment.env[GENTLE_AI_DEV_BINARY_ENV] = savedEnvironmentValue;
+		}
+		if (savedRegistration === undefined) {
+			unregisterGentleAiDevBinary(environment);
+		} else {
+			mkdirSync(join(home, ".pi", "gentle-ai"), { recursive: true });
+			writeFileSync(registrationPath, savedRegistration);
+		}
+		setGentleAiDevBinaryEnvironmentForTesting(undefined);
+		pinnedBinaryIsolation = undefined;
+		rmSync(home, { recursive: true, force: true });
+	});
+});
 
 async function writeVerifiedBinary(packageRoot: string, platform = process.platform): Promise<string> {
 	const asset = resolveGentleAiReleaseAsset(platform, process.arch);
@@ -64,13 +110,34 @@ async function writeWindowsSourceBinary(packageRoot: string): Promise<{ binaryPa
 	return { binaryPath, manifestPath };
 }
 
-verifiedBinaryTest("runtime resolves an absolute package-local binary path without PATH fallback", async () => {
+verifiedBinaryTest("runtime resolves an absolute package-local binary path without PATH fallback or ambient dev contamination", async () => {
 	const packageRoot = await mkdtemp(join(tmpdir(), "gentle-pi-binary-"));
 	const executable = process.platform === "win32" ? "gentle-ai.exe" : "gentle-ai";
 	const binaryPath = await writeVerifiedBinary(packageRoot);
+	const devBinary = join(packageRoot, "maintainer-dev-binary");
+	await writeFile(devBinary, "maintainer dev binary");
+	if (process.platform !== "win32") await chmod(devBinary, 0o700);
+	const isolation = pinnedBinaryIsolation;
+	assert.ok(isolation, "the pinned-binary fixture must install its isolated environment");
+
+	const ambientValue = process.env[GENTLE_AI_DEV_BINARY_ENV];
+	process.env[GENTLE_AI_DEV_BINARY_ENV] = devBinary;
+	try {
+		assert.equal(resolveGentleAiBinary(packageRoot, process.platform), binaryPath, "a maintainer's ambient override must not contaminate a pinned-package case");
+	} finally {
+		if (ambientValue === undefined) delete process.env[GENTLE_AI_DEV_BINARY_ENV];
+		else process.env[GENTLE_AI_DEV_BINARY_ENV] = ambientValue;
+	}
+
+	isolation.environment.env[GENTLE_AI_DEV_BINARY_ENV] = devBinary;
+	assert.equal(resolveGentleAiBinary(packageRoot, process.platform), devBinary, "an explicit dev-binary test may opt in through the isolated environment seam");
+	delete isolation.environment.env[GENTLE_AI_DEV_BINARY_ENV];
+	registerGentleAiDevBinary(devBinary, isolation.environment);
+	assert.equal(resolveGentleAiBinary(packageRoot, process.platform), devBinary, "an explicit persistent dev registration may opt in through the isolated environment seam");
+	assert.equal(unregisterGentleAiDevBinary(isolation.environment), true);
 
 	const resolved = resolveGentleAiBinary(packageRoot, process.platform);
-	assert.equal(resolved, binaryPath);
+	assert.equal(resolved, binaryPath, "clearing the explicit registration restores the pinned resolver");
 	assert.equal(isAbsolute(resolved), true);
 	assert.equal(basename(resolved), executable);
 	assert.doesNotMatch(resolved, /(^|[/\\])PATH($|[/\\])/i);

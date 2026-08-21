@@ -10,7 +10,7 @@ Gentle Pi is a transport consumer, not a review authority. Gentle AI generates t
 | --- | --- |
 | Pi reviewer adapter | A pure opaque adapter: `Buffer → Buffer/error`. It accepts a Go-materialized prompt as bytes, invokes Pi, and returns raw final bytes or a typed transport error. |
 | Host coordinator | Executes the exact Go-issued materialize/submission tokens, launches the adapter, and submits its untouched result only through the supplied token. |
-| Gentle AI (Go) | Go owns worktree, lineage, candidate freeze, lens selection, correction, validator, approval burn, and gate semantics. |
+| Gentle AI (Go) | Go owns worktree, lineage, candidate freeze, lens selection, correction, validator, approval burn, and review semantics. Delivery commands remain ordinary repository-policy operations. |
 
 The adapter does not parse bindings, select work, rebuild prompts, inspect repository state, retry, classify results, or create authority. The coordinator does not infer a command or replace a provider-issued token. The package has no durable receipt or policy authority.
 
@@ -25,7 +25,7 @@ A typed Pi transport refusal fails closed. The coordinator reports the refusal w
 
 ## Dynamic contract delivery
 
-Package static assets intentionally omit lifecycle instructions, candidate routing, recovery procedures, receipt semantics, and delivery gates. Gentle AI injects the current runtime-specific contract through generated Pi APPEND_SYSTEM composition. The host follows only that generated contract. When it is absent or the runtime is unsupported, Gentle Pi does not invent a fallback.
+Package static assets intentionally omit lifecycle instructions, candidate routing, recovery procedures, receipt semantics, and any delivery-gate or delivery-authorization behavior. Gentle AI injects the current runtime-specific review contract through generated Pi APPEND_SYSTEM composition. The host follows only that generated review contract. When it is absent or the runtime is unsupported, Gentle Pi does not invent a fallback; delivery remains ordinary repository policy.
 
 ## Integration constraints
 
@@ -33,13 +33,13 @@ Package static assets intentionally omit lifecycle instructions, candidate routi
 - Preserve Go-issued materialize and submission tokens exactly; they are the only authority-bearing inputs the host may execute.
 - Treat a transport failure as unavailable evidence, never as an approval, completion, or permission to substitute a local workflow.
 - Keep command safety and user interaction in the host, without interpreting provider authority state.
-- Keep durable review state, admissions, correction accounting, approvals, and delivery decisions in Gentle AI.
+- Keep durable review state, admissions, correction accounting, and approvals in Gentle AI. Keep delivery decisions in ordinary repository policy.
 
 ## Review checklist
 
 - [ ] The adapter surface is still `Buffer → Buffer/error`.
 - [ ] The coordinator executes only exact Go-issued materialize/submission tokens.
 - [ ] Typed transport refusal remains fail-closed.
-- [ ] No package code or static prompt owns a receipt, policy, gate, recovery, or lifecycle state machine.
+- [ ] No package code or static prompt uses review authority to decide, authorize, rewrite, or block delivery commands.
 
 ← [Back to README](../README.md)

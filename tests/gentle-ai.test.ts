@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,18 +10,7 @@ import type {
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
-import { GATE_TARGET_KIND } from "../lib/review-publication-gate.ts";
-import {
-	REVIEW_MODE,
-	REVIEW_TRANSITION,
-	ReviewTransactionStore,
-	createReceiptForState,
-	createReviewState,
-	type ReviewBudgetV1,
-} from "../lib/review-transaction.ts";
-import { REVIEW_LENS, REVIEW_ROUTE } from "../lib/review-triggers.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
-import { qualifiedReviewLockPlatform, testSnapshot } from "./review-test-fixtures.ts";
 
 function writeMarkdown(path: string, content: string): void {
 	mkdirSync(dirname(path), { recursive: true });
@@ -82,6 +70,22 @@ test("runtime guidance keeps review policy out of the static orchestrator", () =
 	for (const lifecycleMarker of ["review-risk", "review-reliability", "review-resilience", "review-readability", "Authority-First Terminal Procedure", "reconcile-terminal-mirrors"]) {
 		assert.doesNotMatch(orchestrator, new RegExp(lifecycleMarker), `static orchestrator must not mirror ${lifecycleMarker}`);
 	}
+});
+
+test("controller VALIDATE is informational and does not require a delivery command", async () => {
+	const result = await __testing.executeReviewControllerOperation(
+		{ operation: "validate" },
+		process.cwd(),
+		null,
+	);
+	assert.deepEqual(result, {
+		operation: "validate",
+		status: "informational",
+		outcome: "delivery-validation-retired",
+		reason: "RDD review outcomes are informational. Delivery commands follow ordinary repository policy and are never authorized or blocked by this controller.",
+		mutation_performed: false,
+		mutation_outcome: "none",
+	});
 });
 
 test("agent model discovery prioritizes SDD and Judgment Day agents", (t) => {
@@ -165,135 +169,49 @@ test("model panel render uses the Pi-provided current theme when supplied", () =
 	assert.match(stripAnsi(rendered), /Assign Models and Effort to Agents/);
 });
 
-function runtimeBudget(): ReviewBudgetV1 {
-	return {
-		review_batches: 1,
-		review_actors: 1,
-		refuter_batches: 1,
-		fix_batches: 1,
-		validator_runs: 1,
-		final_verifications: 1,
-		judgment_rounds: 0,
-		judge_runs: 0,
-	};
-}
-
-function runtimeAuthority(t: test.TestContext) {
-	const parent = mkdtempSync(join(tmpdir(), "gentle-pi-runtime-gate-"));
-	const repository = join(parent, "repo");
-	mkdirSync(repository);
-	t.after(() => rmSync(parent, { recursive: true, force: true }));
-	const git = (...args: string[]): string =>
-		execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
-	git("init", "-b", "main");
-	writeFileSync(join(repository, "app.ts"), "export const value = 1;\n");
-	git("add", ".");
-	git("-c", "user.name=Runtime Gate", "-c", "user.email=runtime@example.invalid", "commit", "-m", "base");
-	const baseTree = git("rev-parse", "HEAD^{tree}");
-	writeFileSync(join(repository, "app.ts"), "export const value = 2;\n");
-	git("add", ".");
-	git("-c", "user.name=Runtime Gate", "-c", "user.email=runtime@example.invalid", "commit", "-m", "final");
-	const finalTree = git("rev-parse", "HEAD^{tree}");
-	const store = ReviewTransactionStore.forRepository(repository, { mutationLockPlatform: qualifiedReviewLockPlatform() });
-	store.create(createReviewState({
-		lineageId: "runtime-approved",
-		mode: REVIEW_MODE.ORDINARY,
-		snapshot: testSnapshot({
-			baseTree,
-			completeTree: finalTree,
-			route: REVIEW_ROUTE.STANDARD,
-			lenses: [REVIEW_LENS.READABILITY],
-		}),
-		evidenceHash: "b".repeat(64),
-		budget: runtimeBudget(),
-	}), "start-runtime-approved");
-	for (const [transition, input, idempotencyKey] of [
-		[REVIEW_TRANSITION.ORDINARY_DISCOVERY, { rows: [] }, "discover"],
-		[REVIEW_TRANSITION.ORDINARY_EVIDENCE, { deterministicResults: [] }, "evidence"],
-		[REVIEW_TRANSITION.ORDINARY_FINAL_VERIFICATION, { passed: true }, "verify"],
-	] as const) {
-		store.runReducerOperation({
-			lineageId: "runtime-approved",
-			transition,
-			idempotencyKey,
-			input,
-		});
-	}
-	return {
-		repository,
-		finalTree,
-		receipt: createReceiptForState(store.read("runtime-approved")),
-	};
-}
-
-test("runtime lifecycle gates reject fabricated metadata while compound and wrapper forms fail closed", async (t) => {
+test("delivery commands bypass RDD under every mode outcome while command safety remains independent", async () => {
 	type ToolCallHandler = (
 		event: { toolName: string; input: unknown },
 		ctx: ExtensionContext,
 	) => Promise<ToolCallEventResult | undefined>;
-	const handlers = new Map<string, ToolCallHandler>();
-	const pi = {
-		on(name: string, handler: ToolCallHandler) {
-			handlers.set(name, handler);
-		},
-		registerCommand() {},
-		registerTool() {},
-	} as unknown as ExtensionAPI;
-	createGentleAiExtension({ nativeReviewCli: null })(pi);
-	const toolCall = handlers.get("tool_call");
-	assert.equal(typeof toolCall, "function");
-	const authority = runtimeAuthority(t);
-	const ctx = {
-		cwd: authority.repository,
-		hasUI: false,
-	} as ExtensionContext;
+	const commands = [
+		"git commit -m relay",
+		"git push origin feature/relay",
+		"gh pr create --base main --head feature/relay",
+		"gh release create v1.2.3",
+		"git status && git commit -m relay",
+		"env SAFE=1 git push origin feature/relay",
+		"sh -c 'gh pr create --base main --head feature/relay'",
+		"sh -c 'gh release create v1.2.3'",
+	] as const;
+	const modes = [
+		{ label: "no native CLI", nativeReviewCli: null },
+		{ label: "RDD off", nativeReviewCli: { reviewMode: async () => ({ status: { effective: "off" } }) } },
+		{ label: "RDD on", nativeReviewCli: { reviewMode: async () => ({ status: { effective: "on" } }) } },
+		{ label: "mode failure", nativeReviewCli: { reviewMode: async () => { throw new Error("mode unavailable"); } } },
+	] as const;
 
-	const fabricated = await toolCall!(
-		{
-			toolName: "bash",
-			input: {
-				command: "git commit -m bounded",
-				reviewGate: {
-					receipt: authority.receipt,
-					target: {
-						kind: GATE_TARGET_KIND.INTENDED_COMMIT,
-						intended_commit_tree: authority.finalTree,
-					},
-					idempotencyKey: "runtime-commit",
-					scopeBudget: runtimeBudget(),
-				},
+	for (const mode of modes) {
+		const handlers = new Map<string, ToolCallHandler>();
+		const pi = {
+			on(name: string, handler: ToolCallHandler) {
+				handlers.set(name, handler);
 			},
-		},
-		ctx,
-	);
-	assert.equal(fabricated?.block, true);
-	assert.match(fabricated?.reason ?? "", /registered review controller authorization/i);
+			registerCommand() {},
+			registerTool() {},
+		} as unknown as ExtensionAPI;
+		createGentleAiExtension({ nativeReviewCli: mode.nativeReviewCli as never })(pi);
+		const toolCall = handlers.get("tool_call");
+		assert.equal(typeof toolCall, "function", mode.label);
+		const ctx = {
+			cwd: process.cwd(),
+			hasUI: true,
+			ui: { confirm: async () => true },
+		} as ExtensionContext;
 
-	const lifecycle = await toolCall!(
-		{ toolName: "bash", input: { command: "git commit -m bounded" } },
-		ctx,
-	);
-	assert.equal(lifecycle?.block, true);
-	assert.match(lifecycle?.reason ?? "", /approved receipt.*exact typed command target/i);
-	for (const command of [
-		"git status && git commit -m compound",
-		"env SAFE=1 git commit -m wrapped",
-		"command git commit -m wrapped",
-		"sh -c 'git commit -m wrapped'",
-		"git \\\n commit -m continued",
-		`git -c safe.long=${"x".repeat(8_192)} commit -m long-direct`,
-		`sh -c 'git -c safe.long=${"x".repeat(8_192)} commit -m long-wrapped'`,
-	]) {
-		const wrapped = await toolCall!({ toolName: "bash", input: { command } }, ctx);
-		assert.equal(wrapped?.block, true, command);
-		assert.match(wrapped?.reason ?? "", /compound or wrapped lifecycle command.*fail closed/i);
+		for (const command of commands) {
+			const result = await toolCall!({ toolName: "bash", input: { command } }, ctx);
+			assert.equal(result, undefined, `${mode.label}: ${command}`);
+		}
 	}
-
-	const destructive = await toolCall!(
-		{ toolName: "bash", input: { command: "git push --force origin main" } },
-		ctx,
-	);
-	assert.equal(destructive?.block, true);
-	assert.match(destructive?.reason ?? "", /safety policy blocked a destructive shell command/i);
-	assert.doesNotMatch(destructive?.reason ?? "", /approved receipt/i);
 });

@@ -85,7 +85,7 @@ const FIX_PATTERNS = [
 	/Do not add findings, alter frozen claims, authorize transitions, deliver, publish, or start another actor\./,
 ] as const;
 
-test("canonical contract defines compact risk, causal admission, correction, CAS, compatibility, and gates", () => {
+test("canonical contract defines compact risk, causal admission, correction, CAS, compatibility, and the delivery boundary", () => {
 	const content = read(CANONICAL);
 	assertMatches(CANONICAL, content, [
 		/start -> finalize -> validate/,
@@ -101,29 +101,25 @@ test("canonical contract defines compact risk, causal admission, correction, CAS
 		/original budget/i,
 		/frozen findings and genesis scope/i,
 		/content-derived revisions, compare-and-swap replacement, exact retry idempotency/i,
-		/graph-v1 ordinary lineages remain readable and gate-validatable but reject new mutation/i,
+		/graph-v1 ordinary lineages remain readable for compatibility but reject new mutation/i,
 		/Legacy graph bundle export\/import is retired/i,
 		/Judgment Day remains mutable on graph-v1/i,
-		/reloads authority and re-derives target\/publication evidence before allow/i,
-		/one one-shot authorization for the exact subsequent command/i,
-		/Native validation uses `gentle-ai\.review-integration\/v2`/i,
-		/durable hook\/native-validation transaction/i,
-		/Pi-owned `review-publication-gate` module isolates command projection and publication revalidation/i,
+		/--agent=pi --materialize=true/,
+		/provider-owned submission form/i,
+		/self-contained authority-advancing vectors/i,
+		/Commit, push, pull-request creation, and release creation are not RDD gates/i,
+		/Review outcomes and receipt state are informational and never authorize, consume, rewrite, or block a Bash delivery command/i,
+		/Pi does not inspect RDD mode or native authority for those commands/i,
+		/Review transactions, validation, and SDD never perform delivery commands themselves/i,
 		/local orchestrator and same-user process are trusted/i,
 		/reviewer and validator outputs remain semantically untrusted/i,
 		/do not report.*trusted local orchestrator.*security finding/i,
 		/untrusted repository content.*malformed inputs.*stale authority.*path drift.*external callers/i,
 		...JUDGMENT_DAY_PATTERNS,
 	]);
-	assert.match(read(README), /Trust boundary:[\s\S]*separately privileged signer\/service/);
-	assert.doesNotMatch(read(README), /Known limitation:[\s\S]*runtime-owned child-agent identity\/attestation/);
-	assert.match(read(README), /split fetch\/push[\s\S]*unsupported[\s\S]*upstream[\s\S]*base-ref/i);
-	assert.match(read(README), /Residual gap \(separate follow-up\): native first-push authorization remains unsupported until Pi has a persisted explicit advertised-base source\./);
-	const lifecycleSpec = read("openspec/specs/review-transaction/spec.md");
-	assert.match(lifecycleSpec, /split fetch\/push[\s\S]*upstream contract limitation/i);
-	assert.match(lifecycleSpec, /allow response MUST return the exact requested gate/i);
-	assert.match(lifecycleSpec, /non-authorizing denial MAY return an empty gate[\s\S]*pre_pr_boundary/i);
-	assert.match(lifecycleSpec, /one aggregate bash-time deadline/i);
+	assert.match(read(README), /Review outcomes and receipt state are informational; commit, push, pull-request, and release delivery follow ordinary repository policy\./);
+	assert.doesNotMatch(read(README), /one one-shot authorization for the exact command/i);
+	assert.doesNotMatch(read(README), /review-publication-gate/i);
 });
 
 for (const path of REVIEW_LENSES) {

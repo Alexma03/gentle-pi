@@ -124,7 +124,7 @@ function statusNative(status: ReviewStatusV3): NativeReviewCli {
 
 async function runController(parameters: Record<string, unknown>, cwd: string, native: NativeReviewCli, candidateViews: CandidateViewRegistry): Promise<Record<string, unknown>> {
 	return await __testing.executeReviewControllerOperation(
-		parameters, cwd, new Map(), native, undefined, undefined, undefined, candidateViews,
+		parameters, cwd, native, undefined, candidateViews,
 	) as Record<string, unknown>;
 }
 
