@@ -1129,7 +1129,7 @@ test("bounded implementation routing uses the same explicit fallback in both pol
 	);
 });
 
-test("orchestrator routes generic roles without reusing SDD or review agents", () => {
+test("orchestrator routes generic roles without static RDD lens routing", () => {
 	for (const file of ["orchestrator.md", "orchestrator-delegation.md"]) {
 		const routing = readFileSync(join(PACKAGE_ROOT, "assets", file), "utf8");
 		assert.match(routing, /generic non-SDD exploration[\s\S]*`gentle-ai-explore`/);
@@ -1139,12 +1139,16 @@ test("orchestrator routes generic roles without reusing SDD or review agents", (
 		);
 		assert.match(routing, /generic non-SDD (?:technical )?verification[\s\S]*`gentle-ai-verify`/);
 		assert.match(routing, /SDD roles stay inside SDD|Use `sdd-explore` and `sdd-verify` only inside SDD/);
-		assert.match(routing, /review lenses inside reviews|Use review lenses only inside explicit review transactions/);
-		assert.match(routing, /(?:truly local )?read-only check(?:ing)? of (?:known )?1-3 known files|1-3-file read-only check/);
+		assert.match(routing, /(?:truly local )?read-only check(?:ing)? of (?:known )?1[-–]3 known files|1[-–]3-file read-only check/);
 		assert.match(routing, /(?:verification that |verification commands →).*executes? or delegates?|executing\/delegating verification commands/);
 		assert.match(routing, /missing(?: or |\/)unusable[\s\S]*native `Agent`[\s\S]*(?:the )?same read-only/);
 		assert.match(routing, /report (?:the )?fallback/);
+		assert.doesNotMatch(routing, /review lenses? (?:inside|only inside)|review lens routing/i);
 	}
+
+	const core = readFileSync(join(PACKAGE_ROOT, "assets", "orchestrator.md"), "utf8");
+	assert.match(core, /Gentle AI dynamically supplies runtime-specific RDD instructions/);
+	assert.match(core, /this package does not invent or fall back/);
 });
 
 test("pi-pretty wrapper uses real package path resolution for pnpm symlink installs", () => {
@@ -1192,17 +1196,16 @@ test("bounded review keeps the Judgment Day skill contract at canon metadata ver
 	assert.doesNotMatch(frontmatter, /^  version: "1\.4"$/m);
 });
 
-test("README documents bounded review transactions and the honest installed permission boundary", () => {
+test("README documents dynamic Gentle AI RDD ownership and the installed permission boundary", () => {
 	const readme = readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8");
 	for (const clause of [
-		"New ordinary review uses compact `gentle_review` `start -> finalize -> validate`.",
-		"Native compact gate validation is read-only.",
-		"Release from protected `main` may bypass receipt validation only when the tag targets the current immutable `origin/main` SHA, required CI for that exact SHA is successful, the remote head is rechecked before tag push, and no fresh risk evidence exists; otherwise release fails closed through native receipt validation.",
+		"Gentle AI dynamically supplies runtime-specific RDD instructions",
+		"does not define an RDD lifecycle",
 		"Dangerous-command safety remains independent and authoritative.",
-		"Adversarial review roles (the refuter and the targeted validator) are never Pi-authored",
 		"package-managed isolated installation",
 		"Project and user overrides may shadow a package asset",
 	]) {
-		assert.ok(readme.includes(clause), `README missing review v2 clause: ${clause}`);
+		assert.ok(readme.includes(clause), `README missing dynamic RDD clause: ${clause}`);
 	}
+	assert.doesNotMatch(readme, /New ordinary review uses compact `gentle_review` `start -> finalize -> validate`\./);
 });

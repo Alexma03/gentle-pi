@@ -176,7 +176,7 @@ const contractHashes = {
   "contracts/review-integration/v2/schemas/repair.schema.json": "98a85fd45a8ae7f6211ffeeb3f9c478fa1dd1c17f385751f15f2111e6c3ab167",
   "contracts/review-integration/v2/schemas/start.schema.json": "2991e3fcca672d9257d61b6a336fb34e58b15a8e03f8a09a7adf892cae6a8085",
   "contracts/review-integration/v2/schemas/status.schema.json": "c4dcc736cfc6300560a3c4262d2d982368529d5c49d58d499552a3b0beef9212",
-  "docs/review-integration.md": "189f9b128cafaf225d2b6be53111f893ca46eb687fb9e5e051a84727b6a34bbc",
+  "docs/review-integration.md": "e7dfcfb1b0136e279aed82bb9048af39b1ef7a73c8a20603d52a0a06dcb1e0bd",
 };
 
 requiredPaths.push(...Object.keys(contractHashes));

@@ -1457,9 +1457,9 @@ test("captureEvidenceSubmission executes the provider-rendered submission tokens
 		"--input={{input}}",
 	];
 	let staged = "";
-	const calls: Array<{ arguments: readonly string[] }> = [];
+	const calls: Array<{ arguments: readonly string[]; cwd: string }> = [];
 	const cli = new NativeReviewCliV216(async (request) => {
-		calls.push({ arguments: request.arguments });
+		calls.push({ arguments: request.arguments, cwd: request.cwd });
 		if (request.arguments[1] === "capabilities") return { stdout: JSON.stringify(capabilitiesBody), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 		const inputToken = request.arguments.find((token) => token.startsWith("--input="));
 		assert.ok(inputToken !== undefined);
@@ -1473,8 +1473,10 @@ test("captureEvidenceSubmission executes the provider-rendered submission tokens
 		inputSubstitutionLocation: 5,
 		outcome: "passed",
 		evidenceDocument: evidence,
+		executionCwd: "/execution",
 	});
 	assert.equal(staged, evidence, "the evidence bytes must be staged exactly");
+	assert.equal(calls[1]!.cwd, "/execution", "repository-context submissions may override only the adapter process cwd");
 	assert.equal(captured.recordDigest, record.record_digest);
 	assert.equal(captured.targetIdentity, record.target_identity);
 	const argv = calls[1]!.arguments;

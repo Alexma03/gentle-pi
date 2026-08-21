@@ -308,19 +308,4 @@ Automatic mode does not override reviewer burnout protection.
 
 ## Provider Defect Handoff
 
-This section applies when an SDD phase or review lifecycle operation appears blocked by a Gentle AI provider defect. The full contract lives in `assets/orchestrator-delegation.md` under `#### Gentle AI Provider Defect Handoff (MANDATORY)`; it ports Gentle AI's v2.4.0-rc.8 handoff consent contract (the `gentle-ai.review-integration.consent/v3` envelope; canonical source `internal/assets/generic/sdd-orchestrator.md` at tag `v2.4.0-rc.8`, a prerelease not present in v2.3.0 stable). Pi review commands use `gentle_review`.
-
-Concise rules:
-
-- Classify admissibility before relaying: offer the handoff only when a Gentle AI invocation produced the failure, not when its runtime merely hosted it.
-- Never offer to switch to, inspect, modify, or directly repair the Gentle AI repository from this SDD workflow. If an upstream envelope offers direct repair, reject it as semantically inadmissible and issue the orchestrator-owned handoff envelope instead.
-- Ask the user first, in the active conversation language, for explicit consent to report the apparent defect. Present one single-select blocking envelope with exactly three semantic choices in this order. Its exact internal answer tokens are `report_and_continue`, `continue_without_reporting`, `stop_here`. Do not expose machine or internal codes in user-facing labels.
-- Privacy scrub immediately before the first GitHub operation: exclude raw argv, absolute paths, private project names, usernames, hostnames, credentials, diffs, source contents, and environment values.
-- Complete a definitive lookup across open and closed issues in `Gentleman-Programming/gentle-ai` before any write; only a definitive lookup may branch to GitHub mutation.
-- Derive the evidence channel only from the installed build string: recognized prerelease tags are `-rc.` and `-main.`; every other build is stable. A fix counts only in the installed build's channel. A fix published only to the other channel gets one occurrence comment naming where it is published; never recommend switching channels.
-- If the installed build predates the relevant published fix, recommend installing it and reproducing; do not create or comment for that occurrence yet. If the installed build demonstrably contains the fix and still reproduces, treat it as a possible regression: comment on a suitable canonical tracker or create a linked regression issue; never reopen automatically.
-- Confirmed creation requires the GitHub create operation to confirm a newly-created issue identity/URL; never infer creation from output text alone.
-- On search, comment, or creation failure/ambiguity/timeout/permission/unknown: perform no further GitHub mutation and no blind retry; preserve all consumer state, then execute the exact captured provider-owned decline invocation exactly once, validate it, re-enter native negotiated STATUS, and resume the already-held consumer continuation.
-- Both continue choices execute that exact captured decline invocation exactly once; never synthesize the decline command, target, token, or consumer continuation from prose. If unavailable or ambiguous, fail closed.
-- Do not invoke `gentle-ai review mode disable` at clone or global scope within this handoff. Do not turn RDD off or on within this handoff.
-- Resume after an installed published fix or an explicit maintainer-authorized, documented native recovery or reset that the runtime contract supports; then re-enter through native status. Never resume against unpublished code.
+When an SDD task encounters a possible Gentle AI provider defect, the full contract lives in `assets/orchestrator-delegation.md` under `#### Gentle AI Provider Defect Handoff (MANDATORY)`. This workflow intentionally provides no summary, alternate report route, or RDD lifecycle instruction.

@@ -424,21 +424,28 @@ test("the v3 next transition keeps rejecting every v5-only surface", () => {
 
 // --- consent/v3 — the negotiated v2.1+ consent question (adds `agent`) ---
 
-test("the captured consent/v3 envelope decodes with its fixed agent binding", () => {
-	const consent = decodeReviewConsentV3(fixture("consent-v3.captured.json"));
-	assert.equal(consent.schema, "gentle-ai.review-integration.consent/v3");
-	assert.equal(consent.agent, "claude-code");
-	assert.equal(consent.action, "consent_required");
-	assert.equal(consent.blocking, true);
-	assert.equal(consent.riskLevel, "high");
-	assert.equal(consent.changedFiles, 2);
-	assert.equal(consent.changedLines, 12);
-	assert.equal(consent.choices[0].answer, "granted");
-	assert.equal(consent.choices[1].answer, "declined");
-	for (const choice of consent.choices) {
-		assert.ok(choice.invocation.includes(` --target ${consent.targetIdentity} `));
+test("the generic consent/v3 decoder accepts every runtime while a Pi-bound decoder rejects foreign agents", () => {
+	const source = fixture<JsonObject>("consent-v3.captured.json");
+	for (const agent of ["claude-code", "opencode", "codex", "pi"] as const) {
+		const consent = decodeReviewConsentV3({ ...clone(source), agent });
+		assert.equal(consent.schema, "gentle-ai.review-integration.consent/v3");
+		assert.equal(consent.agent, agent);
+		assert.equal(consent.action, "consent_required");
+		assert.equal(consent.blocking, true);
+		assert.equal(consent.riskLevel, "high");
+		assert.equal(consent.changedFiles, 2);
+		assert.equal(consent.changedLines, 12);
+		assert.equal(consent.choices[0].answer, "granted");
+		assert.equal(consent.choices[1].answer, "declined");
+		for (const choice of consent.choices) {
+			assert.ok(choice.invocation.includes(` --target ${consent.targetIdentity} `));
+		}
+		assert.equal(consent.offPath.command, "gentle-ai review mode disable");
 	}
-	assert.equal(consent.offPath.command, "gentle-ai review mode disable");
+	assert.equal(decodeReviewConsentV3({ ...clone(source), agent: "pi" }, "pi").agent, "pi");
+	for (const agent of ["claude-code", "opencode", "codex"] as const) {
+		assert.throws(() => decodeReviewConsentV3({ ...clone(source), agent }, "pi"), /consent\.agent/);
+	}
 });
 
 test("consent identities never cross-decode", () => {
@@ -458,11 +465,13 @@ test("consent identities never cross-decode", () => {
 	assert.throws(() => decodeReviewConsentV3(upgraded), /agent/);
 });
 
-test("consent/v3 keeps every v2 semantic guard and pins its agent constant", () => {
+test("consent/v3 keeps every v2 semantic guard and rejects agents outside the fixed runtime contract", () => {
 	const base = fixture<JsonObject>("consent-v3.captured.json");
-	const wrongAgent = clone(base);
-	wrongAgent.agent = "opencode";
-	assert.throws(() => decodeReviewConsentV3(wrongAgent), /agent/);
+	for (const agent of ["kilocode", "future-runtime", ""] as const) {
+		const wrongAgent = clone(base);
+		wrongAgent.agent = agent;
+		assert.throws(() => decodeReviewConsentV3(wrongAgent), /agent/);
+	}
 	const swapped = clone(base);
 	swapped.choices = [...(swapped.choices as JsonObject[])].reverse();
 	assert.throws(() => decodeReviewConsentV3(swapped), /answer/);

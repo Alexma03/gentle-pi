@@ -119,21 +119,19 @@ test(`getOrchestratorPrompt return value stays within the 10,240 B budget at a r
 // 2.3 — Disposition-mapped union sweep (Spec: No Normative Content Loss +
 // Pointer reachability)
 //
-// Every normative line of the frozen pre-diet fixture is assigned to exactly
-// one documented disposition: CORE_VERBATIM (byte-identical in the new
-// core), LAZY_VERBATIM (byte-identical in one specific lazy file), or OBSOLETE
-// (intentionally absent from every live model-facing asset). Section headings
-// that are reused unchanged as the new core's summary heading are
-// CORE_VERBATIM; section bodies that are condensed away in core are
-// LAZY_VERBATIM against their one target lazy file — never a blanket union
-// across all three.
+// Every normative line of the frozen pre-diet fixture is assigned to a
+// documented disposition: CORE_VERBATIM (byte-identical in the core),
+// LAZY_VERBATIM (byte-identical in one specific lazy file), OBSOLETE
+// (intentionally absent), or REPLACED (superseded by the focused #3417 asset
+// policy ratchets below). REPLACED preserves the historical fixture without
+// treating a retired prompt mirror as a current normative source.
 // ---------------------------------------------------------------------------
 
 type Target = "core" | "delegation" | "memory" | "skills";
 
 interface DispositionRange {
 	lines: [number, number];
-	target: Target | "obsolete";
+	target: Target | "obsolete" | "replaced";
 	label: string;
 }
 
@@ -158,13 +156,21 @@ const DISPOSITION_MAP: DispositionRange[] = [
 	{ lines: [25, 29], target: "delegation", label: "Language Boundary LB5 (exceptions)" },
 	{ lines: [31, 40], target: "core", label: "Mental Model" },
 	{ lines: [42, 42], target: "core", label: "Work Routing Ladder heading" },
-	{ lines: [44, 97], target: "delegation", label: "Work Routing Ladder body + Pi Subagent Model Routing" },
+	{
+		lines: [44, 97],
+		target: "replaced",
+		label: "Pre-RDD routing detail replaced by focused direct-delegation guidance (#3417)",
+	},
 	{
 		lines: [98, 107],
 		target: "obsolete",
 		label: "Size/risk-selected SDD tier replaced by explicit-request/accepted-proposal selection (#312)",
 	},
-	{ lines: [108, 108], target: "delegation", label: "SDD explicit-request trigger" },
+	{
+		lines: [108, 108],
+		target: "replaced",
+		label: "Earlier SDD trigger wording replaced by the focused SDD boundary (#3417)",
+	},
 	{
 		lines: [109, 110],
 		target: "obsolete",
@@ -179,8 +185,8 @@ const DISPOSITION_MAP: DispositionRange[] = [
 	},
 	{
 		lines: [128, 132],
-		target: "delegation",
-		label: "Mandatory Triggers heading + Pi trigger preamble + 4-file binding",
+		target: "replaced",
+		label: "Pre-RDD trigger wording replaced by focused direct-delegation guidance (#3417)",
 	},
 	{
 		lines: [133, 133],
@@ -189,8 +195,8 @@ const DISPOSITION_MAP: DispositionRange[] = [
 	},
 	{
 		lines: [134, 167],
-		target: "delegation",
-		label: "Mandatory Triggers remainder + Cost/Context Balance + Canonical Workflows",
+		target: "replaced",
+		label: "Pre-RDD trigger and workflow wording replaced by focused delegation guidance (#3417)",
 	},
 	{
 		lines: [169, 181],
@@ -199,8 +205,16 @@ const DISPOSITION_MAP: DispositionRange[] = [
 	},
 	{ lines: [183, 191], target: "core", label: "SDD Workflow pointer" },
 	{ lines: [193, 193], target: "core", label: "Memory Contract heading" },
-	{ lines: [195, 195], target: "core", label: "Memory Contract intro" },
-	{ lines: [197, 201], target: "core", label: "Memory Contract Non-SDD delegation" },
+	{
+		lines: [195, 195],
+		target: "replaced",
+		label: "Verbose memory introduction replaced by compact parent/subagent ownership (#3417)",
+	},
+	{
+		lines: [197, 201],
+		target: "replaced",
+		label: "Verbose non-SDD memory forwarding replaced by compact ownership (#3417)",
+	},
 	{ lines: [203, 230], target: "memory", label: "Memory Contract SDD phases table + artifact keys + lifecycle rule" },
 	{ lines: [232, 232], target: "core", label: "Skill Registry Protocol heading" },
 	{ lines: [234, 253], target: "skills", label: "Skill Registry Protocol detail" },
@@ -240,6 +254,7 @@ const SUPERSEDED_LIFECYCLE_REVIEW_LINES = new Set([
 ]);
 
 for (const range of DISPOSITION_MAP) {
+	if (range.target === "replaced") continue;
 	test(
 		`disposition-mapped union: ${range.label} (fixture:${range.lines[0]}-${range.lines[1]}) -> ${range.target}`,
 		() => {
@@ -279,32 +294,28 @@ for (const range of DISPOSITION_MAP) {
 // string alone, no lazy union.
 // ---------------------------------------------------------------------------
 
-test("core-alone: load-bearing delegation tokens present without lazy union", () => {
+test("core-alone: load-bearing direct-delegation tokens remain without lazy union", () => {
 	const core = readRealAsset("orchestrator.md");
 	assert.match(core, /4-file rule/);
 	assert.match(core, /Multi-file write rule/);
-	assert.match(core, /Lifecycle gate rule/);
 	assert.match(core, /Incident rule/);
+	assert.match(core, /Verification rule/);
 	assert.match(core, /Long-session rule/);
-	assert.match(core, /Review actor rule/);
 });
 
-test("core-alone: receipt-only lifecycle and independent safety are present without lazy union", () => {
+test("core-alone: dynamic Gentle AI ownership replaces package lifecycle instructions", () => {
 	const core = readRealAsset("orchestrator.md");
-	assert.match(core, /start -> finalize -> validate/i);
-	assert.match(core, /Compact gates use zero actors/i);
-	assert.match(core, /Release from protected `main` may bypass receipt validation only when/i);
-	assert.match(core, /Major and post-incident releases require explicit extraordinary review/i);
-	assert.match(core, /Dangerous-command safety remains independent and authoritative/i);
-	assert.match(core, /SDD completion adds no review or Judgment Day pass/i);
+	assert.match(core, /dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition/);
+	assert.match(core, /if absent or unsupported, this package does not invent or fall back/);
+	assert.doesNotMatch(core, /start -> finalize -> validate/i);
+	assert.doesNotMatch(core, /receipt validation/i);
 });
 
-test("lazy bounded-review contract lists all four review lens names", () => {
-	const content = `${readRealAsset("orchestrator.md")}\n${readRealAsset("orchestrator-delegation.md")}`;
-	assert.match(content, /review-risk/);
-	assert.match(content, /review-reliability/);
-	assert.match(content, /review-resilience/);
-	assert.match(content, /review-readability/);
+test("lazy delegation detail has no native RDD controller markers", () => {
+	const delegation = readRealAsset("orchestrator-delegation.md");
+	for (const marker of ["next_transition", "review.capture-result", "reconcile-terminal-mirrors"]) {
+		assert.ok(!delegation.includes(marker), `stale RDD marker retained: ${marker}`);
+	}
 });
 
 test("live orchestrator assets remove the stale strong-gate retry contract", () => {

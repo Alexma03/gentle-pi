@@ -351,6 +351,32 @@ test("candidate view materializes exact tracked and initially-untracked content 
 	view.cleanup();
 });
 
+test("candidate view preserves staged additions with explicit intended-untracked selection in its private index", (t) => {
+	const contributorRoot = repository(t);
+	writeFileSync(join(contributorRoot, "tracked.txt"), "tracked selection\n");
+	writeFileSync(join(contributorRoot, "staged-addition.txt"), "staged addition\n");
+	git(contributorRoot, "add", "staged-addition.txt");
+	git(contributorRoot, "update-index", "--split-index");
+	writeFileSync(join(contributorRoot, "selected.txt"), "selected\n");
+	writeFileSync(join(contributorRoot, "excluded.txt"), "excluded\n");
+	const indexBefore = readFileSync(join(contributorRoot, ".git", "index"));
+	const all = createCandidateView({ contributorRoot });
+	const excluded = createCandidateView({ contributorRoot, intendedUntracked: [] });
+	const selected = createCandidateView({ contributorRoot, intendedUntracked: ["selected.txt"] });
+	try {
+		assert.deepEqual(all.paths, ["excluded.txt", "selected.txt", "staged-addition.txt", "tracked.txt"]);
+		assert.deepEqual(excluded.paths, ["staged-addition.txt", "tracked.txt"]);
+		assert.deepEqual(selected.paths, ["selected.txt", "staged-addition.txt", "tracked.txt"]);
+		assert.equal(readFileSync(join(selected.root, "staged-addition.txt"), "utf8"), "staged addition\n");
+		assert.equal(lstatSync(join(selected.root, "excluded.txt"), { throwIfNoEntry: false }), undefined);
+		assert.deepEqual(readFileSync(join(contributorRoot, ".git", "index")), indexBefore);
+	} finally {
+		all.cleanup();
+		excluded.cleanup();
+		selected.cleanup();
+	}
+});
+
 test("candidate view recursively protects nested content and worktree metadata, and rejects injected untracked entries", (t) => {
 	const contributorRoot = repository(t);
 	mkdirSync(join(contributorRoot, "nested", "deeper"), { recursive: true });
@@ -395,6 +421,54 @@ test("candidate view registry rejects unsafe, moved, writable, stale, and unsele
 	registry.cleanup(view.token);
 });
 
+test("candidate registry isolates replay, projection, current, and cleanup state by target root plus lineage", (t) => {
+	const rootA = repository(t);
+	const rootB = repository(t);
+	writeFileSync(join(rootA, "tracked.txt"), "candidate A\n");
+	writeFileSync(join(rootB, "tracked.txt"), "candidate B\n");
+	const registry = new CandidateViewRegistry();
+	const viewA = registry.createOrReuse({ contributorRoot: rootA, replayKey: "same-replay" });
+	const viewB = registry.createOrReuse({ contributorRoot: rootB, replayKey: "same-replay" });
+	assert.notEqual(viewA.token, viewB.token);
+	registry.bindCurrent({ token: viewA.token, lineageId: "same-lineage", selectedLenses: ["review-reliability"] });
+	registry.bindCurrent({ token: viewB.token, lineageId: "same-lineage", selectedLenses: ["review-reliability"] });
+	assert.equal(registry.resolveForLens("same-lineage", "review-reliability", rootA).root, viewA.root);
+	assert.equal(registry.resolveForLens("same-lineage", "review-reliability", rootB).root, viewB.root);
+	assert.equal(registry.resolveForFinalize("same-lineage", rootA).root, viewA.root);
+	assert.equal(registry.resolveForFinalize("same-lineage", rootB).root, viewB.root);
+	writeFileSync(join(rootA, "tracked.txt"), "corrected A\n");
+	writeFileSync(join(rootB, "tracked.txt"), "corrected B\n");
+	const correctedA = registry.createCorrected("same-lineage", rootA, "same-correction-replay");
+	const correctedB = registry.createCorrected("same-lineage", rootB, "same-correction-replay");
+	assert.notEqual(correctedA.token, correctedB.token);
+	registry.promoteCorrected("same-lineage", correctedA.token, rootA);
+	registry.promoteCorrected("same-lineage", correctedB.token, rootB);
+	assert.equal(registry.resolveForFinalize("same-lineage", rootA).root, correctedA.root);
+	assert.equal(registry.resolveForFinalize("same-lineage", rootB).root, correctedB.root);
+	assert.throws(() => registry.resolveForLens("same-lineage", "review-reliability"), /workspaceRoot/);
+	assert.throws(() => registry.resolveWorkspaceRoot("same-lineage"), /workspaceRoot/);
+	registry.cleanupTerminal("same-lineage", "approved", rootB);
+	assert.equal(registry.resolveWorkspaceRoot("same-lineage"), realpathSync(rootA));
+	assert.equal(registry.resolveForFinalize("same-lineage", rootA).root, correctedA.root);
+	registry.cleanupTerminal("same-lineage", "approved", rootA);
+});
+
+test("candidate registry rejects a lineage target whose authorized symlink was replaced", (t) => {
+	const root = repository(t);
+	const replacement = repository(t);
+	const alias = join(tmpdir(), `gentle-pi-candidate-alias-${process.pid}-${Date.now()}`);
+	t.after(() => rmSync(alias, { recursive: true, force: true }));
+	symlinkSync(root, alias, "dir");
+	const registry = new CandidateViewRegistry();
+	const view = registry.create({ contributorRoot: root });
+	registry.bindCurrent({ token: view.token, lineageId: "symlink-lineage", selectedLenses: ["review-reliability"] });
+	assert.doesNotThrow(() => registry.assertWorkspaceRoot("symlink-lineage", alias));
+	rmSync(alias, { recursive: true, force: true });
+	symlinkSync(replacement, alias, "dir");
+	assert.throws(() => registry.assertWorkspaceRoot("symlink-lineage", alias), /workspaceRoot|bound to/);
+	registry.cleanupTerminal("symlink-lineage", "approved", root);
+});
+
 test("review subagent dispatch rejects missing candidate views and uses the explicitly current overlapping lens", (t) => {
 	const missing = new CandidateViewRegistry();
 	assert.throws(
@@ -431,6 +505,16 @@ test("candidate view cleanup is confined and idempotent", (t) => {
 	registry.cleanup(view.token);
 	registry.cleanup(view.token);
 	assert.equal(readFileSync(outside, "utf8"), "preserve\n");
+	assert.equal(lstatSync(view.root, { throwIfNoEntry: false }), undefined);
+});
+
+test("candidate cleanup removes a readonly root when Git reports success without deleting it", (t) => {
+	const registry = new CandidateViewRegistry((file, arguments_, options) =>
+		arguments_[0] === "worktree" && arguments_[1] === "remove" ? "" : execFileSync(file, arguments_, options));
+	const view = registry.create({ contributorRoot: repository(t) });
+	assert.equal(lstatSync(view.root).mode & 0o222, 0);
+	view.cleanup();
+	view.cleanup();
 	assert.equal(lstatSync(view.root, { throwIfNoEntry: false }), undefined);
 });
 
@@ -829,6 +913,30 @@ test("candidate views freeze gitlinks as immutable metadata without materializin
 		view.verify();
 	} finally {
 		view.cleanup();
+	}
+});
+
+test("native projection reconstruction retains its selected untracked subset", (t) => {
+	const contributorRoot = repository(t);
+	writeFileSync(join(contributorRoot, "tracked.txt"), "tracked selection\n");
+	writeFileSync(join(contributorRoot, "selected.txt"), "selected\n");
+	writeFileSync(join(contributorRoot, "excluded.txt"), "excluded\n");
+	const source = new CandidateViewRegistry();
+	const selected = source.create({ contributorRoot, intendedUntracked: ["selected.txt"] });
+	const restored = new CandidateViewRegistry();
+	try {
+		const view = restored.restoreForFinalizeFromNative("selected-native", contributorRoot, {
+			baseTree: selected.baseTree,
+			currentCandidateTree: selected.candidateTree,
+			paths: selected.paths,
+			intendedUntracked: ["selected.txt"],
+			projection: "workspace",
+		});
+		assert.deepEqual(view.paths, ["selected.txt", "tracked.txt"]);
+		assert.equal(lstatSync(join(view.root, "excluded.txt"), { throwIfNoEntry: false }), undefined);
+		view.cleanup();
+	} finally {
+		selected.cleanup();
 	}
 });
 

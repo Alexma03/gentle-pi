@@ -79,6 +79,11 @@ export const REVIEW_START_STATE = {
 export type ReviewStartState = (typeof REVIEW_START_STATE)[keyof typeof REVIEW_START_STATE];
 
 const START_ACTIONS = ["created", "resumed", "reuse-receipt", "blocked-scope-action"] as const;
+export const REVIEW_GATE_DELIVERY = {
+	UNMANAGED: "unmanaged",
+	DISABLED_UNMANAGED: "disabled/unmanaged",
+} as const;
+export type ReviewGateDelivery = (typeof REVIEW_GATE_DELIVERY)[keyof typeof REVIEW_GATE_DELIVERY];
 const RISK_LEVELS = ["low", "medium", "high"] as const;
 const REVIEW_LENSES = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
 const RISK_REASON_CODES = ["configuration_change", "empty_content", "executable_change", "executable_mode", "hot_path", "large_change", "non_executable_only", "process_boundary", "process_scan_limit", "service_token", "shell_source"] as const;
@@ -481,6 +486,42 @@ export interface ReviewNextTransitionV3 {
 	correctionRequest?: ReviewCorrectionPlanRequestV1;
 }
 
+export interface ReviewTargetedValidationFindingV1 {
+	id: string;
+	lens?: string;
+	location?: string;
+	severity?: string;
+	claim?: string;
+	proofRefs?: readonly string[];
+	evidenceClass?: string;
+	causalDisposition?: string;
+}
+
+export const REVIEW_TARGETED_VALIDATION_CLASS = {
+	DETERMINISTIC: "deterministic",
+	INFERENTIAL: "inferential",
+	INSUFFICIENT: "insufficient",
+} as const;
+export type ReviewTargetedValidationClass = (typeof REVIEW_TARGETED_VALIDATION_CLASS)[keyof typeof REVIEW_TARGETED_VALIDATION_CLASS];
+
+export const REVIEW_TARGETED_VALIDATION_CAUSAL_DISPOSITION = {
+	INTRODUCED: "introduced",
+	BEHAVIOR_ACTIVATED: "behavior-activated",
+	WORSENED: "worsened",
+	PRE_EXISTING: "pre-existing",
+	BASE_ONLY: "base-only",
+	UNKNOWN: "unknown",
+} as const;
+export type ReviewTargetedValidationCausalDisposition = (typeof REVIEW_TARGETED_VALIDATION_CAUSAL_DISPOSITION)[keyof typeof REVIEW_TARGETED_VALIDATION_CAUSAL_DISPOSITION];
+
+export interface ReviewTargetedValidationClassificationV1 {
+	findingId: string;
+	severity?: string;
+	class: ReviewTargetedValidationClass;
+	causalDisposition: ReviewTargetedValidationCausalDisposition;
+	proof: string;
+}
+
 export interface ReviewTargetedValidationRequestV1 {
 	schema: "gentle-ai.review-targeted-validation-request/v1";
 	requestHash: string;
@@ -488,6 +529,9 @@ export interface ReviewTargetedValidationRequestV1 {
 	expectedRevision: string;
 	targetIdentity: string;
 	fixFindingIds: readonly string[];
+	policyContent: string;
+	fixFindings: readonly ReviewTargetedValidationFindingV1[];
+	fixClassifications: readonly ReviewTargetedValidationClassificationV1[];
 	projection: ReviewProjection;
 	correctionCandidateTree: string;
 	correctionTargetIdentity: string;
@@ -566,9 +610,17 @@ export interface ReviewConsentV2 {
 // blocking question with one net-new required member, the provider-fixed
 // `agent` runtime binding. Everything shared with v2 keeps its exact shape so
 // consumers of either identity read one structural surface.
+export const REVIEW_CONSENT_AGENT_V3 = {
+	CLAUDE_CODE: "claude-code",
+	OPENCODE: "opencode",
+	CODEX: "codex",
+	PI: "pi",
+} as const;
+export type ReviewConsentAgentV3 = (typeof REVIEW_CONSENT_AGENT_V3)[keyof typeof REVIEW_CONSENT_AGENT_V3];
+
 export interface ReviewConsentV3 extends Omit<ReviewConsentV2, "schema"> {
 	schema: "gentle-ai.review-integration.consent/v3";
-	agent: "claude-code";
+	agent: ReviewConsentAgentV3;
 }
 
 // Either accepted consent identity. Consumers that relay the envelope (rather
@@ -1192,8 +1244,47 @@ export function decodeAuthorityRepairAssessmentV1(value: unknown): AuthorityRepa
 // operation.result.validation_request, and next_transition collect inputs.
 // ---------------------------------------------------------------------------
 
+const TARGETED_VALIDATION_CLASSES = [
+	REVIEW_TARGETED_VALIDATION_CLASS.DETERMINISTIC,
+	REVIEW_TARGETED_VALIDATION_CLASS.INFERENTIAL,
+	REVIEW_TARGETED_VALIDATION_CLASS.INSUFFICIENT,
+] as const;
+const TARGETED_VALIDATION_CAUSAL_DISPOSITIONS = [
+	REVIEW_TARGETED_VALIDATION_CAUSAL_DISPOSITION.INTRODUCED,
+	REVIEW_TARGETED_VALIDATION_CAUSAL_DISPOSITION.BEHAVIOR_ACTIVATED,
+	REVIEW_TARGETED_VALIDATION_CAUSAL_DISPOSITION.WORSENED,
+	REVIEW_TARGETED_VALIDATION_CAUSAL_DISPOSITION.PRE_EXISTING,
+	REVIEW_TARGETED_VALIDATION_CAUSAL_DISPOSITION.BASE_ONLY,
+	REVIEW_TARGETED_VALIDATION_CAUSAL_DISPOSITION.UNKNOWN,
+] as const;
+
+function decodeTargetedValidationFindingV1(value: unknown, label: string): ReviewTargetedValidationFindingV1 {
+	const finding = exactRecord(value, label, ["id"], ["lens", "location", "severity", "claim", "proof_refs", "evidence_class", "causal_disposition"]);
+	return {
+		id: nonempty(finding.id, `${label}.id`),
+		...(finding.lens === undefined ? {} : { lens: text(finding.lens, `${label}.lens`) }),
+		...(finding.location === undefined ? {} : { location: text(finding.location, `${label}.location`) }),
+		...(finding.severity === undefined ? {} : { severity: text(finding.severity, `${label}.severity`) }),
+		...(finding.claim === undefined ? {} : { claim: text(finding.claim, `${label}.claim`) }),
+		...(finding.proof_refs === undefined ? {} : { proofRefs: array(finding.proof_refs, `${label}.proof_refs`, text) }),
+		...(finding.evidence_class === undefined ? {} : { evidenceClass: text(finding.evidence_class, `${label}.evidence_class`) }),
+		...(finding.causal_disposition === undefined ? {} : { causalDisposition: text(finding.causal_disposition, `${label}.causal_disposition`) }),
+	};
+}
+
+function decodeTargetedValidationClassificationV1(value: unknown, label: string): ReviewTargetedValidationClassificationV1 {
+	const classification = exactRecord(value, label, ["finding_id", "class", "causal_disposition", "proof"], ["severity"]);
+	return {
+		findingId: nonempty(classification.finding_id, `${label}.finding_id`),
+		...(classification.severity === undefined ? {} : { severity: text(classification.severity, `${label}.severity`) }),
+		class: enumeration(classification.class, TARGETED_VALIDATION_CLASSES, `${label}.class`),
+		causalDisposition: enumeration(classification.causal_disposition, TARGETED_VALIDATION_CAUSAL_DISPOSITIONS, `${label}.causal_disposition`),
+		proof: nonempty(classification.proof, `${label}.proof`),
+	};
+}
+
 function decodeTargetedValidationRequestV1(value: unknown, label: string): ReviewTargetedValidationRequestV1 {
-	const body = exactRecord(value, label, ["schema", "request_hash", "lineage_id", "expected_revision", "target_identity", "fix_finding_ids", "projection", "correction_candidate_tree", "correction_target_identity", "correction_paths", "correction_paths_digest"]);
+	const body = exactRecord(value, label, ["schema", "request_hash", "lineage_id", "expected_revision", "target_identity", "fix_finding_ids", "policy_content", "fix_findings", "fix_classifications", "projection", "correction_candidate_tree", "correction_target_identity", "correction_paths", "correction_paths_digest"]);
 	if (body.schema !== "gentle-ai.review-targeted-validation-request/v1") throw new TypeError(`${label}.schema must be gentle-ai.review-targeted-validation-request/v1`);
 	return {
 		schema: "gentle-ai.review-targeted-validation-request/v1",
@@ -1202,6 +1293,9 @@ function decodeTargetedValidationRequestV1(value: unknown, label: string): Revie
 		expectedRevision: sha256(body.expected_revision, `${label}.expected_revision`),
 		targetIdentity: sha256(body.target_identity, `${label}.target_identity`),
 		fixFindingIds: stringArray(body.fix_finding_ids, `${label}.fix_finding_ids`, { minimum: 1, unique: true }),
+		policyContent: text(body.policy_content, `${label}.policy_content`),
+		fixFindings: array(body.fix_findings, `${label}.fix_findings`, decodeTargetedValidationFindingV1, { minimum: 1 }),
+		fixClassifications: array(body.fix_classifications, `${label}.fix_classifications`, decodeTargetedValidationClassificationV1, { minimum: 1 }),
 		projection: enumeration(body.projection, REQUIRED_PROJECTIONS, `${label}.projection`),
 		correctionCandidateTree: gitTree(body.correction_candidate_tree, `${label}.correction_candidate_tree`),
 		correctionTargetIdentity: sha256(body.correction_target_identity, `${label}.correction_target_identity`),
@@ -1774,13 +1868,14 @@ export function decodeReviewConsentV2(value: unknown): ReviewConsentV2 {
 // published v3 schema demands an `--agent claude-code` token that the live
 // emitter omits when the caller declared no --agent, so the capture is
 // authoritative and Pi replays whichever provider-owned invocation arrived.
-export function decodeReviewConsentV3(value: unknown): ReviewConsentV3 {
+export function decodeReviewConsentV3(value: unknown, expectedAgent?: ReviewConsentAgentV3): ReviewConsentV3 {
 	const body = exactRecord(value, "consent", [...CONSENT_KEYS_V2, "agent"]);
 	requireIdentity(body, "gentle-ai.review-integration.consent/v3", "review.start");
-	if (body.agent !== "claude-code") throw new TypeError("consent.agent must be claude-code");
+	const agent = enumeration(body.agent, Object.values(REVIEW_CONSENT_AGENT_V3), "consent.agent") as ReviewConsentAgentV3;
+	if (expectedAgent !== undefined && agent !== expectedAgent) throw new TypeError("consent.agent does not match the expected runtime binding");
 	return {
 		schema: "gentle-ai.review-integration.consent/v3",
-		agent: "claude-code",
+		agent,
 		...decodeConsentSemantics(body),
 		raw: body,
 	};
@@ -1909,7 +2004,13 @@ export function decodeReviewOperationV2(value: unknown): ReviewOperationV2 {
 		nonempty(result.action, "operation.result.action");
 		nonempty(result.reason, "operation.result.reason");
 		record(result.context, "operation.result.context");
-		if (result.delivery !== undefined && result.delivery !== "disabled/unmanaged") throw new TypeError("operation.result.delivery is unsupported");
+		if (result.delivery !== undefined) {
+			const delivery = enumeration(result.delivery, Object.values(REVIEW_GATE_DELIVERY), "operation.result.delivery") as ReviewGateDelivery;
+			if (result.result !== "invalidated" || result.allowed !== false || result.action !== "repository-policy") throw new TypeError("operation.result unmanaged delivery must be a non-deciding invalidated result");
+			const context = exactRecord(result.context, "operation.result.context", ["gate"]);
+			nonempty(context.gate, "operation.result.context.gate");
+			if (delivery !== REVIEW_GATE_DELIVERY.UNMANAGED && delivery !== REVIEW_GATE_DELIVERY.DISABLED_UNMANAGED) throw new TypeError("operation.result.delivery is unsupported");
+		}
 	} else if (operation === REVIEW_INTEGRATION_OPERATION.BIND_SDD) {
 		result = exactRecord(body.result, "operation.result", ["schema", "revision", "change", "lineage", "authority_revision", "receipt_hash", "gate_context"]);
 		if (result.schema !== "gentle-ai.sdd-review-binding/v1") throw new TypeError("operation.result does not match review.bind_sdd");

@@ -129,8 +129,8 @@ Typical flow:
 1. **Install and inspect.** Install `gentle-pi`, open Pi in the target repository, then run `/gentle:status` or `/gentle:doctor`.
 2. **Plan when risk justifies it.** Small work stays direct; substantial work uses SDD with Engram, OpenSpec, or both so requirements and decisions survive compaction.
 3. **Build with evidence.** One focused writer implements the approved scope. When Strict TDD is available, apply and verify preserve RED → GREEN → TRIANGULATE → REFACTOR evidence.
-4. **Review one candidate.** Native START derives and freezes the Git candidate, risk tier, selected lenses, authored-line budget, and correction allowance. Review actors assess that immutable view; they do not grant authority.
-5. **Deliver the same candidate.** FINALIZE records native authority and an approved receipt. Commit, push, PR, and release gates validate that same receipt and live Git target with zero review actors; they never silently reopen review or reset its budget.
+4. **Use runtime-owned RDD when available.** Gentle AI supplies any runtime-specific review instructions; this package does not recreate a lifecycle in documentation or prompts.
+5. **Deliver through the applicable policy.** Follow the native instruction when one is supplied; otherwise follow ordinary repository policy without inventing a review route.
 
 > **Trust what the system can derive, not what an agent claims.** Agents analyze the candidate. The package-local Gentle AI runtime owns scope, risk, findings, receipts, and lifecycle gates. This protects against accidental scope and identity drift, not a malicious same-user process that can replace local code or authority. See Gentle AI's [review authority threat model](https://github.com/Gentleman-Programming/gentle-ai/blob/main/docs/review-authority-threat-model.md) and [Chapter 21 — Verifiable Trust](https://the-amazing-gentleman-programming-book.vercel.app/en/book/Chapter21_Verifiable-Trust).
 
@@ -154,19 +154,17 @@ The goal is not ceremony. The goal is to avoid accidental chaos. Once a task sto
 | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | Reading 4+ files to understand a flow                                                                                       | Launch `scout`, `context-builder`, or the closest read-only mapping subagent. |
 | Touching 2+ non-trivial code files                                                                                          | Delegate one writer; do not continue inline unless delegation is unavailable. |
-| Commit, push, or PR after code changes                                                                                      | Validate the approved receipt and exact typed target with zero actors.        |
-| Wrong cwd, worktree/git accident, merge recovery, confusing test/env issue                                                  | Stop, preserve the frozen scope, investigate separately, and validate the existing receipt; never launch a fresh review lens or reopen review as incident handling. |
+| Commit, push, or PR after code changes                                                                                      | Follow the loaded native instruction, or ordinary repository policy when none is supplied. |
+| Wrong cwd, worktree/git accident, merge recovery, confusing test/env issue                                                  | Stop, preserve the affected scope, and investigate separately before resuming. |
 | Long monolithic session with accumulating complexity, roughly 20 tool calls, 5 exploratory reads, or 2 non-mechanical edits | Pause and delegate the remaining work, or stop and explain the exact blocker. |
 
 The intended balanced loop for a bounded bugfix is:
 
 ```text
-parent git/status + clarify → bind ordinary snapshot/route → one worker writes authorized fixes → targeted proof validation when required → final verification
+parent git/status + clarify → one worker writes authorized fixes → focused verification → parent reports
 ```
 
-Review lenses are controller-selected transaction actors, not lifecycle hooks. `scout`/`context-builder` save parent context by compressing broad exploration. `worker` preserves a single writer thread. Commit, push, PR, and release validate receipts with zero actors.
-
-Review actors are dispatched only through parent `subagent_run` calls in `mode: "task"`. Before execution, the controller verifies every entry, content hash, mode, root, and index in one selected immutable candidate tree per requested lens, then appends one bounded controller-owned block containing only the Git-derived base-to-candidate changed scope. Readable scopes group paths by exact candidate mode and list deletions explicitly. Larger scopes use a canonical gzip/base64url manifest plus SHA-256; the read-only `gentle_review_scope` actor tool validates and paginates every changed path without traversing the ambient or full candidate tree. Oversized compressed transport, decompressed manifests, or response pages fail closed. Mixed batches, unselected/missing/stale views, user-supplied candidate-view text, unsafe paths, and non-task dispatches also fail closed; review actors retain no shell or mutation tools.
+`scout`/`context-builder` save parent context by compressing broad exploration. `worker` preserves a single writer thread. Any RDD-specific actor behavior belongs to the runtime instruction supplied by Gentle AI, not to this README.
 
 ### Review authority recovery and reset safety
 
@@ -186,7 +184,9 @@ Native ordinary gates revalidate provider-selected authority, receipt, scope, in
 
 This is the post-U8 boundary, not the final architecture. [Issue #191](https://github.com/Gentleman-Programming/gentle-pi/issues/191) is the immediate final unit in this same delivery: extract the remaining Pi command-projection and lifecycle-gate surface from `review-transaction.ts`, repoint runtime enforcement, then delete only dependencies proven unreachable without weakening graph-v1 Judgment Day. The branch-wide High-tier 4R runs after that extraction, before the single size-exception PR.
 
-`reviewer` is not an installed subagent name. It is a routing intent. Select the concrete lens by risk profile:
+### Review Lens Selection (architecture reference)
+
+`reviewer` is not an installed subagent name. It is historical routing vocabulary, not a static instruction. When a runtime-specific Gentle AI instruction applies, it alone determines whether any concrete lens is used:
 
 | Context | Review lens |
 | --- | --- |
@@ -196,11 +196,11 @@ This is the post-U8 boundary, not the final architecture. [Issue #191](https://g
 | Security, permissions, data exposure/loss, architecture, dependencies | `review-risk` |
 | Large PR, hot path, or >400 changed lines | Full 4R: `review-risk`, `review-resilience`, `review-readability`, `review-reliability` |
 
-Risk selection is deterministic: documentation/comment/formatting-only changes use zero lenses; every other standard change uses exactly one dominant-risk lens; security/auth/update/payment paths, data-loss or exposure risk, shell/process integration, or more than 400 authored changed lines use the full 4R set. A standard review never accumulates multiple lenses ad hoc.
+The former compact controller classified documentation/comment/formatting-only changes as zero-lens, standard changes as one dominant lens, and higher-risk paths as full 4R. This describes compatibility architecture only; never derive or run those choices from this README.
 
-### Bounded review transactions
+### Review authority architecture (reference only)
 
-New ordinary review uses compact `gentle_review` `start -> finalize -> validate`. This diagram shows the complete development-to-delivery path, including every ordinary review state and the fail-closed branches.
+Gentle AI dynamically supplies runtime-specific RDD instructions. `gentle-pi` does not define an RDD lifecycle, command route, approval path, recovery sequence, or fallback. The historical compact-controller material below documents architecture and compatibility boundaries only; it is not an operator instruction.
 
 ```mermaid
 flowchart TD
@@ -735,21 +735,22 @@ pnpm test:cross-lane --with-model   # adds the real Go-owned pi reviewer run (mo
 
 What it checks, against live scratch repositories:
 
-- a low-risk lifecycle from START to a `pre-commit` gate allow;
+- a low-risk lifecycle: START → native-approved FINALIZE → terminal burn; the `pre-commit` gate is informational and unmanaged, not an allow decision or retained receipt;
 - the medium-risk `consent/v3` granted round-trip through the direct decoder lane;
-- controller sequencing: at every step the client's decoded offered next step must equal the native transition, including that correction evidence is collected before targeted validation is ever offered, through a full correction lifecycle to an approved receipt;
-- the audited abandon end to end, asserting the adapter builds the exact nine-line `gentle-ai.review-abandon-authorization/v2` discarded-work binding and the native gate commits the quarantine record;
+- controller sequencing: each decoded offered next step equals the native transition; correction evidence precedes Go-owned targeted validation, then native approval and terminal burn leave no retained receipt;
+- the active audited abandon end to end, asserting the adapter builds the exact nine-line `gentle-ai.review-abandon-authorization/v2` discarded-work binding and the native gate commits the quarantine record;
+- after a scope change, a burned approved predecessor exposes no recoverable authority; recovered-successor hydration remains covered at unit level;
 - forward-decoder freshness: every live envelope captured from the binary must decode without unknown-key rejection, the early warning that gentle-ai main grew a field gentle-pi lacks;
-- with `--with-model`, one real locked-down `pi` reviewer run captured through the native transport.
+- the default no-model lane: 13 of 14 checks pass while the real-model check is intentionally skipped; Go-owned validation uses a deterministic scratch fake `pi`, and only `--with-model` runs the real locked-down reviewer with model spend.
 
 Prerequisites:
 
 - A real `gentle-ai` binary selected through the dev-binary override; there is no PATH or pinned-binary fallback, and the battery refuses to run without one. Either export `GENTLE_PI_GENTLE_AI_DEV_BINARY=<absolute path>` for the session, or register a persistent override with `/gentle:dev-binary <absolute path>` (stored at `~/.pi/gentle-ai/dev-binary.json` with schema `gentle-pi.dev-binary/v1`; the environment variable takes precedence over the registration, and the binary is re-validated and re-hashed on every resolution). Any real build works: an installed release binary or a locally built gentle-ai main.
 - A Git checkout or worktree of this repository. The battery is a contributor tool wired to the repository layout and is excluded from `pnpm test` and CI by construction; run it from the repo, not from an installed Pi package.
 
-The battery creates throwaway scratch repositories under the OS temp directory and never touches the enclosing repository. The default run spends no model tokens; `--with-model` launches one real reviewer model run and costs model spend.
+The battery owns one throwaway scratch root under the OS temp directory and never touches the enclosing repository. Before any review lifecycle it creates private `HOME`, XDG config/cache/data/state, temporary, and RDD state directories inside that root; it proves RDD starts `off/default`, explicitly opts in with sandbox-global RDD, and removes the complete root after the run. It never requires or changes the user's ambient RDD mode. The default run spends no model tokens; `--with-model` launches one real reviewer model run and costs model spend.
 
-It prints one PASS/FAIL/SKIP row per check plus a note, and exits non-zero when any check fails. Checks blocked by a known upstream class are reported with a `known-red` prefix instead of being hidden.
+It prints one PASS/FAIL/SKIP row per check plus a note, and exits non-zero when any check fails. A check blocked by a known upstream class is reported with a `known-red` prefix instead of being hidden; it remains a failure, not a success.
 
 Running this battery against new gentle-ai builds (release candidates or main) and reporting red checks is a valuable contribution. The sibling provider-side battery lives at `scripts/cross-lane-battery.sh` in [Gentleman-Programming/gentle-ai](https://github.com/Gentleman-Programming/gentle-ai).
 

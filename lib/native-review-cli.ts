@@ -9,6 +9,7 @@ import { GENTLE_AI_VERSION, PackageLocalGentleAiBinaryMissingError, gentleAiDevB
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "./review-relay-contract.ts";
 import {
 	REVIEW_INTEGRATION_CONTRACT,
+	REVIEW_GATE_DELIVERY,
 	decodeReviewCapabilitiesV2,
 	decodeReviewConsentV2,
 	decodeReviewConsentV3,
@@ -21,6 +22,7 @@ import {
 	type ReviewCapabilitiesV2,
 	type ReviewConsentEnvelope,
 	type ReviewFailureV2,
+	type ReviewGateDelivery,
 	type ReviewRepairV2,
 	type ReviewStartState,
 	type ReviewStatusV3,
@@ -183,6 +185,12 @@ export const NATIVE_REVIEW_MODE_SOURCE = {
 } as const;
 export type NativeReviewModeSource = (typeof NATIVE_REVIEW_MODE_SOURCE)[keyof typeof NATIVE_REVIEW_MODE_SOURCE];
 
+export const NATIVE_REVIEW_MODE_REACH = {
+	MACHINE: "machine",
+	THIS_BUILD: "this_build",
+} as const;
+export type NativeReviewModeReach = (typeof NATIVE_REVIEW_MODE_REACH)[keyof typeof NATIVE_REVIEW_MODE_REACH];
+
 export const NATIVE_REVIEW_MODE_SCOPE = {
 	GLOBAL: "global",
 	CLONE: "clone",
@@ -202,6 +210,7 @@ export interface NativeReviewModeStatus {
 	effective: "on" | "off";
 	source: NativeReviewModeSource;
 	revision?: string;
+	reach?: NativeReviewModeReach;
 }
 
 export interface NativeReviewModeResult {
@@ -452,8 +461,10 @@ export interface NativeReviewCaptureEvidenceRequest {
 // same discipline captureResult uses; identities are never reconstructed from
 // top-level status fields.
 export interface NativeReviewCaptureEvidenceSubmissionRequest {
-	/** Process working directory; forbidden when the tokens carry --repository-context (the context is cwd-independent). */
+	/** Provider CLI --cwd fallback when the rendered tokens carry no repository context. */
 	cwd?: string;
+	/** Process working directory only; never rendered into a repository-context-bound invocation. */
+	executionCwd?: string;
 	/** Provider-rendered submission argument tokens, verbatim, in provider order. */
 	argumentTokens: readonly string[];
 	/** Index of the token carrying the {{outcome}} substitution slot. */
@@ -481,7 +492,29 @@ export interface NativeReviewVerificationEvidenceV2 {
 	recordDigest: string;
 }
 
-export interface NativeStartRequest { cwd: string; baseRef?: string; committedOnly?: boolean; lineageId?: string; policyPath?: string; focus?: string; targetIdentity?: string; projection?: "workspace" | "staged"; signal?: AbortSignal; }
+export const NATIVE_UNTRACKED_SCOPE = {
+	EXCLUDE: "exclude",
+	SELECT: "select",
+} as const;
+export type NativeUntrackedScope = (typeof NATIVE_UNTRACKED_SCOPE)[keyof typeof NATIVE_UNTRACKED_SCOPE];
+
+interface NativeUntrackedSelectionRequest {
+	untrackedScope?: NativeUntrackedScope;
+	expectedUntrackedInventory?: string;
+	intendedUntracked?: readonly string[];
+}
+
+export interface NativeStartRequest extends NativeUntrackedSelectionRequest {
+	cwd: string;
+	baseRef?: string;
+	committedOnly?: boolean;
+	lineageId?: string;
+	policyPath?: string;
+	focus?: string;
+	targetIdentity?: string;
+	projection?: "workspace" | "staged";
+	signal?: AbortSignal;
+}
 export const NATIVE_REVIEW_CONSENT_ANSWER = { GRANTED: "granted", DECLINED: "declined" } as const;
 export type NativeReviewConsentAnswer = (typeof NATIVE_REVIEW_CONSENT_ANSWER)[keyof typeof NATIVE_REVIEW_CONSENT_ANSWER];
 export interface NativeReviewConsentAnswerRequest { cwd: string; consent: ReviewConsentEnvelope; answer: NativeReviewConsentAnswer; signal?: AbortSignal; }
@@ -546,7 +579,7 @@ export interface NativeBindSddRequest { cwd: string; change: string; lineage: st
 export interface NativeSddStatusRequest { cwd: string; change: string; signal?: AbortSignal; }
 export interface NativeReviewStatusRequest { cwd: string; signal?: AbortSignal; }
 export interface NativeCapabilitiesRequest { cwd?: string; signal?: AbortSignal; }
-export interface NativeTargetStatusRequest {
+export interface NativeTargetStatusRequest extends NativeUntrackedSelectionRequest {
 	cwd: string;
 	lineageId?: string;
 	baseRef?: string;
@@ -664,7 +697,7 @@ export interface NativeReviewStatusResult {
 export const NATIVE_START_ACTION = { CREATED: "created", RESUMED: "resumed", REUSE_RECEIPT: "reuse-receipt", BLOCKED_SCOPE_ACTION: "blocked-scope-action" } as const;
 export type NativeStartAction = (typeof NATIVE_START_ACTION)[keyof typeof NATIVE_START_ACTION];
 export interface NativeStartResult { lineageId: string; state: ReviewStartState; riskLevel: string; selectedLenses: readonly string[]; changedFiles: number; changedLines: number; correctionBudget: number; action: NativeStartAction; lensesRequired: boolean; riskReasons?: readonly Record<string, unknown>[]; raw?: Readonly<Record<string, unknown>>; riskEvidence?: readonly string[]; hint?: string; }
-export interface NativeValidateResult { allowed: boolean; result: "allow" | "scope-changed" | "invalidated" | "escalated"; action: string; reason: string; gateContext: NativeGateContext; delivery?: "disabled/unmanaged"; }
+export interface NativeValidateResult { allowed: boolean; result: "allow" | "scope-changed" | "invalidated" | "escalated"; action: string; reason: string; gateContext: NativeGateContext; delivery?: ReviewGateDelivery; }
 export interface NativeFinalizeResult { lineageId: string; state: string; action: string; storeRevision: string; receiptPath?: string; validationRequest?: Readonly<Record<string, unknown>>; escalation?: string; }
 export interface NativeBindSddResult {
 	revision: string;
@@ -684,6 +717,55 @@ export interface NativeSddStatusResult {
 
 export function isCanonicalProcessString(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+interface NativeUntrackedSelection {
+	untrackedScope?: NativeUntrackedScope;
+	expectedUntrackedInventory?: string;
+	intendedUntracked?: readonly string[];
+}
+
+function isNativeUntrackedPath(value: unknown): value is string {
+	return isCanonicalProcessString(value)
+		&& !posix.isAbsolute(value)
+		&& !win32.isAbsolute(value)
+		&& !value.includes("\\")
+		&& value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
+function nativeUntrackedSelection(request: NativeUntrackedSelectionRequest): NativeUntrackedSelection {
+	const { untrackedScope, expectedUntrackedInventory, intendedUntracked } = request;
+	const declared = untrackedScope !== undefined || expectedUntrackedInventory !== undefined || intendedUntracked !== undefined;
+	if (!declared) return {};
+	if (
+		(untrackedScope !== NATIVE_UNTRACKED_SCOPE.EXCLUDE && untrackedScope !== NATIVE_UNTRACKED_SCOPE.SELECT) ||
+		!isCanonicalProcessString(expectedUntrackedInventory) ||
+		(intendedUntracked !== undefined && (!Array.isArray(intendedUntracked) || intendedUntracked.some((path) => !isNativeUntrackedPath(path) || intendedUntracked.indexOf(path) !== intendedUntracked.lastIndexOf(path))))
+	) {
+		throw new TypeError("Native untracked selection must declare one scope, one inventory digest, and unique repository-relative paths");
+	}
+	if (untrackedScope === NATIVE_UNTRACKED_SCOPE.EXCLUDE && (intendedUntracked?.length ?? 0) > 0) {
+		throw new TypeError("Native exclude untracked selection cannot include paths");
+	}
+	if (untrackedScope === NATIVE_UNTRACKED_SCOPE.SELECT && (intendedUntracked?.length ?? 0) === 0) {
+		throw new TypeError("Native select untracked selection requires at least one path");
+	}
+	return {
+		untrackedScope,
+		expectedUntrackedInventory,
+		intendedUntracked: intendedUntracked === undefined ? undefined : [...intendedUntracked],
+	};
+}
+
+function nativeUntrackedSelectionArguments(selection: NativeUntrackedSelection): readonly string[] {
+	if (selection.untrackedScope === undefined) return [];
+	return [
+		`--untracked-scope=${selection.untrackedScope}`,
+		`--expected-untracked-inventory=${selection.expectedUntrackedInventory!}`,
+		...(selection.untrackedScope === NATIVE_UNTRACKED_SCOPE.SELECT
+			? selection.intendedUntracked!.map((path) => `--intended-untracked=${path}`)
+			: []),
+	];
 }
 
 const NATIVE_RISK_LEVEL = ["low", "medium", "high"] as const;
@@ -1123,6 +1205,12 @@ function decodeReleaseEvidence(value: unknown): void {
 	for (const field of ["release_tree", "configuration_hash", "generated_artifact_hash", "provenance_hash", "publication_boundary_hash", "evidence_freshness_hash"]) requiredString(release[field]);
 	if (release.publication_state !== "sealed" || release.evidence_freshness_state !== "current") throw new Error("invalid release evidence");
 }
+function decodeNonDecidingGateContext(value: unknown, expectedGate: string): NativeGateContext {
+	const context = exactObject(value, ["gate"]);
+	const gate = enumString(context.gate, NATIVE_GATE);
+	if (gate !== expectedGate) throw new Error("native non-deciding gate context does not match the requested gate");
+	return { lineageId: "", storeRevision: "", raw: context };
+}
 function decodeGateContext(value: unknown): NativeGateContext {
 	const context = exactObject(
 		value,
@@ -1215,7 +1303,7 @@ function decodeNativeReviewStatusDiagnostic(value: unknown): NativeReviewAuthori
 	return { path: requiredString(diagnostic.path), problem: requiredString(diagnostic.problem) };
 }
 function decodeNativeReviewModeStatus(value: unknown): NativeReviewModeStatus {
-	const status = exactObject(value, ["schema", "global", "clone_local", "effective", "source"], ["revision"]);
+	const status = exactObject(value, ["schema", "global", "clone_local", "effective", "source"], ["revision", "reach"]);
 	if (status.schema !== "gentle-ai.rdd-mode-status/v1") throw new Error("wrong review mode status schema");
 	return {
 		global: enumString(status.global, Object.values(NATIVE_REVIEW_MODE_VALUE)) as NativeReviewModeValue,
@@ -1223,6 +1311,7 @@ function decodeNativeReviewModeStatus(value: unknown): NativeReviewModeStatus {
 		effective: enumString(status.effective, ["on", "off"]) as "on" | "off",
 		source: enumString(status.source, Object.values(NATIVE_REVIEW_MODE_SOURCE)) as NativeReviewModeSource,
 		...(status.revision === undefined ? {} : { revision: requiredString(status.revision) }),
+		...(status.reach === undefined ? {} : { reach: enumString(status.reach, Object.values(NATIVE_REVIEW_MODE_REACH)) as NativeReviewModeReach }),
 	};
 }
 
@@ -2278,26 +2367,34 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		if (request.baseRef !== undefined && request.committedOnly !== true) throw new TypeError("Native START baseRef requires explicit committedOnly acknowledgement");
 		if (request.baseRef === undefined && request.committedOnly !== undefined) throw new TypeError("Native START committedOnly requires an explicit baseRef");
 		if (request.targetIdentity !== undefined && !/^sha256:[0-9a-f]{64}$/.test(request.targetIdentity)) throw new TypeError("Native START targetIdentity must be a canonical sha256 identity");
-		// The controller supplies the target it already projected from the
-		// authority workspace after proving its immutable actor view is identical.
-		// Direct adapter callers may omit it and retain the same-root projection.
+		// STATUS owns the candidate binding and renders the only executable START
+		// vector. Callers may supply a previously observed identity only to detect
+		// drift; Pi never rebuilds that vector from request fields.
 		const projection = request.projection ?? "workspace";
-		const targetIdentity = request.targetIdentity ?? (await this.targetStatus({
+		const selection = nativeUntrackedSelection(request);
+		const status = await this.targetStatus({
 			cwd: request.cwd,
 			projection,
 			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef }),
 			...(request.lineageId === undefined ? {} : { lineageId: request.lineageId }),
+			...selection,
+			agent: "pi",
 			...(request.signal === undefined ? {} : { signal: request.signal }),
-		})).targetIdentity;
-		const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.START, request.cwd, [
-			"review", "start", "--contract", REVIEW_INTEGRATION_CONTRACT, "--cwd", request.cwd,
-			"--target", targetIdentity, "--projection", projection,
-			...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef, "--committed-only"]),
-			...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
-			...(request.policyPath === undefined ? [] : ["--policy", request.policyPath]),
-			...(request.focus === undefined ? [] : ["--focus", request.focus]),
-			"--consent", "relay",
-		], true, request.signal);
+		});
+		const transition = status.nextTransition?.kind === "execute" && status.nextTransition.execute?.operation === "review.start"
+			? status.nextTransition.execute
+			: undefined;
+		if (transition === undefined) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.START, false, "native STATUS did not offer an executable review.start transition", undefined, false);
+		if (status.projection.projection !== projection || transition.binding.targetIdentity !== status.targetIdentity || (request.targetIdentity !== undefined && request.targetIdentity !== status.targetIdentity)) {
+			throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, false, "native START transition target binding mismatch", undefined, false);
+		}
+		if (request.lineageId !== undefined && transition.binding.lineageId !== undefined && transition.binding.lineageId !== request.lineageId) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, false, "native START transition lineage binding mismatch", undefined, false);
+		const transitionTokens = transition.arguments.map((argument) => {
+			if (argument.token === undefined) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.START, false, "native START transition omitted an ordered argument token", undefined, false);
+			return argument.token;
+		});
+		const targetIdentity = status.targetIdentity;
+		const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.START, request.cwd, ["review", "start", ...transitionTokens], true, request.signal);
 		// A negotiated v2 START may answer a consent question (action:
 		// "consent_required") instead of `start/v3` when the provider needs an
 		// explicit answer it cannot infer. Discriminate before decode and surface
@@ -2310,7 +2407,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 			const consent = decode(NATIVE_REVIEW_OPERATION.START, true, () => (
 				execution.body.schema === "gentle-ai.review-integration.consent/v2"
 					? decodeReviewConsentV2(execution.body)
-					: decodeReviewConsentV3(execution.body)
+					: decodeReviewConsentV3(execution.body, "pi")
 			));
 			if (consent.targetIdentity !== targetIdentity || consent.projection !== projection) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.START, true, "native consent target binding mismatch");
 			throw new NativeReviewConsentRequiredError(consent);
@@ -2447,14 +2544,17 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		const envelope = decode(NATIVE_REVIEW_OPERATION.VALIDATE, false, () => decodeReviewOperationV2(execution.body));
 		if (envelope.operation !== "review.validate") throw new Error("wrong validate operation envelope");
 		const body = envelope.result;
-		const gateContext = decodeGateContext(body.context);
+		const delivery = body.delivery === undefined ? undefined : enumString(body.delivery, Object.values(REVIEW_GATE_DELIVERY)) as ReviewGateDelivery;
+		const nonDeciding = delivery === REVIEW_GATE_DELIVERY.UNMANAGED || delivery === REVIEW_GATE_DELIVERY.DISABLED_UNMANAGED;
+		if (nonDeciding && (body.allowed !== false || body.result !== "invalidated" || body.action !== "repository-policy")) throw nativeError(NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE, NATIVE_REVIEW_OPERATION.VALIDATE, false, "native unmanaged delivery fabricated review authority", undefined, false);
+		const gateContext = nonDeciding ? decodeNonDecidingGateContext(body.context, request.gate) : decodeGateContext(body.context);
 		return {
 			allowed: booleanValue(body.allowed),
 			result: enumString(body.result, NATIVE_GATE_RESULT) as NativeValidateResult["result"],
 			action: requiredString(body.action),
 			reason: requiredString(body.reason),
 			gateContext,
-			...(body.delivery === undefined ? {} : { delivery: enumString(body.delivery, ["disabled/unmanaged"]) as NativeValidateResult["delivery"] }),
+			...(delivery === undefined ? {} : { delivery }),
 		};
 	}
 
@@ -2482,9 +2582,11 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 	}
 
 	async targetStatus(request: NativeTargetStatusRequest): Promise<ReviewStatusV3> {
+		const selection = nativeUntrackedSelection(request);
 		const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.STATUS, request.cwd, [
 			"review", "status", "--contract", REVIEW_INTEGRATION_CONTRACT, "--cwd", request.cwd,
 			"--projection", request.projection ?? "workspace",
+			...nativeUntrackedSelectionArguments(selection),
 			...(request.baseRef === undefined ? [] : ["--base-ref", request.baseRef]),
 			...(request.lineageId === undefined ? [] : ["--lineage", request.lineageId]),
 			...(request.agent === undefined ? [] : ["--agent", request.agent]),
@@ -2705,6 +2807,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		if (inputToken === undefined || !inputToken.includes("{{input}}")) throw new TypeError("Native CAPTURE_EVIDENCE submission must render exactly one {{input}} slot token");
 		const carriesContext = request.argumentTokens.some((token) => token === "--repository-context" || token.startsWith("--repository-context="));
 		if (carriesContext && request.cwd !== undefined) throw new TypeError("Native CAPTURE_EVIDENCE submission takes a repository context or --cwd, never both");
+		const executionCwd = request.executionCwd ?? request.cwd ?? process.cwd();
 		const directory = await mkdtemp(join(tmpdir(), "gentle-ai-capture-evidence-"));
 		try {
 			await chmod(directory, 0o700);
@@ -2715,7 +2818,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 					: index === request.inputSubstitutionLocation
 						? token.replaceAll("{{input}}", evidenceFile)
 						: token);
-			const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, request.cwd ?? process.cwd(), [
+			const execution = await this.negotiated(NATIVE_REVIEW_OPERATION.CAPTURE_EVIDENCE, executionCwd, [
 				"review", "capture-evidence",
 				...resolved,
 				...(carriesContext || request.cwd === undefined ? [] : ["--cwd", request.cwd]),

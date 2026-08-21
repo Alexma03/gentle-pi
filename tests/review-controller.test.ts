@@ -466,7 +466,7 @@ test("failed START gives exact mode and serialization guidance and creates no li
 });
 
 
-test("shipped controller and orchestrator contracts specify inspect-first compact facade without cascade", () => {
+test("shipped controller fails closed while static prompts defer RDD lifecycle ownership to Gentle AI", () => {
 	const { controller } = registerRuntime();
 	const toolContract = [
 		controller.description,
@@ -474,31 +474,21 @@ test("shipped controller and orchestrator contracts specify inspect-first compac
 		...(controller.promptGuidelines ?? []),
 		JSON.stringify(controller.parameters),
 	].join("\n");
-	assert.match(toolContract, /operation.*start.*finalize.*validate.*input/is);
-	assert.match(toolContract, /mode\\?":\\?"ordinary|mode.*ordinary/is);
-	assert.match(toolContract, /ordinary.*Judgment Day/is);
-	assert.match(toolContract, /JSON(?:-serialized object)? string/is);
-	assert.match(toolContract, /blocked-legacy.*explicit.*authorization/is);
-	assert.match(toolContract, /RESET.*reclaim.*RECOVER.*recover/s);
+
 	assert.match(toolContract, /native-input-required.*never.*invent/is);
 	assert.match(toolContract, /output.*lost|response.*lost|ambiguous.*START/is);
 	assert.match(toolContract, /ambiguous START, answer-consent, or FINALIZE.*target-scoped native status.*declared action/is);
 	assert.doesNotMatch(toolContract, /START throws.*lineage does not exist/is);
 
+	const boundary = "Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.";
+	const core = readFileSync("assets/orchestrator.md", "utf8");
+	assert.match(core, new RegExp(boundary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
 	for (const path of ["assets/orchestrator-delegation.md", "skills/gentle-ai/SKILL.md"]) {
 		const contract = readFileSync(path, "utf8");
-		assert.match(contract, /INSPECT before START|inspect.*before.*start/is, path);
-		assert.match(contract, /mode `ordinary`|mode.*ordinary|ordinary review/is, path);
-		assert.match(contract, /Judgment Day.*explicit/is, path);
-		assert.match(contract, /before authority access.*no lineage|pre-authority.*no lineage/is, path);
-		assert.match(contract, /unknown.*target-scoped status.*before any retry|unknown.*immediately calls target-scoped status/is, path);
-		assert.match(contract, /exact_replay_safe/is, path);
+		assert.doesNotMatch(contract, /INSPECT before START|start -> finalize -> validate|next_transition|review\.capture-result/is, path);
 	}
-	for (const path of ["assets/orchestrator-delegation.md", "skills/gentle-ai/SKILL.md"]) {
-		const recoveryContract = readFileSync(path, "utf8");
-		assert.match(recoveryContract, /blocked-legacy.*explicit.*authoriz/is, path);
-		assert.match(recoveryContract, /RESET.*RECOVER.*native.*(reclaim|recover)/is, path);
-	}
+	assert.match(readFileSync("skills/gentle-ai/SKILL.md", "utf8"), /sole lifecycle authority/i);
 });
 
 

@@ -54,12 +54,8 @@ test("agent discovery skips skills directories", async (t) => {
 	);
 });
 
-test("runtime guidance routes review intent to concrete lenses", () => {
-	const guidedFiles = [
-		"README.md",
-		"assets/orchestrator.md",
-		"skills/gentle-ai/SKILL.md",
-	];
+test("runtime guidance keeps review policy out of the static orchestrator", () => {
+	const staticReferences = ["README.md", "skills/gentle-ai/SKILL.md"];
 	const forbiddenGenericRoutes = [
 		/fresh-context `reviewer`/,
 		/fresh reviewer audits/,
@@ -67,15 +63,8 @@ test("runtime guidance routes review intent to concrete lenses", () => {
 		/run a fresh-context `reviewer`/,
 	];
 
-	for (const file of guidedFiles) {
-		// orchestrator-lazy-diet: the 4R/Review Lens content is split between the
-		// always-on core and `assets/orchestrator-delegation.md`. Only this one
-		// loop entry is repointed to the core+delegation-ref union; README.md and
-		// skills/gentle-ai/SKILL.md are unchanged single-file reads.
-		const content =
-			file === "assets/orchestrator.md"
-				? readFileSync(file, "utf8") + readFileSync("assets/orchestrator-delegation.md", "utf8")
-				: readFileSync(file, "utf8");
+	for (const file of staticReferences) {
+		const content = readFileSync(file, "utf8");
 		assert.match(content, /Review Lens Selection|review lens/);
 		assert.match(content, /review-risk/);
 		assert.match(content, /review-reliability/);
@@ -84,6 +73,14 @@ test("runtime guidance routes review intent to concrete lenses", () => {
 		for (const forbidden of forbiddenGenericRoutes) {
 			assert.doesNotMatch(content, forbidden, `${file} must not route to generic reviewer`);
 		}
+	}
+
+	const orchestrator = readFileSync("assets/orchestrator.md", "utf8")
+		+ readFileSync("assets/orchestrator-delegation.md", "utf8");
+	assert.match(orchestrator, /Gentle AI dynamically supplies runtime-specific RDD instructions/);
+	assert.match(orchestrator, /this package does not invent or fall back/);
+	for (const lifecycleMarker of ["review-risk", "review-reliability", "review-resilience", "review-readability", "Authority-First Terminal Procedure", "reconcile-terminal-mirrors"]) {
+		assert.doesNotMatch(orchestrator, new RegExp(lifecycleMarker), `static orchestrator must not mirror ${lifecycleMarker}`);
 	}
 });
 

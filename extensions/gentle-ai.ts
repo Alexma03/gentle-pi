@@ -2542,7 +2542,7 @@ const REVIEW_CONTROLLER_PARAMETERS = {
 		lineageIds: { type: "string", description: "Retired with legacy bundle export; ignored. Export returns legacy-operation-retired." },
 		workspaceRoot: {
 			type: "string",
-			description: "Optional absolute Git worktree root that owns this review (for example the SDD apply worktree). It must be an existing worktree root sharing the session repository's Git common directory; validation fails closed otherwise. Absent, the session cwd is used unchanged.",
+			description: "Optional explicit user-authorized absolute path inside the Git worktree that owns this review. It must resolve to an existing Git worktree; nested paths are canonicalized to that worktree root. Pi never invents this selector. Absent, the session cwd is used unless one unambiguous lineage binding already identifies its target root.",
 		},
 	},
 } as const;
@@ -4237,14 +4237,11 @@ const REVIEW_MODE_DISABLED_OUTCOME = "review-mode-disabled";
 // source that actually decided, so the operator is not left to work out which
 // of the two independent sources they have to change.
 //
-// The clone-local branch names Pi's own command because that is exactly what
-// it sets. The global branch must NOT: `/gentle:review-mode` always passes
-// `--scope clone` (Design Decision #7 — Pi never mutates the operator's global
-// gentle-ai state), and gentle-ai's cloneLocalRDDOverrideValue maps "on" onto
-// "inherit" because a clone-local override may only ever disable. So a
-// clone-scope enable against a global off exits 0, reports operation "enable",
-// and changes nothing — ground-truthed against a real build. Naming it here
-// would be naming a dead end, which is worse than naming nothing.
+// A clone-local override can only disable. Pi's explicit clone-scope enable
+// clears that override, but cannot enable global RDD: when global is still
+// unset or off, clearing it leaves the effective mode off. Tell the operator
+// to make the global opt-in first when needed, then clear this clone override.
+// Pi never mutates the operator's global gentle-ai state automatically.
 //
 // The default branch changed with the pinned v2.4.0 runtime, which made
 // receipt-driven development opt-in. It used to be unreachable as a reason for
@@ -4258,9 +4255,9 @@ const REVIEW_MODE_DISABLED_OUTCOME = "review-mode-disabled";
 // same. Leaving this undefined would hand the single most common state a dead
 // end.
 function reviewModeContinuation(source: NativeReviewModeSource): string | undefined {
-	if (source === NATIVE_REVIEW_MODE_SOURCE.CLONE_LOCAL) return "Run /gentle:review-mode enable to turn reviews back on for this clone.";
+	if (source === NATIVE_REVIEW_MODE_SOURCE.CLONE_LOCAL) return "Run `gentle-ai review mode enable --scope=global` if global RDD is still off, then run /gentle:review-mode enable to clear this clone-local override.";
 	if (source === NATIVE_REVIEW_MODE_SOURCE.GLOBAL) return "Run `gentle-ai review mode enable --scope=global` to turn reviews back on; /gentle:review-mode enable only clears the clone-local setting, which cannot override a global off.";
-	return "Run `gentle-ai review mode enable --scope=global` to turn reviews on; receipt-driven development is opt-in and nothing here has enabled it yet. /gentle:review-mode enable only sets clone scope, which can never turn reviews on.";
+	return "Run `gentle-ai review mode enable --scope=global` to opt in; RDD is off by default until explicitly enabled. /gentle:review-mode enable only clears a clone-local override and cannot enable global RDD.";
 }
 
 // Names the situation before the mechanism, then the mechanism, mirroring
@@ -4621,7 +4618,7 @@ function requiredStatusActionText(lineageId?: string): string {
 	return `Run target-scoped review.status${lineageId === undefined ? "" : ` for lineage ${lineageId}`} and follow only its declared action; never start a new review, create a new budget, launch a lens, or fall back to inventory discovery.`;
 }
 
-function reconcileFinalizeRouting(status: ReviewStatusV3, requestedLineageId?: string, countRerunAttempt = false): Record<string, unknown> {
+function reconcileFinalizeRouting(status: ReviewStatusV3, requestedLineageId?: string, countRerunAttempt = false, workspaceRoot?: string): Record<string, unknown> {
 	const lineageId = status.authority?.lineageId;
 	const base = { provider_action: "reconcile_finalize", replayability: status.replayability, reconciliation_required: true };
 	if (status.applicability !== "current_target" || lineageId === undefined || (requestedLineageId !== undefined && lineageId !== requestedLineageId)) {
@@ -4633,7 +4630,8 @@ function reconcileFinalizeRouting(status: ReviewStatusV3, requestedLineageId?: s
 			required_status_action: `Finalize reconciliation reported authority${lineageId === undefined ? " without a current-target lineage" : ` for lineage ${lineageId}`}${requestedLineageId === undefined ? "" : ` while lineage ${requestedLineageId} was requested`}; stop and obtain explicit maintainer action. Never rerun finalize for a foreign lineage, start a new review, create a new budget, launch a lens, or fall back to inventory discovery.`,
 		};
 	}
-	const attempts = reconcileFinalizeRerunAttemptsByLineage.get(lineageId) ?? 0;
+	const storageKey = workspaceRoot === undefined ? lineageId : reviewLifecycleStorageKey(workspaceRoot, lineageId);
+	const attempts = reconcileFinalizeRerunAttemptsByLineage.get(storageKey) ?? 0;
 	if (attempts >= RECONCILE_FINALIZE_RERUN_LIMIT) {
 		return {
 			...base,
@@ -4642,7 +4640,7 @@ function reconcileFinalizeRouting(status: ReviewStatusV3, requestedLineageId?: s
 			required_status_action: `Finalize reconciliation for lineage ${lineageId} was already directed ${RECONCILE_FINALIZE_RERUN_LIMIT} times without reaching terminal authority; stop and obtain explicit maintainer action instead of another rerun. Never start a new review, create a new budget, launch a lens, or fall back to inventory discovery.`,
 		};
 	}
-	if (countRerunAttempt) reconcileFinalizeRerunAttemptsByLineage.set(lineageId, attempts + 1);
+	if (countRerunAttempt) reconcileFinalizeRerunAttemptsByLineage.set(storageKey, attempts + 1);
 	return {
 		...base,
 		lineage_id: lineageId,
@@ -4651,9 +4649,15 @@ function reconcileFinalizeRouting(status: ReviewStatusV3, requestedLineageId?: s
 	};
 }
 
-function mapNativeTargetStatus(operation: ReviewControllerOperation, status: ReviewStatusV3, requestedLineageId?: string): Record<string, unknown> {
+function mapNativeTargetStatus(operation: ReviewControllerOperation, status: ReviewStatusV3, requestedLineageId?: string, workspaceRoot?: string): Record<string, unknown> {
+	if (
+		status.nextTransition?.kind === "collect" &&
+		(operation === REVIEW_CONTROLLER_OPERATION.START || operation === REVIEW_CONTROLLER_OPERATION.INSPECT || operation === REVIEW_CONTROLLER_OPERATION.STATUS)
+	) {
+		return { operation, status: "blocked", result: status.raw };
+	}
 	if (status.action === "reconcile_finalize") {
-		const routing = reconcileFinalizeRouting(status, requestedLineageId);
+		const routing = reconcileFinalizeRouting(status, requestedLineageId, false, workspaceRoot);
 		return {
 			operation,
 			status: routing.next_action === RECONCILE_FINALIZE_NEXT_ACTION ? "in-progress" : "blocked",
@@ -4755,7 +4759,7 @@ function assertFrozenPreCommitProjection(
 	lineageId: string,
 	candidateViews: CandidateViewRegistry | null,
 ): string | undefined {
-	if (derived.command.event !== "pre-commit" || candidateViews === null || !candidateViews.hasProjection(lineageId)) return undefined;
+	if (derived.command.event !== "pre-commit" || candidateViews === null || !candidateViews.hasProjection(lineageId, derived.command.cwd)) return undefined;
 	const projection = candidateViews.resolveProjection(lineageId, derived.command.cwd);
 	if (derived.actualIntendedCommitTree !== projection.candidateTree) {
 		throw new CandidateViewError("staged commit tree does not exactly match the frozen reviewed candidate projection");
@@ -4967,6 +4971,53 @@ function isNativeStartFocus(value: unknown): value is NativeStartFocus {
 	return typeof value === "string" && (Object.values(NATIVE_START_FOCUS) as readonly string[]).includes(value);
 }
 
+const NATIVE_START_UNTRACKED_SCOPE = {
+	EXCLUDE: "exclude",
+	SELECT: "select",
+} as const;
+type NativeStartUntrackedScope = (typeof NATIVE_START_UNTRACKED_SCOPE)[keyof typeof NATIVE_START_UNTRACKED_SCOPE];
+
+interface NativeStartUntrackedSelection {
+	untrackedScope?: NativeStartUntrackedScope;
+	expectedUntrackedInventory?: string;
+	intendedUntracked?: readonly string[];
+	reason?: string;
+}
+
+interface RetainedNativeUntrackedSelection {
+	readonly untrackedScope: NativeStartUntrackedScope;
+	readonly expectedUntrackedInventory: string;
+	readonly intendedUntracked: readonly string[];
+}
+
+function isNativeStartUntrackedPath(value: unknown): value is string {
+	return isCanonicalProcessString(value)
+		&& !isAbsolute(value)
+		&& !/^[A-Za-z]:\//.test(value)
+		&& !value.includes("\\")
+		&& value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
+function validateNativeStartUntrackedSelection(value: Record<string, unknown>): NativeStartUntrackedSelection {
+	const declared = "untrackedScope" in value || "expectedUntrackedInventory" in value || "intendedUntracked" in value;
+	if (!declared) return {};
+	const scope = value.untrackedScope;
+	const expectedUntrackedInventory = value.expectedUntrackedInventory;
+	const intendedUntracked = value.intendedUntracked;
+	if (
+		(scope !== NATIVE_START_UNTRACKED_SCOPE.EXCLUDE && scope !== NATIVE_START_UNTRACKED_SCOPE.SELECT) ||
+		!isCanonicalProcessString(expectedUntrackedInventory) ||
+		(intendedUntracked !== undefined && (!Array.isArray(intendedUntracked) || intendedUntracked.some((path) => !isNativeStartUntrackedPath(path) || intendedUntracked.indexOf(path) !== intendedUntracked.lastIndexOf(path))))
+	) return { reason: "untracked-selection-invalid" };
+	if (scope === NATIVE_START_UNTRACKED_SCOPE.EXCLUDE && (intendedUntracked?.length ?? 0) > 0) return { reason: "untracked-selection-invalid" };
+	if (scope === NATIVE_START_UNTRACKED_SCOPE.SELECT && (intendedUntracked?.length ?? 0) === 0) return { reason: "untracked-selection-invalid" };
+	return {
+		untrackedScope: scope,
+		expectedUntrackedInventory,
+		intendedUntracked: intendedUntracked === undefined ? [] : [...intendedUntracked],
+	};
+}
+
 function nativeStartRejection(reason: string, field?: string): Record<string, unknown> {
 	return {
 		operation: REVIEW_CONTROLLER_OPERATION.START,
@@ -4983,7 +5034,7 @@ function nativeStartRejection(reason: string, field?: string): Record<string, un
 							? "native-start-committed-only-required"
 							: reason === "committed-only-invalid"
 								? "native-start-committed-only-invalid"
-								: reason === "unknown-field" || reason === "focus-invalid"
+								: reason === "unknown-field" || reason === "focus-invalid" || reason === "untracked-selection-invalid"
 									? "native-start-input-invalid"
 									: "native-start-policy-path-invalid",
 		reason,
@@ -4992,32 +5043,98 @@ function nativeStartRejection(reason: string, field?: string): Record<string, un
 	};
 }
 
+function nativeStatusInputRejection(reason: string, field?: string): Record<string, unknown> {
+	return {
+		operation: REVIEW_CONTROLLER_OPERATION.STATUS,
+		status: "blocked",
+		outcome: "native-status-input-invalid",
+		reason,
+		...(field === undefined ? {} : { field }),
+		mutation_performed: false,
+		mutation_outcome: "none",
+	};
+}
+
 const PENDING_REVIEW_CONSENT_TTL_MS = 10 * 60 * 1000;
+
+type PendingReviewConsentSessionKey = string | symbol;
 
 interface PendingReviewConsent {
 	id: string;
 	repositoryCwd: string;
 	authorityCwd: string;
 	candidateView: CandidateView;
+	candidateViews: CandidateViewRegistry | null;
+	verifyCandidate: () => void;
+	cleanupCandidate: () => void;
+	untrackedSelection?: RetainedNativeUntrackedSelection;
 	consent: ReviewConsentEnvelope;
 	consentDigest: string;
 	expiresAt: number;
 	expiry?: ReturnType<typeof setTimeout>;
 }
 
-function consumePendingReviewConsent(pending: PendingReviewConsent, pendingReviewConsents: Map<string, PendingReviewConsent>): void {
+/**
+ * Process-memory-only pending consent partitions. A loaded extension module
+ * shares this registry across registrations, while exact Pi session IDs remain
+ * the only continuity boundary. It intentionally has no persistence surface.
+ */
+export class PendingReviewConsentRegistry {
+	private readonly sessions = new Map<PendingReviewConsentSessionKey, Map<string, PendingReviewConsent>>();
+
+	get(sessionKey: PendingReviewConsentSessionKey): Map<string, PendingReviewConsent> | undefined {
+		return this.sessions.get(sessionKey);
+	}
+
+	ensure(sessionKey: PendingReviewConsentSessionKey): Map<string, PendingReviewConsent> {
+		let pending = this.sessions.get(sessionKey);
+		if (pending === undefined) {
+			pending = new Map<string, PendingReviewConsent>();
+			this.sessions.set(sessionKey, pending);
+		}
+		return pending;
+	}
+
+	consume(sessionKey: PendingReviewConsentSessionKey, pending: PendingReviewConsent): void {
+		const session = this.sessions.get(sessionKey);
+		if (session?.get(pending.id) !== pending) return;
+		session.delete(pending.id);
+		if (session.size === 0) this.sessions.delete(sessionKey);
+	}
+
+	take(sessionKey: PendingReviewConsentSessionKey): PendingReviewConsent[] {
+		const session = this.sessions.get(sessionKey);
+		if (session === undefined) return [];
+		this.sessions.delete(sessionKey);
+		return [...session.values()];
+	}
+}
+
+const processPendingReviewConsentRegistry = new PendingReviewConsentRegistry();
+const processRetainedUntrackedSelections = new Map<PendingReviewConsentSessionKey, Map<string, RetainedNativeUntrackedSelection>>();
+
+function pendingReviewConsentSessionKey(context: ExtensionContext | undefined, fallbackKey: symbol): PendingReviewConsentSessionKey {
+	try {
+		const sessionManager = (context as unknown as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager;
+		const sessionId = sessionManager?.getSessionId?.();
+		if (typeof sessionId === "string") return sessionId;
+	} catch { /* Minimal or test contexts use the registration-local fallback. */ }
+	return fallbackKey;
+}
+
+function consumePendingReviewConsent(pending: PendingReviewConsent, registry: PendingReviewConsentRegistry, sessionKey: PendingReviewConsentSessionKey): void {
 	if (pending.expiry !== undefined) clearTimeout(pending.expiry);
 	pending.expiry = undefined;
-	if (pendingReviewConsents.get(pending.id) === pending) pendingReviewConsents.delete(pending.id);
+	registry.consume(sessionKey, pending);
 }
 
-function cleanupPendingReviewConsent(pending: PendingReviewConsent, pendingReviewConsents: Map<string, PendingReviewConsent>, candidateViews: CandidateViewRegistry | null): void {
-	consumePendingReviewConsent(pending, pendingReviewConsents);
-	if (![...pendingReviewConsents.values()].some((current) => current.candidateView.token === pending.candidateView.token)) candidateViews?.cleanup(pending.candidateView.token);
+function cleanupPendingReviewConsent(pending: PendingReviewConsent, registry: PendingReviewConsentRegistry, sessionKey: PendingReviewConsentSessionKey): void {
+	consumePendingReviewConsent(pending, registry, sessionKey);
+	pending.cleanupCandidate();
 }
 
-function cleanupAllPendingReviewConsents(pendingReviewConsents: Map<string, PendingReviewConsent>, candidateViews: CandidateViewRegistry | null): void {
-	for (const pending of [...pendingReviewConsents.values()]) cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews);
+function cleanupAllPendingReviewConsents(registry: PendingReviewConsentRegistry, sessionKey: PendingReviewConsentSessionKey): void {
+	for (const pending of registry.take(sessionKey)) cleanupPendingReviewConsent(pending, registry, sessionKey);
 }
 
 // An unused consent binding and the candidate view retained exclusively for
@@ -5028,9 +5145,11 @@ function cleanupAllPendingReviewConsents(pendingReviewConsents: Map<string, Pend
 // later START may reuse the retained view) keeps timer order from deciding
 // correctness: a fresh candidate retry never reuses a view whose binding
 // already expired, so it cannot trip `candidate-target-projection-drift`.
-function pruneExpiredReviewConsents(pendingReviewConsents: Map<string, PendingReviewConsent>, candidateViews: CandidateViewRegistry | null, now: () => number): void {
+function pruneExpiredReviewConsents(registry: PendingReviewConsentRegistry, sessionKey: PendingReviewConsentSessionKey, now: () => number): void {
+	const pendingReviewConsents = registry.get(sessionKey);
+	if (pendingReviewConsents === undefined) return;
 	for (const pending of [...pendingReviewConsents.values()]) {
-		if (pending.expiresAt <= now()) cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews);
+		if (pending.expiresAt <= now()) cleanupPendingReviewConsent(pending, registry, sessionKey);
 	}
 }
 
@@ -5045,7 +5164,8 @@ function assertNativeStartCandidateBinding(candidateView: CandidateView, target:
 		target.projection.baseTree !== candidateView.baseTree ||
 		target.projection.initialReviewTree !== candidateView.candidateTree ||
 		target.projection.currentCandidateTree !== candidateView.candidateTree ||
-		JSON.stringify([...target.projection.paths].sort()) !== JSON.stringify([...candidateView.paths].sort())
+		JSON.stringify([...target.projection.paths].sort()) !== JSON.stringify([...candidateView.paths].sort()) ||
+		(candidateView.intendedUntracked !== undefined && JSON.stringify([...target.projection.intendedUntracked].sort()) !== JSON.stringify([...candidateView.intendedUntracked].sort()))
 	) {
 		throw new CandidateViewError("native START workspace target does not match the immutable reviewer candidate view", "candidate-target-projection-drift");
 	}
@@ -5072,7 +5192,7 @@ function completeNativeStart(
 	if (candidateView === undefined) return { operation, result: mapNativeStartResult(result), workspace_root: workspaceRoot };
 	if (candidateViews && result.lensesRequired) {
 		const binding = { token: candidateView.token, lineageId: result.lineageId, selectedLenses: result.selectedLenses };
-		if (result.action === "resumed" && !candidateViews.hasCurrentBinding()) candidateViews.restoreCurrentFromNativeStart(binding);
+		if (result.action === "resumed" && !candidateViews.hasCurrentBinding(candidateView.contributorRoot)) candidateViews.restoreCurrentFromNativeStart(binding);
 		else candidateViews.bindCurrent(binding);
 	} else if (candidateViews && ((result.action === "created" && result.state === "reviewing") || result.action === "resumed" || result.action === "reuse-receipt")) candidateViews.retain(candidateView.token, result.lineageId);
 	else candidateViews?.cleanup(candidateView.token);
@@ -5175,8 +5295,9 @@ async function reconcileNativeMutationFailure(
 	operation: ReviewControllerOperation,
 	error: unknown,
 	nativeReviewCli: NativeReviewCli,
-	target: { cwd: string; lineageId?: string; baseRef?: string; projection?: "workspace" | "staged" },
+	target: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0],
 	preOperationRevision?: string,
+	canonicalRetentionRoot = target.cwd,
 ): Promise<Record<string, unknown>> {
 	const failure = nativeOperationFailure(operation, error);
 	if (!nativeMutationRequiresStatus(error)) return failure;
@@ -5191,6 +5312,7 @@ async function reconcileNativeMutationFailure(
 	}
 	try {
 		const status = await nativeReviewCli.targetStatus(target);
+		clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, canonicalRetentionRoot, status.authority?.lineageId, status.authority?.state);
 		const { required_status_action: staleStatusDirective, ...reconciledBase } = failure;
 		void staleStatusDirective;
 		if (status.action === "reconcile_finalize") {
@@ -5199,7 +5321,7 @@ async function reconcileNativeMutationFailure(
 				outcome: "native-mutation-status-reconciled",
 				reconciliation: status.raw,
 				authority_applicability: status.applicability,
-				...reconcileFinalizeRouting(status, target.lineageId, operation === REVIEW_CONTROLLER_OPERATION.FINALIZE),
+				...reconcileFinalizeRouting(status, target.lineageId, operation === REVIEW_CONTROLLER_OPERATION.FINALIZE, target.cwd),
 			};
 		}
 		// Field defect (fambig, 2026-08-16): an envelope-less mutating failure
@@ -5276,43 +5398,87 @@ function reviewWorkspaceGitIdentity(cwd: string): { toplevel: string; commonDir:
 }
 
 /**
- * Resolves the workspace root every controller operation binds to. Absent an
- * explicit workspaceRoot the session cwd is used unchanged (no new Git calls).
- * An explicit workspaceRoot fails closed unless it is an existing Git worktree
- * root sharing the session repository's Git common directory, so the model can
- * never rebind review authority to an arbitrary or foreign filesystem path.
+ * Resolves the explicit user-authorized workspace target. An explicit path may
+ * be nested and may belong to a repository unrelated to the Pi session cwd;
+ * Git resolves it to its canonical worktree top-level. The session cwd remains
+ * the legacy default only when no target was selected or remembered.
  */
-function resolveReviewControllerWorkspaceRoot(requested: string | undefined, sessionCwd: string): string {
-	if (requested === undefined) return sessionCwd;
-	if (requested.trim().length === 0 || !isAbsolute(requested)) {
-		throw new Error(`Review controller workspaceRoot must be an absolute path to an existing Git worktree root; received ${JSON.stringify(requested)}`);
+function resolveReviewControllerWorkspaceRoot(
+	requested: string | undefined,
+	sessionCwd: string,
+	candidateViews: CandidateViewRegistry | null,
+	lineageId: string | undefined,
+): string {
+	const remembered = requested === undefined && lineageId !== undefined
+		? candidateViews?.resolveWorkspaceRoot(lineageId)
+		: undefined;
+	const selected = requested ?? remembered ?? sessionCwd;
+	if (selected.trim().length === 0 || !isAbsolute(selected)) {
+		throw new Error(`Review controller workspaceRoot must be an absolute path to an existing Git worktree root; received ${JSON.stringify(selected)}`);
 	}
 	let resolved: string;
 	try {
-		resolved = realpathSync(requested);
+		resolved = realpathSync(selected);
 		if (!lstatSync(resolved).isDirectory()) throw new Error("not a directory");
 	} catch {
-		throw new Error(`Review controller workspaceRoot ${requested} is not an existing directory; create or adopt the worktree before binding review operations to it`);
+		throw new Error(`Review controller workspaceRoot ${selected} is not an existing directory; create or adopt the worktree before binding review operations to it`);
 	}
 	let target: { toplevel: string; commonDir: string };
 	try {
 		target = reviewWorkspaceGitIdentity(resolved);
 	} catch {
+		if (requested === undefined && remembered === undefined) return sessionCwd;
 		throw new Error(`Review controller workspaceRoot ${resolved} is not inside a Git worktree; review operations bind only to real worktrees of the session repository`);
 	}
-	if (target.toplevel !== resolved) {
-		throw new Error(`Review controller workspaceRoot ${resolved} is not a worktree root (worktree root is ${target.toplevel}); pass the exact root`);
+	if (lineageId !== undefined) candidateViews?.assertWorkspaceRoot(lineageId, target.toplevel);
+	return target.toplevel;
+}
+
+function reviewLifecycleStorageKey(workspaceRoot: string, lineageId: string): string {
+	return `${workspaceRoot}\u0000${lineageId}`;
+}
+
+function cloneRetainedNativeUntrackedSelection(selection: NativeStartUntrackedSelection): RetainedNativeUntrackedSelection | undefined {
+	if (selection.untrackedScope === undefined || selection.expectedUntrackedInventory === undefined) return undefined;
+	return Object.freeze({
+		untrackedScope: selection.untrackedScope,
+		expectedUntrackedInventory: selection.expectedUntrackedInventory,
+		intendedUntracked: Object.freeze([...(selection.intendedUntracked ?? [])]),
+	});
+}
+
+function retainNativeUntrackedSelection(selections: Map<string, RetainedNativeUntrackedSelection>, workspaceRoot: string, lineageId: string, selection: RetainedNativeUntrackedSelection | undefined): void {
+	if (selection !== undefined) selections.set(reviewLifecycleStorageKey(workspaceRoot, lineageId), selection);
+}
+
+function readRetainedNativeUntrackedSelection(selections: Map<string, RetainedNativeUntrackedSelection>, workspaceRoot: string, lineageId: string): NativeStartUntrackedSelection {
+	const selection = selections.get(reviewLifecycleStorageKey(workspaceRoot, lineageId));
+	return selection === undefined
+		? {}
+		: {
+			untrackedScope: selection.untrackedScope,
+			expectedUntrackedInventory: selection.expectedUntrackedInventory,
+			intendedUntracked: [...selection.intendedUntracked],
+		};
+}
+
+function clearRetainedNativeUntrackedSelectionOnTerminal(selections: Map<string, RetainedNativeUntrackedSelection>, workspaceRoot: string, lineageId: string | undefined, state: string | undefined): void {
+	if (lineageId !== undefined && (state === "approved" || state === "escalated")) selections.delete(reviewLifecycleStorageKey(workspaceRoot, lineageId));
+}
+
+function providerFinalizeArgumentTokens(status: ReviewStatusV3, argumentsList: readonly { name: string; value: string; token?: string }[]): readonly string[] {
+	const isStatusV5 = (status.raw as { schema?: unknown }).schema === "gentle-ai.review-integration.status/v5";
+	if (isStatusV5) {
+		if (argumentsList.some((argument) => typeof argument.token !== "string" || argument.token.trim().length === 0)) {
+			throw new CandidateViewError("status/v5 review.finalize requires every provider argument to carry a non-empty exact token", "finalize-transition-binding-drift");
+		}
+		return argumentsList.map((argument) => argument.token!);
 	}
-	let session: { toplevel: string; commonDir: string };
-	try {
-		session = reviewWorkspaceGitIdentity(sessionCwd);
-	} catch {
-		throw new Error(`Review controller workspaceRoot ${resolved} cannot be validated: the session cwd ${sessionCwd} does not resolve a Git repository identity; run Pi from a worktree of the same repository`);
-	}
-	if (target.commonDir !== session.commonDir) {
-		throw new Error(`Review controller workspaceRoot ${resolved} belongs to a different repository (Git common dir ${target.commonDir}) than the session cwd ${sessionCwd} (Git common dir ${session.commonDir}); use a worktree of the session repository or start Pi from the target repository`);
-	}
-	return resolved;
+	return argumentsList.map((argument) => argument.token ?? `--${argument.name.replaceAll("_", "-")}=${argument.value}`);
+}
+
+function requiresExplicitTargetLifecycleRoot(requested: string | undefined, sessionCwd: string, workspaceRoot: string): boolean {
+	return requested !== undefined || workspaceRoot !== sessionCwd;
 }
 
 function correctionOutcome(input: ReturnType<typeof parseNativeCompactFinalizeInput>): CorrectionOutcome | undefined {
@@ -5415,9 +5581,10 @@ async function captureEvidenceForCollection(
 	if (binding.submission !== undefined) {
 		if (nativeReviewCli.captureEvidenceSubmission === undefined) throw new CandidateViewError("native capture-evidence submission execution is unavailable", "evidence-first-ordering");
 		return nativeReviewCli.captureEvidenceSubmission({
-			// The slot's --repository-context is cwd-independent and
-			// authoritative; a path is passed only when the slot renders none.
-			...(binding.submission.carriesRepositoryContext ? {} : { cwd }),
+			// The slot's --repository-context is cwd-independent and authoritative,
+			// while execution still stays in the controller-selected worktree. A
+			// fallback --cwd flag is passed only when the slot renders no context.
+			...(binding.submission.carriesRepositoryContext ? { executionCwd: cwd } : { cwd }),
 			argumentTokens: binding.submission.argumentTokens,
 			outcomeSubstitutionLocation: binding.submission.outcomeSubstitutionLocation,
 			inputSubstitutionLocation: binding.submission.inputSubstitutionLocation,
@@ -5483,8 +5650,7 @@ function requireTargetedValidationAfterEvidence(status: ReviewStatusV3): NonNull
 		// snapshot, which already contains the fix (probed 2026-08-16).
 		request.expectedRevision !== status.authority.revision || request.targetIdentity !== (status.authorityTargetIdentity ?? status.targetIdentity) ||
 		request.correctionCandidateTree !== status.projection.currentCandidateTree ||
-		JSON.stringify([...request.correctionPaths].sort()) !== JSON.stringify([...status.projection.paths].sort()) ||
-		request.correctionPathsDigest !== status.projection.pathsDigest
+		request.correctionPaths.length === 0 || request.correctionPaths.some((path) => !status.projection.paths.includes(path))
 	) {
 		throw new CandidateViewError("passed evidence did not produce one provider-bound targeted validation request", "evidence-first-ordering");
 	}
@@ -5538,6 +5704,7 @@ async function executeReviewHostRelayCollection(
 			}
 			result = await activeReviewHostRelayRunner({
 				captureArgumentTokens: slot.captureArgumentTokens,
+				targetCwd: cwd,
 				submission: slot.submission,
 				...(signal === undefined ? {} : { signal }),
 			});
@@ -5584,7 +5751,8 @@ async function executeReviewHostRelayCollection(
 			submission: result.submission,
 		});
 	}
-	const after = await nativeReviewCli.targetStatus!({ cwd, lineageId, ...(signal === undefined ? {} : { signal }) });
+	const after = await nativeReviewCli.targetStatus!({ cwd, lineageId, ...readRetainedNativeUntrackedSelection(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, cwd, lineageId), ...(signal === undefined ? {} : { signal }) });
+	clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, cwd, after.authority?.lineageId, after.authority?.state);
 	return {
 		...mapNativeTargetStatus(operation, after, lineageId),
 		host_relay: { transport: "pi_host_relay", captured_slots: captured },
@@ -5648,7 +5816,8 @@ async function executeProviderRoleVectorCollection(
 			captured: artifact.captured,
 		});
 	}
-	const after = await nativeReviewCli.targetStatus!({ cwd, lineageId, ...(signal === undefined ? {} : { signal }) });
+	const after = await nativeReviewCli.targetStatus!({ cwd, lineageId, ...readRetainedNativeUntrackedSelection(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, cwd, lineageId), ...(signal === undefined ? {} : { signal }) });
+	clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, cwd, after.authority?.lineageId, after.authority?.state);
 	return {
 		...mapNativeTargetStatus(operation, after, lineageId),
 		provider_roles: { transport: "go_owned_pi_process", executed_slots: executed },
@@ -5695,8 +5864,8 @@ function pendingReviewerLenses(status: ReviewStatusV3): readonly string[] {
 // of v2.4.0 — v2.2.3 did not define it on `review status` at all and refused it
 // outright — but Pi still never version-sniffs: the installed binary remains
 // the only authority on whether the flag exists. A typed refusal is remembered
-// per provider instance and the exact provider cause is reported to the user
-// rather than degraded into a generic candidate-view message.
+// per provider instance and blocks the lifecycle with its exact provider cause;
+// Pi never degrades it into an agent-less STATUS fallback.
 const REVIEW_HOST_AGENT = "pi" as const;
 const REVIEW_TRANSPORT_REFUSAL_CODES = new Set([
 	"immutable_review_transport_unsupported",
@@ -5704,37 +5873,58 @@ const REVIEW_TRANSPORT_REFUSAL_CODES = new Set([
 	"unknown_flag",
 ]);
 interface ReviewTransportRefusal { supported: false; code: string; message: string; }
+interface NegotiatedHostTransportStatus {
+	status?: ReviewStatusV3;
+	transport?: ReviewTransportRefusal;
+}
 const reviewTransportRefusalByProvider = new WeakMap<object, ReviewTransportRefusal>();
+const retainedUntrackedSelectionsByNativeReviewCli = new WeakMap<NativeReviewCli, Map<string, RetainedNativeUntrackedSelection>>();
 
 function clearReviewTransportProbeForTesting(nativeReviewCli: NativeReviewCli | null): void {
 	if (nativeReviewCli !== null) reviewTransportRefusalByProvider.delete(nativeReviewCli as unknown as object);
 }
 
+function hostTransportUnavailable(
+	operation: ReviewControllerOperation,
+	transport: ReviewTransportRefusal,
+): Record<string, unknown> {
+	return {
+		operation,
+		status: "blocked",
+		outcome: "pi-host-relay-transport-unavailable",
+		reason: `The native provider refused the required pi reviewer transport (${transport.code}): ${transport.message}`,
+		relay_transport: transport,
+		mutation_performed: false,
+		mutation_outcome: "none",
+		next_action: "Install a native gentle-ai provider that supports `review status --agent pi`, then re-run FINALIZE. Pi never falls back to an agent-less lifecycle route.",
+	};
+}
+
 /**
- * Queries negotiated STATUS for the pi reviewer transport so the provider
- * offers its materialize-marked relay slot, probing the agent exactly once per
- * provider and falling back to the agent-less status on a typed refusal. The
- * refusal is returned, never swallowed.
+ * Queries negotiated STATUS for the required pi reviewer transport. A typed
+ * refusal is cached per provider and returned as unavailable; neither a fresh
+ * nor remembered refusal may issue an agent-less lifecycle STATUS request.
  */
 async function negotiatedStatusForHostTransport(
 	nativeReviewCli: NativeReviewCli,
 	request: NativeTargetStatusRequest,
-): Promise<{ status: ReviewStatusV3; transport?: ReviewTransportRefusal }> {
+	canonicalRetentionRoot = request.cwd,
+): Promise<NegotiatedHostTransportStatus> {
 	const provider = nativeReviewCli as unknown as object;
 	const remembered = reviewTransportRefusalByProvider.get(provider);
-	if (remembered !== undefined) {
-		return { status: await nativeReviewCli.targetStatus!(request), transport: remembered };
-	}
+	if (remembered !== undefined) return { transport: remembered };
 	try {
-		return { status: await nativeReviewCli.targetStatus!({ ...request, agent: REVIEW_HOST_AGENT }) };
+		const status = await nativeReviewCli.targetStatus!({ ...request, agent: REVIEW_HOST_AGENT });
+		clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, canonicalRetentionRoot, status.authority?.lineageId, status.authority?.state);
+		return { status };
 	} catch (error) {
 		const code = error instanceof NativeReviewIntegrationError ? error.failureEnvelope.code : undefined;
-		// Only a transport-shaped refusal falls back; every other failure is
-		// the caller's to handle exactly as before.
+		// Only the closed transport-refusal set is typed unavailable; every
+		// other failure remains an error for the caller's normal error path.
 		if (code === undefined || !REVIEW_TRANSPORT_REFUSAL_CODES.has(code)) throw error;
-		const refusal: ReviewTransportRefusal = { supported: false, code, message: error.message };
-		reviewTransportRefusalByProvider.set(provider, refusal);
-		return { status: await nativeReviewCli.targetStatus!(request), transport: refusal };
+		const transport: ReviewTransportRefusal = { supported: false, code, message: error.message };
+		reviewTransportRefusalByProvider.set(provider, transport);
+		return { transport };
 	}
 }
 
@@ -5744,9 +5934,9 @@ type DispatchHydrationOutcome =
 	| undefined;
 
 function hydrateDispatchBindingFromStatus(candidateViews: CandidateViewRegistry | null, contributorRoot: string, status: ReviewStatusV3): DispatchHydrationOutcome {
-	if (candidateViews === null || candidateViews.hasCurrentBinding()) return undefined;
+	if (candidateViews === null || candidateViews.hasCurrentBinding(contributorRoot)) return undefined;
 	const lineageId = status.authority?.lineageId;
-	if (lineageId === undefined || status.applicability !== "current_target" || candidateViews.hasProjection(lineageId)) return undefined;
+	if (lineageId === undefined || status.applicability !== "current_target" || candidateViews.hasProjection(lineageId, contributorRoot)) return undefined;
 	const lenses = pendingReviewerLenses(status);
 	if (lenses.length === 0) return undefined;
 	try {
@@ -5776,13 +5966,19 @@ async function executeReviewControllerOperation(
 	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
 	context?: ExtensionContext,
 	correctionEvidenceByLineage: Map<string, CorrectionEvidence> = new Map(),
-	pendingReviewConsents: Map<string, PendingReviewConsent> = new Map(),
+	retainedUntrackedSelections: Map<string, RetainedNativeUntrackedSelection> = new Map(),
+	pendingReviewConsentRegistry: PendingReviewConsentRegistry = processPendingReviewConsentRegistry,
+	pendingReviewConsentFallbackKey: symbol = Symbol("pending-review-consent-fallback"),
 	writeReviewConsentLatch: typeof recordReviewConsentLatch = recordReviewConsentLatch,
 	reviewConsentNow: () => number = Date.now,
 	reviewConsentScheduleTimer: (callback: () => void, delayMs: number) => { unref: () => void } = setTimeout,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewControllerParameters(parametersValue);
-	const defaultCwd = resolveReviewControllerWorkspaceRoot(parameters.workspaceRoot, sessionCwd);
+	if (nativeReviewCli !== null) retainedUntrackedSelectionsByNativeReviewCli.set(nativeReviewCli, retainedUntrackedSelections);
+	const defaultCwd = resolveReviewControllerWorkspaceRoot(parameters.workspaceRoot, sessionCwd, candidateViews, parameters.lineageId);
+	const pendingReviewConsentSession = pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey);
+	const useTargetLifecycleRoot = requiresExplicitTargetLifecycleRoot(parameters.workspaceRoot, sessionCwd, defaultCwd);
+	const includeWorkspaceRoot = parameters.workspaceRoot !== undefined || defaultCwd !== sessionCwd;
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.EXPORT || parameters.operation === REVIEW_CONTROLLER_OPERATION.IMPORT) {
 		// Legacy bundle transport rode on the retired pre-integration graph/compact
 		// stores. The native v2.1.11 CLI exposes no bundle equivalent, so both
@@ -5811,7 +6007,7 @@ async function executeReviewControllerOperation(
 		try {
 			if (nativeReviewCli.targetStatus !== undefined) {
 				const status = await nativeReviewCli.targetStatus({ cwd: defaultCwd, ...(signal === undefined ? {} : { signal }) });
-				return mapNativeTargetStatus(parameters.operation, status);
+				return { ...mapNativeTargetStatus(parameters.operation, status, undefined, defaultCwd), ...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}) };
 			}
 			return nativeStatusUnsupported(parameters.operation);
 		} catch (error) {
@@ -5853,7 +6049,7 @@ async function executeReviewControllerOperation(
 		);
 		if (missing.length > 0) return await executeNativeRecoveryRoute(parameters.operation, "recover", input, defaultCwd, nativeReviewCli, pendingAuthorizations, signal);
 		if (nativeReviewCli?.targetStatus === undefined) return nativeStatusUnsupported(parameters.operation);
-		const frozenTarget = candidateViews?.hasProjection(String(input.predecessorLineage))
+		const frozenTarget = candidateViews?.hasProjection(String(input.predecessorLineage), defaultCwd)
 			? candidateViews.resolveProjection(String(input.predecessorLineage), defaultCwd)
 			: undefined;
 		const statusRequest = {
@@ -6001,19 +6197,19 @@ async function executeReviewControllerOperation(
 		if (Object.keys(input).some((key) => key !== "consentBinding" && key !== "answer") || Object.keys(input).length !== 2) throw new Error("Review controller answer-consent input must contain exactly consentBinding and answer");
 		if (typeof input.consentBinding !== "string" || input.consentBinding.length === 0) throw new Error("Review controller answer-consent requires an opaque consentBinding");
 		if (input.answer !== "granted" && input.answer !== "declined") throw new Error("Review controller answer-consent answer must be granted or declined");
-		const pending = pendingReviewConsents.get(input.consentBinding);
+		const pending = pendingReviewConsentRegistry.get(pendingReviewConsentSession)?.get(input.consentBinding);
 		if (pending === undefined || pending.expiresAt <= reviewConsentNow()) {
-			if (pending !== undefined) cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews);
+			if (pending !== undefined) cleanupPendingReviewConsent(pending, pendingReviewConsentRegistry, pendingReviewConsentSession);
 			throw new Error("Review controller consent binding is unknown, expired, or already consumed");
 		}
 		if (realpathSync(defaultCwd) !== pending.repositoryCwd) throw new Error("Review controller consent repository binding changed");
 		if (reviewConsentDigest(pending.consent) !== pending.consentDigest) throw new Error("Review controller consent envelope binding changed");
-		pending.candidateView.verify();
+		pending.verifyCandidate();
 		if (nativeReviewCli?.answerConsent === undefined) throw new Error("Native review consent follow-up is unavailable");
 		try {
 			const gated = await resolveReviewModeGate(nativeReviewCli, parameters.operation, defaultCwd, signal);
 			if (gated !== undefined) {
-				cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews);
+				cleanupPendingReviewConsent(pending, pendingReviewConsentRegistry, pendingReviewConsentSession);
 				return gated;
 			}
 		} catch (error) {
@@ -6021,7 +6217,7 @@ async function executeReviewControllerOperation(
 		}
 		// The one-shot binding is consumed before the provider mutation. Any
 		// ambiguous result reconciles through STATUS and can never be replayed.
-		consumePendingReviewConsent(pending, pendingReviewConsents);
+		consumePendingReviewConsent(pending, pendingReviewConsentRegistry, pendingReviewConsentSession);
 		let completed: Record<string, unknown>;
 		try {
 			const answered = await nativeReviewCli.answerConsent({
@@ -6031,7 +6227,7 @@ async function executeReviewControllerOperation(
 				...(signal === undefined ? {} : { signal }),
 			});
 			if (answered.kind === "declined") {
-				candidateViews?.cleanup(pending.candidateView.token);
+				pending.cleanupCandidate();
 				return {
 					operation: parameters.operation,
 					status: "skipped",
@@ -6040,10 +6236,11 @@ async function executeReviewControllerOperation(
 					...nativeStartPreAuthorityRejection(),
 				};
 			}
-			completed = completeNativeStart(parameters.operation, answered.start, pending.repositoryCwd, pending.candidateView, candidateViews);
+			retainNativeUntrackedSelection(retainedUntrackedSelections, pending.authorityCwd, answered.start.lineageId, pending.untrackedSelection);
+			completed = completeNativeStart(parameters.operation, answered.start, pending.repositoryCwd, pending.candidateView, pending.candidateViews);
 		} catch (error) {
 			const value = error as { mutationOutcome?: unknown };
-			if (value.mutationOutcome === "none") candidateViews?.cleanup(pending.candidateView.token);
+			if (value.mutationOutcome === "none") pending.cleanupCandidate();
 			return await reconcileNativeMutationFailure(parameters.operation, error, nativeReviewCli, {
 				cwd: pending.authorityCwd,
 				...(pending.candidateView.committedOnly ? { baseRef: pending.candidateView.baseCommit } : {}),
@@ -6068,7 +6265,7 @@ async function executeReviewControllerOperation(
 		);
 		if (rawStart.mode === REVIEW_MODE.ORDINARY) {
 			if ("policyHash" in rawStart) return nativeStartRejection("legacy-policy-hash-unsupported");
-			const unknownField = Object.keys(rawStart).find((field) => !["mode", "baseRef", "committedOnly", "policyPath", "focus"].includes(field));
+			const unknownField = Object.keys(rawStart).find((field) => !["mode", "baseRef", "committedOnly", "policyPath", "focus", "untrackedScope", "expectedUntrackedInventory", "intendedUntracked"].includes(field));
 			if (unknownField !== undefined) return nativeStartRejection("unknown-field", unknownField);
 			const focus = rawStart.focus;
 			if (focus !== undefined && !isNativeStartFocus(focus)) return nativeStartRejection("focus-invalid");
@@ -6080,6 +6277,9 @@ async function executeReviewControllerOperation(
 			if (baseRef !== undefined && !isCanonicalProcessString(baseRef)) return nativeStartRejection("base-ref-invalid");
 			if (baseRef !== undefined && rawStart.committedOnly !== true) return nativeStartRejection("committed-only-required");
 			if (baseRef === undefined && "committedOnly" in rawStart) return nativeStartRejection("committed-only-invalid");
+			const untrackedSelection = validateNativeStartUntrackedSelection(rawStart);
+			if (untrackedSelection.reason !== undefined) return nativeStartRejection(untrackedSelection.reason);
+			const retainedUntrackedSelection = cloneRetainedNativeUntrackedSelection(untrackedSelection);
 			let canonicalBaseRef: string | undefined;
 			if (baseRef !== undefined) {
 				try {
@@ -6103,9 +6303,10 @@ async function executeReviewControllerOperation(
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(canonicalBaseRef === undefined ? {} : { baseRef: canonicalBaseRef }),
+					...(untrackedSelection.untrackedScope === undefined ? {} : untrackedSelection),
 					...(signal === undefined ? {} : { signal }),
 				});
-				if (target.applicability !== "unrelated" || target.action !== "start") return mapNativeTargetStatus(parameters.operation, target, parameters.lineageId);
+				if (target.nextTransition?.kind === "collect" || target.applicability !== "unrelated" || target.action !== "start") return mapNativeTargetStatus(parameters.operation, target, parameters.lineageId);
 			} catch (error) {
 				return nativeOperationFailure(parameters.operation, error);
 			}
@@ -6115,11 +6316,11 @@ async function executeReviewControllerOperation(
 			// retry cannot reuse a view tied to an expired binding and trip
 			// candidate-target-projection-drift. Timer order must not decide
 			// correctness: the queued cleanup macrotask may not have fired yet.
-			pruneExpiredReviewConsents(pendingReviewConsents, candidateViews, reviewConsentNow);
+			pruneExpiredReviewConsents(pendingReviewConsentRegistry, pendingReviewConsentSession, reviewConsentNow);
 			let candidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			let nativeStartAttempted = false;
 			try {
-				candidateView = candidateViews?.createOrReuse({ contributorRoot: defaultCwd, replayKey, ...(canonicalBaseRef === undefined ? {} : { baseRef: canonicalBaseRef, committedOnly: true }) });
+				candidateView = candidateViews?.createOrReuse({ contributorRoot: defaultCwd, replayKey, ...(canonicalBaseRef === undefined ? {} : { baseRef: canonicalBaseRef, committedOnly: true }), ...(untrackedSelection.untrackedScope === undefined ? {} : { intendedUntracked: untrackedSelection.intendedUntracked }) });
 				if (candidateView !== undefined) assertNativeStartCandidateBinding(candidateView, target);
 				let result: NativeStartResult;
 				try {
@@ -6131,6 +6332,7 @@ async function executeReviewControllerOperation(
 							: { baseRef: candidateView?.baseCommit ?? canonicalBaseRef, committedOnly: true }),
 						targetIdentity: target.targetIdentity,
 						projection: target.projection.projection,
+						...(untrackedSelection.untrackedScope === undefined ? {} : untrackedSelection),
 						...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 						...(policy.policyPath === undefined ? {} : { policyPath: policy.policyPath }),
 						...(focus === undefined ? {} : { focus }),
@@ -6142,13 +6344,40 @@ async function executeReviewControllerOperation(
 					const consentCandidateView = candidateView;
 					const repositoryCwd = realpathSync(defaultCwd);
 					const consentDigest = reviewConsentDigest(error.consent);
-					const existing = [...pendingReviewConsents.values()].find((pending) => pending.repositoryCwd === repositoryCwd && pending.candidateView.token === consentCandidateView.token && pending.consentDigest === consentDigest && pending.expiresAt > reviewConsentNow());
-					if (existing === undefined) for (const pending of [...pendingReviewConsents.values()]) if (pending.candidateView.token === consentCandidateView.token) consumePendingReviewConsent(pending, pendingReviewConsents);
+					const pendingReviewConsents = pendingReviewConsentRegistry.get(pendingReviewConsentSession);
+					const existing = [...(pendingReviewConsents?.values() ?? [])].find((pending) => pending.repositoryCwd === repositoryCwd && pending.candidateView.token === consentCandidateView.token && pending.consentDigest === consentDigest && pending.expiresAt > reviewConsentNow());
+					if (existing === undefined) {
+						for (const pending of [...(pendingReviewConsents?.values() ?? [])]) {
+							if (pending.candidateView.token === consentCandidateView.token) {
+								consumePendingReviewConsent(pending, pendingReviewConsentRegistry, pendingReviewConsentSession);
+							}
+						}
+					}
 					const id = existing?.id ?? randomUUID();
 					if (existing === undefined) {
-						const pending: PendingReviewConsent = { id, repositoryCwd, authorityCwd: defaultCwd, candidateView: consentCandidateView, consent: error.consent, consentDigest, expiresAt: reviewConsentNow() + PENDING_REVIEW_CONSENT_TTL_MS };
-						pendingReviewConsents.set(id, pending);
-						pending.expiry = reviewConsentScheduleTimer(() => cleanupPendingReviewConsent(pending, pendingReviewConsents, candidateViews), PENDING_REVIEW_CONSENT_TTL_MS);
+						let candidateCleaned = false;
+						const pending: PendingReviewConsent = {
+							id,
+							repositoryCwd,
+							authorityCwd: defaultCwd,
+							candidateView: consentCandidateView,
+							candidateViews,
+							verifyCandidate: () => consentCandidateView.verify(),
+							cleanupCandidate: () => {
+								if (candidateCleaned) return;
+								candidateCleaned = true;
+								consentCandidateView.cleanup();
+							},
+							...(retainedUntrackedSelection === undefined ? {} : { untrackedSelection: retainedUntrackedSelection }),
+							consent: error.consent,
+							consentDigest,
+							expiresAt: reviewConsentNow() + PENDING_REVIEW_CONSENT_TTL_MS,
+						};
+						pendingReviewConsentRegistry.ensure(pendingReviewConsentSession).set(id, pending);
+						pending.expiry = reviewConsentScheduleTimer(
+							() => cleanupPendingReviewConsent(pending, pendingReviewConsentRegistry, pendingReviewConsentSession),
+							PENDING_REVIEW_CONSENT_TTL_MS,
+						);
 						pending.expiry.unref();
 					}
 					return {
@@ -6160,6 +6389,7 @@ async function executeReviewControllerOperation(
 						...nativeStartPreAuthorityRejection(),
 					};
 				}
+				retainNativeUntrackedSelection(retainedUntrackedSelections, defaultCwd, result.lineageId, retainedUntrackedSelection);
 				return completeNativeStart(parameters.operation, result, defaultCwd, candidateView, candidateViews);
 			} catch (error) {
 				if (error instanceof CandidateViewError && error.diagnostics !== undefined) return nativeOperationFailure(parameters.operation, Object.assign(error, { candidateViewPreNative: true }));
@@ -6180,6 +6410,7 @@ async function executeReviewControllerOperation(
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(canonicalBaseRef === undefined ? {} : { baseRef: candidateView?.baseCommit ?? canonicalBaseRef }),
+					...(untrackedSelection.untrackedScope === undefined ? {} : untrackedSelection),
 					projection: "workspace",
 				});
 			}
@@ -6252,36 +6483,44 @@ async function executeReviewControllerOperation(
 				...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 				...raw,
 			});
+			const retainedUntrackedSelection = parameters.lineageId === undefined
+				? {}
+				: readRetainedNativeUntrackedSelection(retainedUntrackedSelections, defaultCwd, parameters.lineageId);
 			let correctionCompletion = false;
 			let negotiatedStatus: ReviewStatusV3 | undefined;
 			let candidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			let provisionalCandidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
 			let nativeResult: NativeFinalizeResult | undefined;
 			let correctionStep: CorrectionStep | undefined;
-			let transportRefusal: ReviewTransportRefusal | undefined;
 			try {
 				if (parameters.lineageId === undefined) throw new CandidateViewError("Native FINALIZE requires an explicit lineage");
 				correctionCompletion = input.validation !== undefined && input.final_evidence !== undefined;
 				const validationAttempt = input.correction_line_forecast === undefined && input.final_evidence !== undefined;
 				const replayKey = JSON.stringify({ cwd: defaultCwd, lineageId: parameters.lineageId ?? null, input: parameters.input ?? null, inputPath: parameters.inputPath ?? null });
-				if (candidateViews?.hasProjection(parameters.lineageId)) {
+				if (candidateViews?.hasProjection(parameters.lineageId, defaultCwd)) {
 					candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
 					candidateView = correctionCompletion || validationAttempt
 						? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey)
-						: candidateViews.resolveForFinalize(parameters.lineageId);
+						: candidateViews.resolveForFinalize(parameters.lineageId, defaultCwd);
 				} else if (candidateViews) {
 					provisionalCandidateView = candidateViews.createOrReuse({ contributorRoot: defaultCwd, replayKey: `${replayKey}:status-candidate` });
 					candidateView = provisionalCandidateView;
 				}
 				candidateView?.verify();
-				const statusCandidateRoot = candidateView?.root ?? defaultCwd;
-				// Name the host's reviewer transport so the provider offers its
-				// materialize-marked relay slot; a provider without that
-				// transport answers the agent-less status and its typed refusal
-				// travels with the result.
-				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: statusCandidateRoot, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
-				negotiatedStatus = negotiated.status;
-				transportRefusal = negotiated.transport;
+				const statusCandidateRoot = useTargetLifecycleRoot ? defaultCwd : candidateView?.root ?? defaultCwd;
+				// Name the required Pi reviewer transport so the provider offers its
+				// materialize-marked relay slot. A typed refusal blocks before any
+				// agent-less STATUS, collect, or FINALIZE lifecycle continuation.
+				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: statusCandidateRoot, lineageId: parameters.lineageId, ...retainedUntrackedSelection, ...(signal === undefined ? {} : { signal }) }, defaultCwd);
+				if (negotiated.transport !== undefined) {
+					if (provisionalCandidateView && candidateViews) {
+						candidateViews.cleanup(provisionalCandidateView.token);
+						provisionalCandidateView = undefined;
+						candidateView = undefined;
+					}
+					return hostTransportUnavailable(parameters.operation, negotiated.transport);
+				}
+				negotiatedStatus = negotiated.status!;
 				if (negotiatedStatus.applicability !== "current_target" || negotiatedStatus.authority?.lineageId !== parameters.lineageId || (negotiatedStatus.action !== "finalize" && negotiatedStatus.action !== "reconcile_finalize")) {
 					if (provisionalCandidateView && candidateViews) {
 						candidateViews.cleanup(provisionalCandidateView.token);
@@ -6304,9 +6543,9 @@ async function executeReviewControllerOperation(
 				// the workspace root before executing any rendered payload.
 				// Pinned pre-v5 emitters keep the frozen-view status untouched.
 				if (statusCandidateRoot !== defaultCwd && (negotiatedStatus.raw as { schema?: unknown }).schema === "gentle-ai.review-integration.status/v5") {
-					const rebound = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
-					const workspaceStatus = rebound.status;
-					transportRefusal = rebound.transport;
+					const rebound = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: defaultCwd, lineageId: parameters.lineageId, ...retainedUntrackedSelection, ...(signal === undefined ? {} : { signal }) }, defaultCwd);
+					if (rebound.transport !== undefined) return hostTransportUnavailable(parameters.operation, rebound.transport);
+					const workspaceStatus = rebound.status!;
 					if (workspaceStatus.authority?.lineageId !== parameters.lineageId || workspaceStatus.authority.revision !== negotiatedStatus.authority.revision) {
 						throw new CandidateViewError("workspace-root status no longer matches the negotiated lifecycle authority", "workspace-status-rebind-drift");
 					}
@@ -6399,12 +6638,9 @@ async function executeReviewControllerOperation(
 						operation: parameters.operation,
 						status: "blocked",
 						outcome: "reviewer-results-required",
-						reason: transportRefusal === undefined
-							? "Capture the reviewer result first; the provider offers review.capture-result. Correction evidence and targeted validation are never admissible while reviewer results are outstanding."
-							: `Capture the reviewer result first; the provider offers review.capture-result. This provider does not admit the pi reviewer transport (${transportRefusal.code}), so it offers no host-relay slot: ${transportRefusal.message}`,
+						reason: "Capture the reviewer result first; the provider offers review.capture-result. Correction evidence and targeted validation are never admissible while reviewer results are outstanding.",
 						...(outstandingReviewerLenses.length === 0 ? {} : { pending_lenses: outstandingReviewerLenses }),
 						...(dispatchBinding === undefined ? {} : { dispatch_binding: dispatchBinding }),
-						...(transportRefusal === undefined ? {} : { relay_transport: transportRefusal }),
 						result: negotiatedStatus.raw,
 						mutation_performed: false,
 						mutation_outcome: "none",
@@ -6427,7 +6663,7 @@ async function executeReviewControllerOperation(
 					negotiatedStatus.authority?.state === "validating" &&
 					negotiatedStatus.validationRequest === undefined &&
 					!(negotiatedStatus.nextTransition?.kind === "collect" && (negotiatedStatus.nextTransition.collect?.inputs ?? []).some(isTargetedValidationCollectInput));
-				if (candidateViews && !ordinaryFinalVerification && !candidateViews.hasProjection(parameters.lineageId)) {
+				if (candidateViews && !ordinaryFinalVerification && !candidateViews.hasProjection(parameters.lineageId, defaultCwd)) {
 					const projection = negotiatedStatus.projection;
 					candidateView = validationAttempt
 						? (candidateViews.restoreProjectionFromNative(parameters.lineageId, defaultCwd, projection), undefined)
@@ -6435,8 +6671,8 @@ async function executeReviewControllerOperation(
 				}
 				// Fail closed before any native mutation when the frozen projection
 				// belongs to a different worktree than the requested workspace (#169).
-				if (candidateViews && parameters.lineageId && candidateViews.hasProjection(parameters.lineageId)) candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
-				candidateView ??= candidateViews && parameters.lineageId && !ordinaryFinalVerification ? (correctionCompletion || validationAttempt) ? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey) : candidateViews.resolveForFinalize(parameters.lineageId) : undefined;
+				if (candidateViews && parameters.lineageId && candidateViews.hasProjection(parameters.lineageId, defaultCwd)) candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
+				candidateView ??= candidateViews && parameters.lineageId && !ordinaryFinalVerification ? (correctionCompletion || validationAttempt) ? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey) : candidateViews.resolveForFinalize(parameters.lineageId, defaultCwd) : undefined;
 				// Field defect (Engram #12547): a FINALIZE that merely follows the
 				// provider's own execute transition carries no documents, so
 				// neither correctionCompletion nor validationAttempt holds and the
@@ -6457,6 +6693,32 @@ async function executeReviewControllerOperation(
 					candidateView = candidateViews.rebindForFinalizeFromNative(parameters.lineageId, defaultCwd, negotiatedStatus.projection);
 				}
 				if (candidateView !== undefined) assertNativeFinalizeCandidateBinding(candidateView, negotiatedStatus);
+				if (input.validation !== undefined && input.final_evidence === undefined && !ordinaryFinalVerification && parameters.lineageId) {
+					const validationRequest = requireTargetedValidationAfterEvidence(negotiatedStatus);
+					const externalTargetedValidation = negotiatedStatus.nextTransition?.kind === "collect" && (negotiatedStatus.nextTransition.collect?.inputs ?? []).some((collectInput) => collectInput.captureOperation === "external.run_targeted_validation");
+					if (!externalTargetedValidation) throw new CandidateViewError("validation-only finalize requires the provider's external targeted-validation collection", "evidence-first-ordering");
+					if (input.validation.request_hash !== validationRequest.requestHash.replace(/^sha256:/, "") || JSON.stringify([...input.validation.correction_ids].sort()) !== JSON.stringify([...validationRequest.fixFindingIds].sort())) {
+						throw new CandidateViewError("targeted validation document does not match the provider request", "targeted-validation-binding-drift");
+					}
+					const validationSubmission = finalizeSubmissionSlot(negotiatedStatus, "validation");
+					if (validationSubmission === undefined || nativeReviewCli.finalizeSubmission === undefined) {
+						throw new CandidateViewError("native validation submission execution is unavailable", "finalize-transition-binding-drift");
+					}
+					nativeResult = await nativeReviewCli.finalizeSubmission({
+						cwd: defaultCwd,
+						argumentTokens: validationSubmission.argumentTokens,
+						valueSubstitutionLocation: validationSubmission.value.substitutionLocation,
+						valueDocument: JSON.stringify({
+							targeted_validation_request_hash: validationRequest.requestHash,
+							correction_target_identity: validationRequest.correctionTargetIdentity,
+							...toNativeValidatorDocument(input.validation),
+						}),
+						...(signal === undefined ? {} : { signal }),
+					});
+					if (nativeResult.lineageId !== parameters.lineageId) {
+						throw new CandidateViewError("provider finalize submission answered for a different lineage", "finalize-transition-binding-drift");
+					}
+				}
 				if (ordinaryFinalVerification && parameters.lineageId) {
 					// A projection held by this process routes the top-of-try path
 					// through createCorrected before the lane is known; that view
@@ -6487,7 +6749,8 @@ async function executeReviewControllerOperation(
 					// `review.finalize` transition it offers for the captured
 					// evidence. Never demand targeted validation here and never
 					// substitute the validate gate.
-					const afterEvidence = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+					const afterEvidence = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...retainedUntrackedSelection, ...(signal === undefined ? {} : { signal }) });
+					clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelections, defaultCwd, afterEvidence.authority?.lineageId, afterEvidence.authority?.state);
 					if (afterEvidence.authority?.lineageId !== parameters.lineageId) throw new CandidateViewError("post-evidence status lost the final-verification lineage", "correction-evidence-binding-drift");
 					if (afterEvidence.validationRequest !== undefined || (afterEvidence.nextTransition?.kind === "collect" && (afterEvidence.nextTransition.collect?.inputs ?? []).some(isTargetedValidationCollectInput))) {
 						throw new CandidateViewError("final verification evidence unexpectedly unlocked targeted validation", "final-verification-provider-owned");
@@ -6514,7 +6777,7 @@ async function executeReviewControllerOperation(
 						// The exact rendered tokens, verbatim and in provider
 						// order; the hyphenated fallback mirrors the provider's
 						// published rendering rule for older payloads.
-						argumentTokens: evidenceTransition.arguments.map((argument) => argument.token ?? `--${argument.name.replaceAll("_", "-")}=${argument.value}`),
+						argumentTokens: providerFinalizeArgumentTokens(afterEvidence, evidenceTransition.arguments),
 						...(signal === undefined ? {} : { signal }),
 					});
 					if (nativeResult.lineageId !== parameters.lineageId) {
@@ -6527,7 +6790,15 @@ async function executeReviewControllerOperation(
 					if (outcome === undefined || negotiatedStatus.authority === undefined) throw new CandidateViewError("native correction evidence requires one authoritative outcome-bound status", "evidence-first-ordering");
 					const evidenceSlot = requireEvidenceCollection(negotiatedStatus);
 					const evidenceBinding = resolveEvidenceCaptureBinding(evidenceSlot, negotiatedStatus, parameters.lineageId, outcome);
-					const captured = await captureEvidenceForCollection(nativeReviewCli, evidenceBinding, candidateView.root, parameters.lineageId, outcome, input.final_evidence!, signal);
+					const captured = await captureEvidenceForCollection(
+						nativeReviewCli,
+						evidenceBinding,
+						useTargetLifecycleRoot ? defaultCwd : candidateView.root,
+						parameters.lineageId,
+						outcome,
+						input.final_evidence!,
+						signal,
+					);
 					if (
 						captured.lineageId !== parameters.lineageId || captured.authorityRevision !== evidenceBinding.expectedRevision ||
 						captured.targetIdentity !== evidenceBinding.targetIdentity || captured.candidateTree !== negotiatedStatus.projection.currentCandidateTree || captured.candidateTree !== candidateView.candidateTree ||
@@ -6543,7 +6814,7 @@ async function executeReviewControllerOperation(
 						candidateTree: captured.candidateTree,
 						rawPayloadSha256: captured.rawPayloadSha256,
 					};
-					const prior = correctionEvidenceByLineage.get(parameters.lineageId);
+					const prior = correctionEvidenceByLineage.get(reviewLifecycleStorageKey(defaultCwd, parameters.lineageId));
 					if (prior !== undefined) {
 						try {
 							assertDistinctCorrectionEvidence({ prior, next: evidence, priorStillResolvable: true, priorRecordDigestNow: prior.recordDigest });
@@ -6560,25 +6831,27 @@ async function executeReviewControllerOperation(
 					}, evidence);
 					// Workspace-bound like the pre-capture rebind above: rendered
 					// validation payloads embed the context this status mints.
-					const afterEvidence = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...(signal === undefined ? {} : { signal }) });
+					const afterEvidence = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...retainedUntrackedSelection, ...(signal === undefined ? {} : { signal }) });
+					clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelections, defaultCwd, afterEvidence.authority?.lineageId, afterEvidence.authority?.state);
 					if (afterEvidence.authority?.lineageId !== parameters.lineageId) throw new CandidateViewError("post-evidence status lost the correction lineage", "correction-evidence-binding-drift");
 					if (correctionStep.kind === "recapture-required") {
 						assertNoTargetedValidation(afterEvidence);
 						if (afterEvidence.authority.state !== "correction_required") throw new CandidateViewError("verification-failed evidence did not keep the correction transaction open", "correction-outcome-drift");
-						correctionEvidenceByLineage.set(parameters.lineageId, Object.freeze(evidence));
+						correctionEvidenceByLineage.set(reviewLifecycleStorageKey(defaultCwd, parameters.lineageId), Object.freeze(evidence));
 						candidateViews.cleanup(candidateView.token);
 						return { operation: parameters.operation, status: "in-progress", outcome: "verification-failed", correction_step: correctionStep, result: afterEvidence.raw };
 					}
 					if (correctionStep.kind === "terminal-escalation") {
 						assertNoTargetedValidation(afterEvidence);
 						if (afterEvidence.authority.state !== "escalated" || (afterEvidence.action !== "stop" && afterEvidence.action !== "maintainer_action")) throw new CandidateViewError("procedural-tooling-failed evidence did not execute terminal escalation", "correction-outcome-drift");
-						correctionEvidenceByLineage.delete(parameters.lineageId);
+						correctionEvidenceByLineage.delete(reviewLifecycleStorageKey(defaultCwd, parameters.lineageId));
 						candidateViews.cleanup(candidateView.token);
-						candidateViews.cleanupTerminal(parameters.lineageId, "escalated");
+						candidateViews.cleanupTerminal(parameters.lineageId, "escalated", defaultCwd);
+						clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelections, defaultCwd, afterEvidence.authority?.lineageId, afterEvidence.authority?.state);
 						return { operation: parameters.operation, status: "blocked", outcome: "terminal-escalation", correction_step: correctionStep, result: afterEvidence.raw };
 					}
 					const validationRequest = requireTargetedValidationAfterEvidence(afterEvidence);
-					correctionEvidenceByLineage.delete(parameters.lineageId);
+					correctionEvidenceByLineage.delete(reviewLifecycleStorageKey(defaultCwd, parameters.lineageId));
 					negotiatedStatus = afterEvidence;
 					// gentle-pi#311 P4-roles: when the provider offers targeted
 					// validation as a self-contained capture-validation vector, the
@@ -6668,7 +6941,7 @@ async function executeReviewControllerOperation(
 						// The provider tokenizes each argument itself; the hyphenated
 						// fallback mirrors its published rendering rule for older
 						// payloads that omit the token field.
-						argumentTokens: finalizeTransition.arguments.map((argument) => argument.token ?? `--${argument.name.replaceAll("_", "-")}=${argument.value}`),
+						argumentTokens: providerFinalizeArgumentTokens(negotiatedStatus, finalizeTransition.arguments),
 						...(signal === undefined ? {} : { signal }),
 					});
 					if (parameters.lineageId !== undefined && nativeResult.lineageId !== parameters.lineageId) {
@@ -6696,7 +6969,7 @@ async function executeReviewControllerOperation(
 						}
 					} else {
 						nativeResult = await nativeReviewCli.finalize({
-							cwd: candidateView?.root ?? defaultCwd,
+							cwd: useTargetLifecycleRoot ? defaultCwd : candidateView?.root ?? defaultCwd,
 							...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 							...(input.correction_line_forecast === undefined ? {} : { correctionLines: input.correction_line_forecast }),
 							...(input.validation === undefined ? {} : { validationDocument: toNativeValidatorDocument(input.validation) }),
@@ -6713,16 +6986,18 @@ async function executeReviewControllerOperation(
 				}
 				if (correctionCompletion && candidateView && candidateViews && !nativeMutationRequiresStatus(error)) candidateViews.cleanup(candidateView.token);
 				return reconcileNativeMutationFailure(parameters.operation, error, nativeReviewCli, {
-					cwd: candidateView?.root ?? defaultCwd,
+					cwd: useTargetLifecycleRoot ? defaultCwd : candidateView?.root ?? defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
+					...retainedUntrackedSelection,
 					projection: "workspace",
-				}, negotiatedStatus?.authority?.revision);
+				}, negotiatedStatus?.authority?.revision, defaultCwd);
 			}
 			try {
-				if (correctionCompletion && candidateViews && parameters.lineageId) candidateViews.promoteCorrected(parameters.lineageId, candidateView!.token);
-				candidateViews?.cleanupTerminal(nativeResult.lineageId, nativeResult.state);
-				reconcileFinalizeRerunAttemptsByLineage.delete(nativeResult.lineageId);
-				return { operation: parameters.operation, result: mapNativeFinalizeResult(nativeResult), ...(correctionStep === undefined ? {} : { correction_step: correctionStep }) };
+				if (correctionCompletion && candidateViews && parameters.lineageId) candidateViews.promoteCorrected(parameters.lineageId, candidateView!.token, defaultCwd);
+				candidateViews?.cleanupTerminal(nativeResult.lineageId, nativeResult.state, defaultCwd);
+				clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelections, defaultCwd, nativeResult.lineageId, nativeResult.state);
+				reconcileFinalizeRerunAttemptsByLineage.delete(reviewLifecycleStorageKey(defaultCwd, nativeResult.lineageId));
+				return { operation: parameters.operation, ...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}), result: mapNativeFinalizeResult(nativeResult), ...(correctionStep === undefined ? {} : { correction_step: correctionStep }) };
 			} catch (error) {
 				const committedFailure = Object.assign(error instanceof Error ? error : new Error(String(error)), {
 					mutationOutcome: "unknown",
@@ -6730,10 +7005,11 @@ async function executeReviewControllerOperation(
 				});
 				return {
 					...(await reconcileNativeMutationFailure(parameters.operation, committedFailure, nativeReviewCli, {
-						cwd: candidateView?.root ?? defaultCwd,
+						cwd: useTargetLifecycleRoot ? defaultCwd : candidateView?.root ?? defaultCwd,
 						lineageId: nativeResult.lineageId,
+						...retainedUntrackedSelection,
 						projection: "workspace",
-					})),
+					}, undefined, defaultCwd)),
 					reconciliation_context: "post-native-finalize",
 					mutation_performed: true,
 					mutation_outcome: "committed",
@@ -6779,15 +7055,36 @@ async function executeReviewControllerOperation(
 		};
 	}
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.STATUS) {
+		const rawStatus = parameters.input === undefined
+			? undefined
+			: parseControllerJson(parameters.input, REVIEW_CONTROLLER_OPERATION.STATUS);
+		const unknownField = rawStatus === undefined
+			? undefined
+			: Object.keys(rawStatus).find((field) => !["untrackedScope", "expectedUntrackedInventory", "intendedUntracked"].includes(field));
+		if (unknownField !== undefined) return nativeStatusInputRejection("unknown-field", unknownField);
+		const untrackedSelection = rawStatus === undefined ? {} : validateNativeStartUntrackedSelection(rawStatus);
+		if (
+			rawStatus !== undefined &&
+			(untrackedSelection.reason !== undefined || untrackedSelection.untrackedScope === undefined)
+		) return nativeStatusInputRejection(untrackedSelection.reason ?? "untracked-selection-invalid");
+		const retainedUntrackedSelection = cloneRetainedNativeUntrackedSelection(untrackedSelection);
 		if (nativeReviewCli?.targetStatus !== undefined) {
 			try {
 				const status = await nativeReviewCli.targetStatus({
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
+					...(untrackedSelection.untrackedScope === undefined ? {} : untrackedSelection),
 					...(signal === undefined ? {} : { signal }),
 				});
+				if (
+					retainedUntrackedSelection !== undefined &&
+					parameters.lineageId !== undefined &&
+					status.applicability === "current_target" &&
+					status.authority?.lineageId === parameters.lineageId
+				) retainNativeUntrackedSelection(retainedUntrackedSelections, defaultCwd, parameters.lineageId, retainedUntrackedSelection);
+				clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelections, defaultCwd, status.authority?.lineageId, status.authority?.state);
 				hydrateDispatchBindingFromStatus(candidateViews, defaultCwd, status);
-				return mapNativeTargetStatus(parameters.operation, status, parameters.lineageId);
+				return { ...mapNativeTargetStatus(parameters.operation, status, parameters.lineageId, defaultCwd), ...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}) };
 			} catch (error) {
 				return nativeOperationFailure(parameters.operation, error);
 			}
@@ -6874,7 +7171,7 @@ async function executeReviewControllerOperation(
 				publicationProbeTimeoutMs,
 				signal,
 			);
-			if (nativeDerived.command.event === "pre-commit" && candidateViews && !candidateViews.hasProjection(parameters.lineageId) && nativeReviewCli.targetStatus !== undefined) {
+			if (nativeDerived.command.event === "pre-commit" && candidateViews && !candidateViews.hasProjection(parameters.lineageId, nativeDerived.command.cwd) && nativeReviewCli.targetStatus !== undefined) {
 				const targetStatus = await nativeReviewCli.targetStatus({ cwd: nativeDerived.command.cwd, lineageId: parameters.lineageId, projection: "staged", ...(signal === undefined ? {} : { signal }) });
 				if (targetStatus.applicability !== "current_target" || targetStatus.authority?.lineageId !== parameters.lineageId) return mapNativeTargetStatus(parameters.operation, targetStatus, parameters.lineageId);
 				candidateViews.restoreProjectionFromNative(parameters.lineageId, nativeDerived.command.cwd, targetStatus.projection);
@@ -7265,6 +7562,9 @@ export interface GentleAiRuntimeDependencies {
 	publicationProbe?: PublicationProbe;
 	publicationProbeTimeoutMs?: number;
 	bashTimeRevalidationTimeoutMs?: number;
+	// An injected registry gives tests and host integrations explicit ownership;
+	// normal package registrations share the module-local process-memory registry.
+	pendingReviewConsentRegistry?: PendingReviewConsentRegistry;
 	// Deterministic test seam for the consent-binding TTL clock. Production
 	// leaves both undefined so the consent path observes real wall-clock time;
 	// tests inject a fake clock so expiry is observable without a 10-minute
@@ -7287,18 +7587,21 @@ function createGentleAiExtensionForTesting(
 	const bashTimeRevalidationTimeoutMs = dependencies.bashTimeRevalidationTimeoutMs ?? BASH_TIME_REVALIDATION_TIMEOUT_MS;
 	const reviewConsentNow = dependencies.now ?? (() => Date.now());
 	const reviewConsentScheduleTimer = dependencies.scheduleTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
+	const pendingReviewConsentRegistry = dependencies.pendingReviewConsentRegistry ?? processPendingReviewConsentRegistry;
 	if (!Number.isSafeInteger(publicationProbeTimeoutMs) || publicationProbeTimeoutMs <= 0) throw new TypeError("Publication probe timeout must be a positive safe integer");
 	if (!Number.isSafeInteger(bashTimeRevalidationTimeoutMs) || bashTimeRevalidationTimeoutMs <= 0) throw new TypeError("Bash-time revalidation timeout must be a positive safe integer");
 	return function gentleAi(pi: ExtensionAPI): void {
 	const pendingReviewAuthorizations = new Map<string, PendingReviewAuthorization>();
-	const pendingReviewConsents = new Map<string, PendingReviewConsent>();
+	const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
 	const consumedNativeAuthorizations = new Set<string>();
 	const pendingCommitTransactions = new Map<string, { cwd: string; transactionId: string }>();
 	const correctionEvidenceByLineage = new Map<string, CorrectionEvidence>();
 	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
 
-	pi.on("session_shutdown", () => {
-		cleanupAllPendingReviewConsents(pendingReviewConsents, candidateViews);
+	pi.on("session_shutdown", (_event, context) => {
+		const sessionKey = pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey);
+		cleanupAllPendingReviewConsents(pendingReviewConsentRegistry, sessionKey);
+		processRetainedUntrackedSelections.delete(sessionKey);
 	});
 
 	pi.registerTool({
@@ -7345,7 +7648,9 @@ function createGentleAiExtensionForTesting(
 				candidateViews,
 				ctx,
 				correctionEvidenceByLineage,
-				pendingReviewConsents,
+				((sessionKey: PendingReviewConsentSessionKey) => processRetainedUntrackedSelections.get(sessionKey) ?? processRetainedUntrackedSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
+				pendingReviewConsentRegistry,
+				pendingReviewConsentFallbackKey,
 				writeReviewConsentLatch,
 				reviewConsentNow,
 				reviewConsentScheduleTimer,
@@ -7813,21 +8118,23 @@ function createGentleAiExtensionForTesting(
 				const result = await nativeReviewCli.reviewMode({ cwd: ctx.cwd, operation: subAction as NativeReviewModeOperation });
 				if (subAction === NATIVE_REVIEW_MODE_OPERATION.DISABLE && result.status.effective === "off") {
 					pendingReviewAuthorizations.clear();
-					cleanupAllPendingReviewConsents(pendingReviewConsents, candidateViews);
+					cleanupAllPendingReviewConsents(
+						pendingReviewConsentRegistry,
+						pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey),
+					);
 				}
 				const report = `receipt-driven development: ${result.status.effective} (decided by ${result.status.source})`;
 				// A mutating sub-action that left the effective mode unchanged did
 				// not do what the user asked, and reporting only the resulting
 				// status reads as if it had. This is reachable for exactly one
 				// shape: `enable` against a global off. Pi always passes
-				// `--scope clone` (Design Decision #7), and a clone-local override
-				// may only ever disable, so the native call exits 0, reports
-				// operation "enable", and changes nothing. Say that, and name the
-				// command that does resolve it — Pi has none, so the honest
-				// continuation is gentle-ai's own global-scope command.
+				// `--scope clone` (Design Decision #7), which only clears a
+				// clone-local override and cannot enable global RDD. The native call
+				// exits 0, reports operation "enable", and changes nothing. Say
+				// that, and name the global-scope command that resolves it.
 				const requested = subAction === NATIVE_REVIEW_MODE_OPERATION.ENABLE ? "on" : subAction === NATIVE_REVIEW_MODE_OPERATION.DISABLE ? "off" : result.status.effective;
 				if (result.status.effective !== requested) {
-					ctx.ui.notify(`${report}\nThat did not turn reviews back on: /gentle:review-mode only sets clone scope, and a clone-local setting can never override a global off. Run \`gentle-ai review mode enable --scope=global\` to turn them back on.`, "warning");
+					ctx.ui.notify(`${report}\nThat did not turn reviews back on: /gentle:review-mode enable only clears a clone-local override, which cannot override a global off. Run \`gentle-ai review mode enable --scope=global\` to turn them back on.`, "warning");
 					return;
 				}
 				ctx.ui.notify(report, "info");

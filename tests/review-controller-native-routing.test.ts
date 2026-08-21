@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -302,6 +302,7 @@ function targetStatusFixture(options: {
 	currentCandidateTree?: string;
 	paths?: readonly string[];
 	projection?: "workspace" | "staged";
+	intendedUntracked?: readonly string[];
 } = {}): ReviewStatusV3 {
 	const applicability = options.applicability ?? "current_target";
 	const action = options.action ?? (applicability === "current_target" ? "finalize" : applicability === "unrelated" ? "start" : applicability === "ambiguous" ? "select_lineage" : "repair_authority");
@@ -314,6 +315,7 @@ function targetStatusFixture(options: {
 	const tree = options.currentCandidateTree ?? "b".repeat(40);
 	const baseTree = options.baseTree ?? tree;
 	const paths = options.paths ?? ["app.ts"];
+	const intendedUntracked = options.intendedUntracked ?? [];
 	const projection = {
 		schema: "gentle-ai.review-integration.projection/v1" as const,
 		kind: "current-changes" as const,
@@ -323,7 +325,7 @@ function targetStatusFixture(options: {
 		currentCandidateTree: tree,
 		pathsDigest: sha,
 		paths,
-		intendedUntracked: [],
+		intendedUntracked,
 		intendedUntrackedProof: sha,
 		initialSnapshotIdentity: sha,
 		currentSnapshotIdentity: sha,
@@ -357,7 +359,7 @@ function targetStatusFixture(options: {
 			current_candidate_tree: tree,
 			paths_digest: sha,
 			paths,
-			intended_untracked: [],
+			intended_untracked: intendedUntracked,
 			intended_untracked_proof: sha,
 			initial_snapshot_identity: sha,
 			current_snapshot_identity: sha,
@@ -392,6 +394,7 @@ function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReview
 		candidate = new CandidateViewRegistry().create({
 			contributorRoot: request.cwd,
 			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef, committedOnly: true }),
+			...(request.intendedUntracked === undefined ? {} : { intendedUntracked: request.intendedUntracked }),
 		});
 		return targetStatusFixture({
 			applicability: "unrelated",
@@ -400,6 +403,7 @@ function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReview
 			currentCandidateTree: candidate.candidateTree,
 			paths: candidate.paths,
 			projection: request.projection ?? "workspace",
+			intendedUntracked: request.intendedUntracked,
 		});
 	} catch {
 		return targetStatusFixture({ applicability: "unrelated", action: "start" });
@@ -590,20 +594,29 @@ test("new ordinary START and native-lineage FINALIZE use exactly one native call
 test("native FINALIZE resolves STATUS and mutation against the verified frozen candidate root", async (t) => {
 	const cwd = repository(t);
 	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	writeFileSync(join(cwd, "selected.ts"), "export const selected = true;\n");
+	const selection = {
+		untrackedScope: "select" as const,
+		expectedUntrackedInventory: `sha256:${"9".repeat(64)}`,
+		intendedUntracked: ["selected.ts"],
+	};
 	const candidateViews = new CandidateViewRegistry();
 	const statusRoots: string[] = [];
+	const statusRequests: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
 	let finalizeRoot: string | undefined;
 	const native = fakeNative({
 		targetStatus: async (request) => {
 			if (request.lineageId === undefined) return candidateStartTargetStatus(request);
 			statusRoots.push(request.cwd);
-			if (request.cwd === cwd) return targetStatusFixture({ applicability: "unrelated", action: "start" });
+			statusRequests.push(request);
+			if (request.cwd === cwd || request.untrackedScope !== selection.untrackedScope) return targetStatusFixture({ applicability: "unrelated", action: "start" });
 			const candidate = candidateViews.resolveForFinalize(request.lineageId);
 			return targetStatusFixture({
 				lineageId: request.lineageId,
 				baseTree: candidate.baseTree,
 				currentCandidateTree: candidate.candidateTree,
 				paths: candidate.paths,
+				intendedUntracked: selection.intendedUntracked,
 			});
 		},
 		start: async () => ({
@@ -623,7 +636,7 @@ test("native FINALIZE resolves STATUS and mutation against the verified frozen c
 		},
 	});
 	const { controller } = runtime(native, undefined, undefined, undefined, candidateViews);
-	await controller.execute("candidate-root-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	await controller.execute("candidate-root-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", ...selection }) }, undefined, undefined, context(cwd));
 	const candidateRoot = candidateViews.resolveForFinalize("candidate-root-finalize").root;
 	const result = await controller.execute("candidate-root-finalize", {
 		operation: "finalize",
@@ -631,6 +644,7 @@ test("native FINALIZE resolves STATUS and mutation against the verified frozen c
 		input: JSON.stringify({}),
 	}, undefined, undefined, context(cwd));
 	assert.deepEqual(statusRoots, [candidateRoot]);
+	assert.deepEqual(statusRequests, [{ cwd: candidateRoot, lineageId: "candidate-root-finalize", agent: "pi", ...selection }]);
 	assert.equal(finalizeRoot, candidateRoot);
 	assert.equal((result.details as { result: { state: string } }).result.state, "approved");
 });
@@ -1159,11 +1173,12 @@ test("fresh registry reload ignores raw correction state and follows the native 
 	frozen.cleanup();
 	let finalizes = 0;
 	let statuses = 0;
+	const candidateViews = new CandidateViewRegistry();
 	const { controller } = runtime(fakeNative({
 		finalize: async () => { finalizes += 1; return { lineageId: "correction-lineage", state: "approved", action: "approved", storeRevision: "r2" }; },
 		targetStatus: async () => { statuses += 1; return statuses === 1 ? status : validationStatus; },
 		captureEvidence: async () => capturedCorrectionEvidence(status, "passed", "6"),
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, undefined, undefined, candidateViews);
 	const required = await controller.execute("correction-validation-request", { operation: "finalize", lineageId: "correction-lineage", input: JSON.stringify({ final_evidence: "focused tests passed", final_verification_passed: true }) }, undefined, undefined, context(cwd));
 	const request = required.details as { status: string; result: Record<string, unknown> };
 	assert.equal(request.status, "in-progress");
@@ -1172,6 +1187,7 @@ test("fresh registry reload ignores raw correction state and follows the native 
 	writeFileSync(join(cwd, "escape.ts"), "export const escape = true;\n");
 	assert.equal(((await controller.execute("correction-scope-escape", { operation: "finalize", lineageId: "correction-lineage", input: JSON.stringify({ final_evidence: "focused tests passed", final_verification_passed: true }) }, undefined, undefined, context(cwd))).details as { outcome: string }).outcome, "native-operation-failed");
 	assert.equal(finalizes, 0);
+	candidateViews.cleanupAll();
 });
 
 test("production correction routing captures evidence before validation and enforces all three outcomes", async (t) => {
@@ -1624,7 +1640,7 @@ test("provider refuter vector executes exactly as rendered, then STATUS is re-qu
 	let finalizes = 0;
 	let statusCalls = 0;
 	const roleStatus = bindProviderRoleVector(targetStatusFixture({ lineageId: "native-lineage" }), "refuter");
-	const settledStatus = targetStatusFixture({ lineageId: "native-lineage" });
+	const settledStatus = targetStatusFixture({ lineageId: "native-lineage", authorityState: "approved", action: "stop" });
 	const { controller } = runtime(fakeNative({
 		targetStatus: async () => {
 			statusCalls += 1;
@@ -1657,6 +1673,7 @@ test("provider refuter vector executes exactly as rendered, then STATUS is re-qu
 	const details = result.details as { provider_roles?: { transport?: string; executed_slots?: Array<Record<string, unknown>> } };
 	assert.equal(details.provider_roles?.transport, "go_owned_pi_process");
 	assert.deepEqual(details.provider_roles?.executed_slots?.map((slot) => slot.role), ["refuter"]);
+	assert.equal((result.details as { result?: { authority?: { state?: string } } }).result?.authority?.state, "approved");
 });
 
 test("provider targeted-validator vector keeps the frozen request hash token verbatim", async (t) => {
@@ -1678,6 +1695,71 @@ test("provider targeted-validator vector keeps the frozen request hash token ver
 	assert.equal(executed.length, 1);
 	assert.ok(executed[0]!.includes(`--request-hash=sha256:${"9".repeat(64)}`), "the frozen request hash token must pass through verbatim");
 	assert.ok(executed[0]!.includes("--execute=true"));
+});
+
+test("document-free FINALIZE queries fresh STATUS after provider validation capture and executes only its transition", async (t) => {
+	const cwd = repository(t);
+	const lineageId = "fresh-provider-status";
+	const roleStatus = bindProviderRoleVector(targetStatusFixture({ lineageId, authorityState: "validating" }), "targeted-validator");
+	const providerFinalizeStatus = (repositoryContext: string): ReviewStatusV3 => {
+		const status = targetStatusFixture({ lineageId, authorityState: "validating" });
+		(status.raw as Record<string, unknown>).schema = "gentle-ai.review-integration.status/v5";
+		status.nextTransition = {
+			kind: "execute",
+			reasonCode: "captured_evidence_ready",
+			execute: {
+				operation: "review.finalize",
+				arguments: [
+					{ name: "lineage", value: lineageId, token: `--lineage=${lineageId}` },
+					{ name: "expected-revision", value: status.authority!.revision, token: `--expected-revision=${status.authority!.revision}` },
+					{ name: "target", value: status.targetIdentity, token: `--target=${status.targetIdentity}` },
+					{ name: "repository-context", value: repositoryContext, token: `--repository-context=${repositoryContext}` },
+					{ name: "captured-evidence", value: "true", token: "--captured-evidence=true" },
+				],
+				preconditions: [],
+				binding: { targetIdentity: status.targetIdentity, lineageId },
+			},
+		};
+		return status;
+	};
+	const capturedStatus = providerFinalizeStatus(`rctx1_${"a".repeat(64)}`);
+	const freshStatus = providerFinalizeStatus(`rctx1_${"b".repeat(64)}`);
+	const transitions: Array<readonly string[]> = [];
+	let statusCalls = 0;
+	let captures = 0;
+	let rawFinalizes = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statusCalls += 1;
+			return [roleStatus, capturedStatus, freshStatus][statusCalls - 1]!;
+		},
+		captureProviderRole: async () => {
+			captures += 1;
+			return { schema: "gentle-ai.review-provider-role-capture/v1", lineageId, targetIdentity: roleStatus.targetIdentity, role: "targeted-validator", captured: true };
+		},
+		finalizeTransition: async (request) => {
+			transitions.push(request.argumentTokens);
+			return { lineageId, state: "approved", action: "approved", storeRevision: "r-final" };
+		},
+		finalize: async () => {
+			rawFinalizes += 1;
+			return { lineageId, state: "approved", action: "approved", storeRevision: "r-raw" };
+		},
+	}));
+	await controller.execute("capture-provider-validation", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
+	assert.equal(captures, 1);
+	assert.equal(statusCalls, 2, "provider validation capture must return its fresh mapped STATUS without retaining it");
+	const finalized = await controller.execute("finalize-after-provider-validation", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
+	assert.equal(statusCalls, 3, "document-free FINALIZE must query negotiated STATUS again after provider validation capture");
+	assert.deepEqual(transitions, [[
+		`--lineage=${lineageId}`,
+		`--expected-revision=${freshStatus.authority!.revision}`,
+		`--target=${freshStatus.targetIdentity}`,
+		`--repository-context=rctx1_${"b".repeat(64)}`,
+		"--captured-evidence=true",
+	]], "only the fresh STATUS transition may reach finalizeTransition");
+	assert.equal(rawFinalizes, 0, "the fresh provider execute transition must win over raw captured-results fallback");
+	assert.equal((finalized.details as { result?: { state?: string } }).result?.state, "approved");
 });
 
 test("a failed provider role vector surfaces the typed error and never auto-relaunches", async (t) => {
@@ -1740,6 +1822,43 @@ test("negotiated FINALIZE executes the provider-rendered captured-results transi
 	assert.deepEqual(transitions, [{ cwd, argumentTokens: ["--lineage=native-lineage", "--captured-results=true"] }]);
 	assert.equal(finalizes, 0, "the provider-driven lane never assembles a document finalize");
 	assert.deepEqual(result.details, { operation: "finalize", result: { lineage_id: "native-lineage", state: "approved", action: "approved", store_revision: "r1", receipt_path: "/opaque/receipt" } });
+});
+
+test("status/v5 FINALIZE refuses a provider transition without exact tokens before adapter invocation", async (t) => {
+	const cwd = repository(t);
+	let transitions = 0;
+	let finalizes = 0;
+	const status = targetStatusFixture({ lineageId: "native-lineage" });
+	(status.raw as Record<string, unknown>).schema = "gentle-ai.review-integration.status/v5";
+	status.nextTransition = {
+		kind: "execute",
+		reasonCode: "captured_results_ready",
+		execute: {
+			operation: "review.finalize",
+			arguments: [
+				{ name: "lineage", value: "native-lineage", token: "--lineage=native-lineage" },
+				{ name: "captured_results", value: "true" },
+			],
+			preconditions: [],
+			binding: { targetIdentity: status.targetIdentity, lineageId: "native-lineage" },
+		},
+	};
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => status,
+		finalize: async () => {
+			finalizes += 1;
+			return { lineageId: "native-lineage", state: "approved", action: "approved", storeRevision: "r1" };
+		},
+		finalizeTransition: async () => {
+			transitions += 1;
+			return { lineageId: "native-lineage", state: "approved", action: "approved", storeRevision: "r1" };
+		},
+	}));
+	const result = await controller.execute("v5-missing-finalize-token", { operation: "finalize", lineageId: "native-lineage", input: JSON.stringify({}) }, undefined, undefined, context(cwd));
+	assert.equal((result.details as { outcome?: string }).outcome, "native-operation-failed");
+	assert.match(JSON.stringify(result.details), /non-empty exact token/);
+	assert.equal(transitions, 0, "a v5 transition missing an exact token must fail before finalizeTransition");
+	assert.equal(finalizes, 0, "a v5 transition missing an exact token must not fall back to raw finalize");
 });
 
 test("negotiated FINALIZE refuses a finalize transition bound to a different lineage", async (t) => {
@@ -2050,6 +2169,7 @@ test("native ordinary START rejects malformed input before resolving the review-
 	const cwd = repository(t);
 	let reviewModeCalls = 0;
 	let starts = 0;
+	let statuses = 0;
 	const { controller } = runtime(fakeNative({
 		reviewMode: async () => {
 			reviewModeCalls += 1;
@@ -2058,6 +2178,10 @@ test("native ordinary START rejects malformed input before resolving the review-
 		start: async () => {
 			starts += 1;
 			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+		targetStatus: async () => {
+			statuses += 1;
+			throw new Error("target status must not run for malformed untracked selection");
 		},
 	}));
 	for (const [input, reason] of [
@@ -2069,12 +2193,80 @@ test("native ordinary START rejects malformed input before resolving the review-
 		[{ mode: "ordinary", baseRef: "origin/main" }, "committed-only-required"],
 		[{ mode: "ordinary", committedOnly: true }, "committed-only-invalid"],
 		[{ mode: "ordinary", baseRef: "refs/heads/missing", committedOnly: true }, "base-ref-unresolvable"],
+		[{ mode: "ordinary", untrackedScope: "exclude" }, "untracked-selection-invalid"],
+		[{ mode: "ordinary", expectedUntrackedInventory: `sha256:${"a".repeat(64)}` }, "untracked-selection-invalid"],
+		[{ mode: "ordinary", untrackedScope: "exclude", expectedUntrackedInventory: `sha256:${"a".repeat(64)}`, intendedUntracked: ["selected.ts"] }, "untracked-selection-invalid"],
+		[{ mode: "ordinary", untrackedScope: "select", expectedUntrackedInventory: `sha256:${"a".repeat(64)}`, intendedUntracked: [] }, "untracked-selection-invalid"],
+		[{ mode: "ordinary", untrackedScope: "select", expectedUntrackedInventory: `sha256:${"a".repeat(64)}`, intendedUntracked: ["../selected.ts"] }, "untracked-selection-invalid"],
 	] as const) {
 		const rejected = await controller.execute("malformed-start", { operation: "start", input: JSON.stringify(input) }, undefined, undefined, context(cwd));
 		assert.equal((rejected.details as { reason?: unknown }).reason, reason);
 	}
 	assert.equal(reviewModeCalls, 0);
+	assert.equal(statuses, 0);
 	assert.equal(starts, 0);
+});
+
+test("ordinary START relays untracked selection without materializing a selectorless collect target", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
+	writeFileSync(join(cwd, "selected.ts"), "export const selected = true;\n");
+	writeFileSync(join(cwd, "extra.ts"), "export const extra = true;\n");
+	class TrackingCandidateViews extends CandidateViewRegistry {
+		creates = 0;
+		override createOrReuse(request: Parameters<CandidateViewRegistry["createOrReuse"]>[0]): ReturnType<CandidateViewRegistry["createOrReuse"]> {
+			this.creates += 1;
+			return super.createOrReuse(request);
+		}
+	}
+	const candidateViews = new TrackingCandidateViews();
+	let starts = 0;
+	const selectionRequired = targetStatusFixture({ applicability: "unrelated", action: "start" });
+	selectionRequired.nextTransition = {
+		kind: "collect",
+		reasonCode: "intended_untracked_selection_required",
+		collect: { inputs: [{ name: "intended_untracked_selection", schema: "gentle-ai.review-intended-untracked-selection/v1", captureOperation: "external.select_intended_untracked", arguments: [] }] },
+	};
+	const { controller } = runtime(fakeNative({
+		targetStatus: async (request) => {
+			if (request.untrackedScope === undefined) return selectionRequired;
+			const candidate = new CandidateViewRegistry().create({ contributorRoot: cwd, intendedUntracked: request.intendedUntracked });
+			try {
+				return targetStatusFixture({
+					applicability: "unrelated",
+					action: "start",
+					baseTree: candidate.baseTree,
+					currentCandidateTree: candidate.candidateTree,
+					paths: candidate.paths,
+					intendedUntracked: request.intendedUntracked,
+				});
+			} finally {
+				candidate.cleanup();
+			}
+		},
+		start: async () => {
+			starts += 1;
+			return { lineageId: "selected-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}), undefined, undefined, undefined, candidateViews);
+
+	const blocked = await controller.execute("selection-required", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	assert.equal((blocked.details as { status?: string }).status, "blocked");
+	assert.equal((blocked.details as { result?: unknown }).result, selectionRequired.raw);
+	assert.equal(starts, 0);
+	assert.equal(candidateViews.creates, 0);
+
+	const digest = `sha256:${"b".repeat(64)}`;
+	const started = await controller.execute("selected-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", untrackedScope: "select", expectedUntrackedInventory: digest, intendedUntracked: ["selected.ts"] }) }, undefined, undefined, context(cwd));
+	assert.equal((started.details as { result: { lineage_id: string } }).result.lineage_id, "selected-lineage");
+	assert.equal(starts, 1);
+	const view = candidateViews.resolveForLens("selected-lineage", "review-reliability");
+	try {
+		assert.deepEqual(view.paths, ["app.ts", "selected.ts"]);
+		assert.equal(lstatSync(join(view.root, "extra.ts"), { throwIfNoEntry: false }), undefined);
+	} finally {
+		view.cleanup();
+	}
 });
 
 test("native START preserves the default dirty-inclusive candidate without base flags", async (t) => {
@@ -5563,41 +5755,42 @@ function bindTargetedValidationSubmission(status: ReviewStatusV3): ReviewStatusV
 			`--request-hash=${status.validationRequest!.requestHash}`,
 			`--repository-context=${EVIDENCE_SLOT_REPOSITORY_CONTEXT}`,
 			"--validation={{value}}",
+			"--captured-evidence=true",
 		],
 		value: { slot: "validation", domain: "artifact_path_or_stdin", substitutionLocation: 6 },
 	};
 	return status;
 }
 
-test("targeted validation executes the collect slot's rendered finalize submission tokens verbatim", async (t) => {
+test("validation-only targeted validation executes the collect slot's rendered finalize submission tokens verbatim", async (t) => {
 	const cwd = repository(t);
+	commitFile(cwd, "unrelated.ts", "export const unrelated = false;\n", "add unrelated");
 	writeFileSync(join(cwd, "app.ts"), "export const validated = true;\n");
+	writeFileSync(join(cwd, "unrelated.ts"), "export const unrelated = true;\n");
 	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
-	const beforeCapture = bindEvidenceSubmissionCollection(targetStatusFixture({
+	const targeted = bindTargetedValidationSubmission(targetStatusFixture({
 		lineageId: "validation-submission",
 		authorityState: "correction_required",
 		baseTree: frozen.baseTree,
 		currentCandidateTree: frozen.candidateTree,
 		paths: frozen.paths,
 	}));
-	const afterCapture = bindTargetedValidationSubmission(targetStatusFixture({
-		lineageId: "validation-submission",
-		authorityState: "validating",
-		baseTree: frozen.baseTree,
-		currentCandidateTree: frozen.candidateTree,
-		paths: frozen.paths,
-	}));
-	const expectedTokens = (afterCapture.nextTransition!.collect!.inputs[0]! as { submissionDescriptor: { argumentTokens: readonly string[] } }).submissionDescriptor.argumentTokens;
+	(targeted.raw as Record<string, unknown>).schema = "gentle-ai.review-integration.status/v5";
+	targeted.validationRequest!.correctionPaths = ["app.ts"];
+	targeted.validationRequest!.correctionPathsDigest = `sha256:${"f".repeat(64)}`;
+	const expectedTokens = (targeted.nextTransition!.collect!.inputs[0]! as { submissionDescriptor: { argumentTokens: readonly string[] } }).submissionDescriptor.argumentTokens;
+	const selection = { untrackedScope: "select" as const, expectedUntrackedInventory: `sha256:${"e".repeat(64)}`, intendedUntracked: ["selected-a.ts"] };
 	frozen.cleanup();
+	const statusRequests: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
 	const legacyFinalizes: Array<Record<string, unknown>> = [];
 	const submissions: Array<Record<string, unknown>> = [];
-	let statuses = 0;
+	let captures = 0;
 	const { controller } = runtime(fakeNative({
-		targetStatus: async () => {
-			statuses += 1;
-			return statuses === 1 ? beforeCapture : afterCapture;
+		targetStatus: async (request) => {
+			statusRequests.push(request);
+			return targeted;
 		},
-		captureEvidenceSubmission: async () => capturedSlotEvidence(beforeCapture, "passed", "7"),
+		captureEvidence: async () => { captures += 1; throw new Error("targeted validation must not capture evidence"); },
 		finalize: async (request) => {
 			legacyFinalizes.push(request as unknown as Record<string, unknown>);
 			throw new Error("misbound validation: the collect slot's rendered finalize submission tokens were bypassed");
@@ -5607,30 +5800,43 @@ test("targeted validation executes the collect slot's rendered finalize submissi
 			return { lineageId: "validation-submission", state: "approved", action: "approved", storeRevision: "r-approved" };
 		},
 	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	await controller.execute("validation-submission-selection", { operation: "status", lineageId: "validation-submission", input: JSON.stringify(selection) }, undefined, undefined, context(cwd));
+	const validation = {
+		request_hash: "9".repeat(64), correction_ids: [],
+		original_criteria: { passed: true, evidence: ["acceptance passes"] },
+		correction_regression: { passed: true, evidence: ["regression passes"] },
+		fix_caused_findings: [], follow_ups: [],
+	};
 	const completed = await controller.execute("validation-submission", {
-		operation: "finalize",
-		lineageId: "validation-submission",
-		input: JSON.stringify({
-			final_evidence: "evidence: passed",
-			final_verification_outcome: "passed",
-			validation: {
-				request_hash: "9".repeat(64), correction_ids: [],
-				original_criteria: { passed: true, evidence: ["acceptance passes"] },
-				correction_regression: { passed: true, evidence: ["regression passes"] },
-				fix_caused_findings: [], follow_ups: [],
-			},
-		}),
+		operation: "finalize", lineageId: "validation-submission", input: JSON.stringify({ validation }),
 	}, undefined, undefined, context(cwd));
 	const details = completed.details as Record<string, unknown>;
-	assert.deepEqual(legacyFinalizes, [], "the legacy reconstructed --validation argv must never run when the slot renders submission tokens");
+	assert.deepEqual(legacyFinalizes, [], "the direct native finalize fallback must not bypass the rendered validation submission");
+	assert.equal(captures, 0, "validation-only finalize must not capture evidence");
 	assert.equal(submissions.length, 1);
 	assert.deepEqual(submissions[0]!.argumentTokens, expectedTokens, "the provider-rendered submission tokens must be passed verbatim, in provider order");
+	assert.equal(submissions[0]!.cwd, cwd, "the rendered validation submission runs from the canonical workspace root");
 	assert.equal(submissions[0]!.valueSubstitutionLocation, 6);
 	const staged = JSON.parse(String(submissions[0]!.valueDocument)) as Record<string, unknown>;
-	assert.equal(staged.targeted_validation_request_hash, afterCapture.validationRequest!.requestHash);
-	assert.equal(staged.correction_target_identity, afterCapture.validationRequest!.correctionTargetIdentity);
+	assert.equal(staged.targeted_validation_request_hash, targeted.validationRequest!.requestHash);
+	assert.equal(staged.correction_target_identity, targeted.validationRequest!.correctionTargetIdentity);
 	assert.deepEqual(staged.original_criteria, { passed: true, evidence: ["acceptance passes"] });
+	assert.deepEqual(statusRequests.map(({ untrackedScope, expectedUntrackedInventory, intendedUntracked }) => ({ untrackedScope, expectedUntrackedInventory, intendedUntracked })), [selection, selection, selection]);
+	assert.equal(statusRequests[0]!.cwd, cwd);
+	assert.equal(statusRequests[2]!.cwd, cwd);
 	assert.equal((details.result as { state?: string } | undefined)?.state, "approved");
+	for (const correctionPaths of [[], ["outside.ts"]] as const) {
+		targeted.validationRequest!.correctionPaths = correctionPaths;
+		const rejected = await controller.execute(`validation-submission-${correctionPaths.length}`, {
+			operation: "finalize", lineageId: "validation-submission", input: JSON.stringify({ validation }),
+		}, undefined, undefined, context(cwd));
+		assert.equal((rejected.details as { outcome?: string }).outcome, "native-operation-failed");
+	}
+	assert.equal(submissions.length, 1, "invalid correction paths fail before native mutation");
+	assert.deepEqual(legacyFinalizes, []);
+	assert.equal(captures, 0);
+	await controller.execute("validation-submission-terminal-clear", { operation: "status", lineageId: "validation-submission" }, undefined, undefined, context(cwd));
+	assert.deepEqual(statusRequests.at(-1), { cwd, lineageId: "validation-submission" });
 });
 
 // Live smoke root cause (2026-08-16, dev binary 2.4.0-main): status/v5 mints
@@ -5677,16 +5883,28 @@ test("status/v5 finalize lane rebinds negotiated status to the workspace root be
 	const expectedEvidenceTokens = workspaceBefore.nextTransition!.collect!.inputs[0]!.submissionDescriptor!.argumentTokens;
 	const expectedValidationTokens = (workspaceAfter.nextTransition!.collect!.inputs[0]! as { submissionDescriptor: { argumentTokens: readonly string[] } }).submissionDescriptor.argumentTokens;
 	frozen.cleanup();
+	const selection = {
+		untrackedScope: "select" as const,
+		expectedUntrackedInventory: `sha256:${"e".repeat(64)}`,
+		intendedUntracked: ["selected-b.ts", "selected-a.ts"],
+	};
 	const statusRoots: string[] = [];
+	const statusRequests: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
 	const evidenceSubmissions: Array<Record<string, unknown>> = [];
 	const finalizeSubmissions: Array<Record<string, unknown>> = [];
 	let workspaceStatuses = 0;
+	let terminal = false;
 	const { controller } = runtime(fakeNative({
 		targetStatus: async (request) => {
 			statusRoots.push(request.cwd);
+			statusRequests.push(request);
+			const selected = request.untrackedScope === selection.untrackedScope &&
+				request.expectedUntrackedInventory === selection.expectedUntrackedInventory &&
+				JSON.stringify(request.intendedUntracked) === JSON.stringify(selection.intendedUntracked);
+			if (!terminal && request.lineageId === "v5-rebind" && !selected) return targetStatusFixture({ applicability: "unrelated", action: "start" });
 			if (request.cwd !== cwd) return viewBefore;
 			workspaceStatuses += 1;
-			return workspaceStatuses === 1 ? workspaceBefore : workspaceAfter;
+			return workspaceStatuses <= 2 ? workspaceBefore : workspaceAfter;
 		},
 		captureEvidenceSubmission: async (request: Record<string, unknown>) => {
 			evidenceSubmissions.push(request);
@@ -5694,9 +5912,21 @@ test("status/v5 finalize lane rebinds negotiated status to the workspace root be
 		},
 		finalizeSubmission: async (request: Record<string, unknown>) => {
 			finalizeSubmissions.push(request);
+			terminal = true;
 			return { lineageId: "v5-rebind", state: "approved", action: "approved", storeRevision: "r-approved" };
 		},
 	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	await controller.execute("v5-rebind-selection", {
+		operation: "status",
+		lineageId: "v5-rebind",
+		input: JSON.stringify(selection),
+	}, undefined, undefined, context(cwd));
+	const staleSelection = { ...selection, expectedUntrackedInventory: `sha256:${"f".repeat(64)}` };
+	await controller.execute("v5-rebind-stale-selection", {
+		operation: "status",
+		lineageId: "v5-rebind",
+		input: JSON.stringify(staleSelection),
+	}, undefined, undefined, context(cwd));
 	const completed = await controller.execute("v5-rebind", {
 		operation: "finalize",
 		lineageId: "v5-rebind",
@@ -5712,12 +5942,22 @@ test("status/v5 finalize lane rebinds negotiated status to the workspace root be
 		}),
 	}, undefined, undefined, context(cwd));
 	const details = completed.details as Record<string, unknown>;
-	assert.notEqual(statusRoots[0], cwd, "the first status query still freezes through the candidate view root");
-	assert.equal(statusRoots[1], cwd, "a v5 status must be rebound to the workspace root before any rendered payload executes");
+	assert.notEqual(statusRoots[2], cwd, "the initial FINALIZE status query still freezes through the candidate view root");
+	assert.equal(statusRoots[3], cwd, "a v5 status must be rebound to the workspace root before any rendered payload executes");
 	assert.equal(evidenceSubmissions.length, 1);
 	assert.deepEqual(evidenceSubmissions[0]!.argumentTokens, expectedEvidenceTokens, "the evidence submission must carry the workspace-root-minted tokens");
 	assert.equal(finalizeSubmissions.length, 1);
 	assert.deepEqual(finalizeSubmissions[0]!.argumentTokens, expectedValidationTokens, "the validation submission must carry the workspace-root-minted tokens");
-	assert.equal(statusRoots.filter((root) => root === cwd).length, 2, "post-evidence status must also be workspace-bound");
+	assert.equal(statusRoots.filter((root) => root === cwd).length, 4, "the public, stale, rebound, and post-evidence statuses must use the workspace root");
+	assert.deepEqual(
+		statusRequests.map((request) => ({
+			untrackedScope: request.untrackedScope,
+			expectedUntrackedInventory: request.expectedUntrackedInventory,
+			intendedUntracked: request.intendedUntracked,
+		})),
+		[selection, staleSelection, selection, selection, selection],
+	);
 	assert.equal((details.result as { state?: string } | undefined)?.state, "approved");
+	await controller.execute("v5-rebind-terminal-clear", { operation: "status", lineageId: "v5-rebind" }, undefined, undefined, context(cwd));
+	assert.deepEqual(statusRequests.at(-1), { cwd, lineageId: "v5-rebind" });
 });

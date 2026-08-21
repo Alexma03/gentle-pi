@@ -251,33 +251,36 @@ test("Judgment Day skill and prompts preserve bounded fix and re-judgment author
 	assertMatches(FIX_AGENT, read(FIX_AGENT), FIX_PATTERNS);
 });
 
-test("orchestrator, skill, and README agree on compact facade and compatibility", () => {
+test("orchestrator, injected skill, and README defer RDD lifecycle ownership to Gentle AI", () => {
+	const boundary = "Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.";
+	const orchestrator = union(ORCHESTRATOR);
+	assert.ok(orchestrator.includes(boundary), "orchestrator must carry the sole static ownership boundary");
+
 	for (const [label, content] of [
-		["orchestrator", union(ORCHESTRATOR)],
 		[GENTLE_SKILL, read(GENTLE_SKILL)],
 		[README, read(README)],
 	] as const) {
 		assertMatches(label, content, [
-			/start -> finalize -> validate/,
-			/`evidence_class`[\s\S]*`causal_disposition`/,
-			/one correction transaction/i,
-			/(?:graph-v1|legacy)[\s\S]*(?:read-only|reject mutation)/i,
-			/Judgment Day[\s\S]*(?:explicit|separate)/i,
-			/(?:one-shot|one exact one-shot)[\s\S]*(?:bash time|bash-time)/i,
+			/Gentle AI dynamically supplies runtime-specific RDD instructions/i,
+			/(?:sole lifecycle authority|does not define an RDD lifecycle)/i,
 		]);
+	}
+
+	for (const [label, content] of [
+		["orchestrator", orchestrator],
+		[GENTLE_SKILL, read(GENTLE_SKILL)],
+	] as const) {
+		assert.doesNotMatch(content, /start -> finalize -> validate|INSPECT before START|next_transition|review\.capture-result/i, label);
 	}
 });
 
-test("README documents the exact native pairing and authority-preserving rollback boundary", () => {
+test("README documents the dynamic runtime authority boundary without an old package route", () => {
 	const content = read(README);
-	assert.match(content, /package-local Gentle AI v2\.4\.0 executable/i);
-	assert.match(content, /independently hashes it[\s\S]*negotiates `gentle-ai\.review-integration\/v2`/i);
-	assert.match(content, /Capabilities are cached by that executable digest/i);
-	assert.match(content, /Every START, target status, FINALIZE, validate, and BIND-SDD request passes the same contract identifier/i);
-	assert.match(content, /rollback MUST preserve every native store and receipt/);
-	assert.match(content, /MUST NOT run a downgraded binary/i);
-	assert.match(content, /existing branch.*advertised commit equals.*old object/is);
-	assert.match(content, /never guesses? a base.*upstream.*default branch.*nearest ancestor/is);
+	assert.match(content, /Gentle AI dynamically supplies runtime-specific RDD instructions/i);
+	assert.match(content, /does not define an RDD lifecycle/i);
+	assert.doesNotMatch(content, /New ordinary review uses compact `gentle_review` `start -> finalize -> validate`\./);
+	assert.match(content, /Dangerous-command safety remains independent and authoritative/);
+	assert.match(content, /Project and user overrides may shadow a package asset/);
 });
 
 test("managed contracts retain no fresh lifecycle review directive", () => {

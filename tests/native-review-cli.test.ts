@@ -8,6 +8,7 @@ import {
 	NATIVE_REVIEW_ERROR_CODE,
 	NativeReviewCliError,
 	NativeReviewCliV213 as NativeReviewCliV213Production,
+	NativeReviewCliV214,
 	NativeReviewCliV216,
 	createNodeExecFileAdapter,
 	type ExecFileAdapter,
@@ -17,6 +18,14 @@ import {
 	NativeReviewCliV214 as RuntimeNativeReviewCliV214,
 	NativeReviewCliV216 as RuntimeNativeReviewCliV216,
 } from "../runtime/native-review-cli.mjs";
+import { GENTLE_AI_VERSION, setGentleAiDevBinaryEnvironmentForTesting } from "../lib/gentle-ai-binary.ts";
+
+const pinnedNativeTestHome = await mkdtemp(join(tmpdir(), "gentle-pi-native-review-cli-pinned-"));
+setGentleAiDevBinaryEnvironmentForTesting({ env: {}, home: pinnedNativeTestHome });
+test.after(async () => {
+	setGentleAiDevBinaryEnvironmentForTesting(undefined);
+	await rm(pinnedNativeTestHome, { recursive: true, force: true });
+});
 
 // The queued-adapter unit tests never execute a real process; default to a fixed
 // absolute package-local path so they do not depend on an installed binary
@@ -280,7 +289,7 @@ test("native output limits dominate killed timeout signals and expose the bounde
 	const queue = queuedAdapter([VERSION, { stdout: "", timedOut: true, outputLimitExceeded: true }]);
 	await assert.rejects(() => new NativeReviewCliV213(queue.adapter).start({ cwd: "/repo" }), assertOutputLimit);
 	const runtimeQueue = queuedAdapter([VERSION, { stdout: "", timedOut: true, outputLimitExceeded: true }]);
-	await assert.rejects(() => new RuntimeNativeReviewCliV214(runtimeQueue.adapter).start({ cwd: "/repo" }), assertOutputLimit);
+	await assert.rejects(() => new RuntimeNativeReviewCliV214(runtimeQueue.adapter, "/package/.gentle-ai/gentle-ai").start({ cwd: "/repo" }), assertOutputLimit);
 });
 
 test("native mutation uncertainty requires target status before any replay decision", async () => {
@@ -659,6 +668,44 @@ test("finalize stages every optional document privately and cleans it after fail
 	assert.equal(observed.filter((argument) => argument.endsWith(".json")).length, 3);
 	await Promise.all(observed.filter((argument) => argument.endsWith(".json")).map(async (path) => assert.rejects(() => import("node:fs/promises").then(({ stat }) => stat(path)))));
 });
+test("native review-mode status accepts only the native reach enum", async () => {
+	const status = {
+		schema: "gentle-ai.rdd-mode-status/v1",
+		global: "",
+		clone_local: "off",
+		effective: "off",
+		source: "clone_local",
+	};
+	for (const reach of ["machine", "this_build"] as const) {
+		const queue = queuedAdapter([{ stdout: "gentle-ai 2.4.0\n" }, {
+			stdout: JSON.stringify({
+				schema: "gentle-ai.review-mode/v1",
+				operation: "status",
+				scope: "both",
+				status: { ...status, reach },
+			}),
+		}]);
+		assert.equal((await new NativeReviewCliV214(queue.adapter, "/package/.gentle-ai/gentle-ai").reviewMode({ cwd: "/repo", operation: "status" })).status.reach, reach);
+	}
+	for (const malformedStatus of [
+		{ ...status, reach: "future" },
+		{ ...status, reach: "machine", unexpected: true },
+	]) {
+		const queue = queuedAdapter([{ stdout: "gentle-ai 2.4.0\n" }, {
+			stdout: JSON.stringify({
+				schema: "gentle-ai.review-mode/v1",
+				operation: "status",
+				scope: "both",
+				status: malformedStatus,
+			}),
+		}]);
+		await assert.rejects(
+			() => new NativeReviewCliV214(queue.adapter, "/package/.gentle-ai/gentle-ai").reviewMode({ cwd: "/repo", operation: "status" }),
+			(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE,
+		);
+	}
+});
+
 test("native review status uses the anticipated v2.1.5 contract, preserves Windows paths, and never reports mutation", async () => {
 	const queue = queuedAdapter([STATUS_VERSION, REVIEW_STATUS]);
 	const result = await new NativeReviewCliV213(queue.adapter).reviewStatus({ cwd: "C:\\repo with spaces" });
@@ -810,6 +857,144 @@ test("native review status keeps v2.1.4 truthfully unsupported", async () => {
 async function fixture(name: string): Promise<string> {
 	return readFile(new URL(`./fixtures/native-review-cli/v2.1.3/${name}.json`, import.meta.url), "utf8");
 }
+
+async function devBinaryFixture(name: string): Promise<Record<string, unknown>> {
+	return JSON.parse(await readFile(new URL(`./fixtures/devbinary/${name}`, import.meta.url), "utf8")) as Record<string, unknown>;
+}
+
+async function v216Capabilities(digest: string): Promise<Record<string, unknown>> {
+	const capabilities = await devBinaryFixture("capabilities-v2.2.captured.json");
+	(capabilities.package as Record<string, unknown>).version = GENTLE_AI_VERSION;
+	(capabilities.executable as Record<string, unknown>).sha256 = digest;
+	return capabilities;
+}
+
+test("V216 executes the exact START operation and ordered tokens rendered by candidate-bound STATUS", async () => {
+	const digest = `sha256:${"1".repeat(64)}`;
+	const start = await devBinaryFixture("start-v3-consent-granted.captured.json");
+	const targetIdentity = (start.repository_context as Record<string, unknown>).target_identity as string;
+	const status = await devBinaryFixture("status-v5.captured.json");
+	status.target_identity = targetIdentity;
+	const tokens = [
+		"--contract=gentle-ai.review-integration/v2",
+		"--cwd=/repo",
+		`--target=${targetIdentity}`,
+		"--projection=workspace",
+		"--untracked-scope=select",
+		`--expected-untracked-inventory=${`sha256:${"c".repeat(64)}`}`,
+		"--intended-untracked=selected.ts",
+		"--intended-untracked=second.ts",
+		"--agent=pi",
+		"--consent=relay",
+	] as const;
+	status.forecast = { horizon: "partial", steps: [{ step: 1, kind: "execute", reason_code: "review_start_required", description: "START requires the rendered candidate binding" }] };
+	status.next_transition = {
+		kind: "execute",
+		reason_code: "review_start_required",
+		execute: {
+			operation: "review.start",
+			arguments: tokens.map((token) => ({ name: token.slice(2, token.indexOf("=")), value: token.slice(token.indexOf("=") + 1), token })),
+			preconditions: [],
+			binding: { target_identity: targetIdentity },
+		},
+	};
+	for (const createClient of [
+		(adapter: ExecFileAdapter) => new NativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => {}, () => digest),
+		(adapter: ExecFileAdapter) => new RuntimeNativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => {}, () => digest),
+	]) {
+		const queue = queuedAdapter([
+			{ stdout: JSON.stringify(await v216Capabilities(digest)) },
+			{ stdout: JSON.stringify(structuredClone(status)) },
+			{ stdout: JSON.stringify(structuredClone(start)) },
+		]);
+		const result = await createClient(queue.adapter).start({ cwd: "/repo", targetIdentity, projection: "workspace", policyPath: "/repo/stale-managed-assets.json", untrackedScope: "select", expectedUntrackedInventory: `sha256:${"c".repeat(64)}`, intendedUntracked: ["selected.ts", "second.ts"] });
+		assert.equal(result.lineageId, "review-377c60e10b852cfc");
+		assert.deepEqual(queue.calls.map((call) => call.arguments), [
+			["review", "capabilities", "--contract", "gentle-ai.review-integration/v2"],
+			["review", "status", "--contract", "gentle-ai.review-integration/v2", "--cwd", "/repo", "--projection", "workspace", "--untracked-scope=select", `--expected-untracked-inventory=${`sha256:${"c".repeat(64)}`}`, "--intended-untracked=selected.ts", "--intended-untracked=second.ts", "--agent", "pi", "--next-transition"],
+			["review", "start", ...tokens],
+		]);
+	}
+});
+
+test("V216 fails closed when its selected untracked inventory re-STATUS returns collect", async () => {
+	const digest = `sha256:${"d".repeat(64)}`;
+	const status = await devBinaryFixture("status-v5.captured.json");
+	const targetIdentity = `sha256:${"e".repeat(64)}`;
+	status.target_identity = targetIdentity;
+	(status.projection as Record<string, unknown>).initial_snapshot_identity = targetIdentity;
+	(status.projection as Record<string, unknown>).current_snapshot_identity = targetIdentity;
+	status.next_transition = {
+		kind: "collect",
+		reason_code: "intended_untracked_selection_required",
+		collect: { inputs: [{
+			name: "intended_untracked_selection",
+			schema: "gentle-ai.review-intended-untracked-selection/v1",
+			capture_operation: "external.select_intended_untracked",
+			arguments: [
+				{ name: "target_identity", value: targetIdentity },
+				{ name: "projection", value: "workspace" },
+				{ name: "base_tree", value: (status.projection as Record<string, unknown>).base_tree },
+				{ name: "candidate_tree", value: (status.projection as Record<string, unknown>).current_candidate_tree },
+				{ name: "eligible_paths_json", value: "[\"selected.ts\"]" },
+				{ name: "expected_untracked_inventory", value: digest },
+			],
+		}] },
+	};
+	const queue = queuedAdapter([
+		{ stdout: JSON.stringify(await v216Capabilities(digest)) },
+		{ stdout: JSON.stringify(status) },
+	]);
+	const client = new NativeReviewCliV216(queue.adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => {}, () => digest);
+	await assert.rejects(
+		() => client.start({ cwd: "/repo", targetIdentity, projection: "workspace", untrackedScope: "select", expectedUntrackedInventory: digest, intendedUntracked: ["selected.ts"] }),
+		(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE && error.mutationOutcome === "none",
+	);
+	assert.equal(queue.calls.length, 2, "stale selection must not invoke native START");
+	assert.deepEqual(queue.calls[1]!.arguments.slice(-6), ["--untracked-scope=select", `--expected-untracked-inventory=${digest}`, "--intended-untracked=selected.ts", "--agent", "pi", "--next-transition"]);
+});
+
+test("V216 accepts only exact non-deciding unmanaged gate results", async () => {
+	for (const [index, delivery] of (["unmanaged", "disabled/unmanaged"] as const).entries()) {
+		const digest = `sha256:${String(index + 2).repeat(64)}`;
+		const result = {
+			schema: "gentle-ai.review-integration.operation/v2",
+			contract: "gentle-ai.review-integration/v2",
+			operation: "review.validate",
+			result: {
+				schema: "gentle-ai.review-gate-result/v1",
+				result: "invalidated",
+				allowed: false,
+				action: "repository-policy",
+				reason: "delivery follows ordinary repository policy",
+				context: { gate: "pre-commit" },
+				delivery,
+			},
+		};
+		const queue = queuedAdapter([{ stdout: JSON.stringify(await v216Capabilities(digest)) }, { stdout: JSON.stringify(result) }]);
+		const client = new NativeReviewCliV216(queue.adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => {}, () => digest);
+		const decoded = await client.validate({ cwd: "/repo", gate: "pre-commit" });
+		assert.equal(decoded.delivery, delivery);
+		assert.deepEqual(decoded.gateContext.raw, { gate: "pre-commit" });
+	}
+
+	for (const [index, [name, result]] of ([
+		["fabricated approval", { result: "allow", allowed: true, action: "repository-policy", context: { gate: "pre-commit" } }],
+		["fabricated receipt context", { result: "invalidated", allowed: false, action: "repository-policy", context: { gate: "pre-commit", receipt_hash: `sha256:${"a".repeat(64)}` } }],
+		["fabricated receipt action", { result: "invalidated", allowed: false, action: "continue", context: { gate: "pre-commit" } }],
+	] as const).entries()) {
+		const digest = `sha256:${String(index + 4).repeat(64)}`;
+		const envelope = {
+			schema: "gentle-ai.review-integration.operation/v2",
+			contract: "gentle-ai.review-integration/v2",
+			operation: "review.validate",
+			result: { schema: "gentle-ai.review-gate-result/v1", reason: "delivery follows ordinary repository policy", delivery: "disabled/unmanaged", ...result },
+		};
+		const queue = queuedAdapter([{ stdout: JSON.stringify(await v216Capabilities(digest)) }, { stdout: JSON.stringify(envelope) }]);
+		const client = new NativeReviewCliV216(queue.adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => {}, () => digest);
+		await assert.rejects(() => client.validate({ cwd: "/repo", gate: "pre-commit" }), NativeReviewCliError, name);
+	}
+});
 
 test("finalize ignores injected cleanup failures after native completion", async () => {
 	for (const native of [{ stdout: await fixture("finalize") }, { stdout: "{" }]) {

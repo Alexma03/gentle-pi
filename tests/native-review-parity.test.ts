@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
+import { __testing, createGentleAiExtension, PendingReviewConsentRegistry } from "../extensions/gentle-ai.ts";
 import {
 	NATIVE_REVIEW_ERROR_CODE,
 	REVIEW_CONSENT_NOTICES,
@@ -146,10 +146,10 @@ test("reviewMode status decodes an off effective mode with its deciding source",
 	assert.equal(result.status.revision, "sha256:deadbeef");
 });
 
-test("reviewMode enable and disable pass --scope clone and mutate without a timeout", async () => {
+test("reviewMode clone disable and enable retain a globally-unset default off", async () => {
 	const queue = queuedAdapter([
 		CAPABLE_VERSION_LINE, { stdout: JSON.stringify({ schema: "gentle-ai.review-mode/v1", operation: "disable", scope: "clone", status: { schema: "gentle-ai.rdd-mode-status/v1", global: "", clone_local: "off", effective: "off", source: "clone_local" } }) },
-		CAPABLE_VERSION_LINE, { stdout: JSON.stringify({ schema: "gentle-ai.review-mode/v1", operation: "enable", scope: "clone", status: { schema: "gentle-ai.rdd-mode-status/v1", global: "", clone_local: "", effective: "on", source: "default" } }) },
+		CAPABLE_VERSION_LINE, { stdout: JSON.stringify({ schema: "gentle-ai.review-mode/v1", operation: "enable", scope: "clone", status: { schema: "gentle-ai.rdd-mode-status/v1", global: "", clone_local: "", effective: "off", source: "default" } }) },
 	]);
 	const client = new NativeReviewCliV213(queue.adapter);
 	const disabled = await client.reviewMode({ cwd: "/repo", operation: "disable" });
@@ -157,7 +157,8 @@ test("reviewMode enable and disable pass --scope clone and mutate without a time
 	assert.deepEqual(queue.calls[1]?.arguments, ["review", "mode", "disable", "--cwd", "/repo", "--scope", "clone", "--json"]);
 	assert.deepEqual(queue.calls[3]?.arguments, ["review", "mode", "enable", "--cwd", "/repo", "--scope", "clone", "--json"]);
 	assert.equal(disabled.status.effective, "off");
-	assert.equal(enabled.status.effective, "on");
+	assert.equal(enabled.status.effective, "off");
+	assert.equal(enabled.status.source, "default");
 });
 
 test("reviewMode rejects a response whose operation discriminator does not match the request", async () => {
@@ -465,15 +466,26 @@ interface RegisteredEventFixture {
 	(event: unknown, ctx: ExtensionContext): Promise<unknown> | unknown;
 }
 
+interface RuntimeOptions {
+	candidateViews?: CandidateViewRegistry;
+	pendingReviewConsentRegistry?: PendingReviewConsentRegistry;
+}
+
 function runtime(
 	nativeReviewCli: NativeReviewCli | null,
 	writeReviewConsentLatch: typeof recordReviewConsentLatch = recordReviewConsentLatch,
 	clock?: { now?: () => number; scheduleTimer?: (callback: () => void, delayMs: number) => { unref: () => void } },
+	options: RuntimeOptions = {},
 ): { controller: RegisteredTool; commands: Map<string, RegisteredCommandFixture>; events: Map<string, RegisteredEventFixture> } {
 	const tools = new Map<string, RegisteredTool>();
 	const commands = new Map<string, RegisteredCommandFixture>();
 	const events = new Map<string, RegisteredEventFixture>();
-	const dependencies = { nativeReviewCli, candidateViews: new CandidateViewRegistry(), ...clock } as unknown as Parameters<typeof createGentleAiExtension>[0];
+	const dependencies = {
+		nativeReviewCli,
+		candidateViews: options.candidateViews ?? new CandidateViewRegistry(),
+		pendingReviewConsentRegistry: options.pendingReviewConsentRegistry ?? new PendingReviewConsentRegistry(),
+		...clock,
+	} as unknown as Parameters<typeof createGentleAiExtension>[0];
 	__testing.createGentleAiExtension(dependencies, writeReviewConsentLatch)({
 		on(name: string, handler: RegisteredEventFixture) { events.set(name, handler); },
 		registerTool(definition: RegisteredTool & { name: string }) { tools.set(definition.name, definition); },
@@ -484,8 +496,13 @@ function runtime(
 	return { controller: controller!, commands, events };
 }
 
-function headlessContext(cwd: string, notices: Array<{ message: string; type?: string }> = []): ExtensionContext {
-	return { cwd, hasUI: false, ui: { notify: (message: string, type?: string) => { notices.push({ message, type }); } } } as unknown as ExtensionContext;
+function headlessContext(cwd: string, notices: Array<{ message: string; type?: string }> = [], sessionId?: string): ExtensionContext {
+	return {
+		cwd,
+		hasUI: false,
+		ui: { notify: (message: string, type?: string) => { notices.push({ message, type }); } },
+		...(sessionId === undefined ? {} : { sessionManager: { getSessionId: () => sessionId } }),
+	} as unknown as ExtensionContext;
 }
 
 function confirmContext(cwd: string, answer: boolean): ExtensionContext {
@@ -520,7 +537,7 @@ test("kill-switch: effective off returns a non-failure skipped envelope and neve
 // source that actually decided, and a continuation scoped to that source. Pi
 // never blocks here — the envelope is a non-failure skip — but it must not
 // throw away which source decided, nor leave the caller without a way back on.
-test("kill-switch: a clone-local off names the deciding source and the Pi command that turns reviews back on", async (t) => {
+test("kill-switch: a clone-local off names the deciding source and clears the override only after any needed global opt-in", async (t) => {
 	const cwd = repository(t);
 	const { native } = fakeOrganicNative({ reviewModeEffective: "off", reviewModeSource: "clone_local" });
 	const { controller } = runtime(native);
@@ -529,7 +546,7 @@ test("kill-switch: a clone-local off names the deciding source and the Pi comman
 	assert.equal(result.outcome, "review-mode-disabled");
 	assert.equal(result.mode_source, "clone_local");
 	assert.equal(result.reason, "receipt-driven development is disabled: start is skipped because the clone_local mode source keeps it off");
-	assert.equal(result.next_action, "Run /gentle:review-mode enable to turn reviews back on for this clone.");
+	assert.equal(result.next_action, "Run `gentle-ai review mode enable --scope=global` if global RDD is still off, then run /gentle:review-mode enable to clear this clone-local override.");
 });
 
 // gentle-ai maps RDDModeSourceGlobal onto `--scope=global`, and a clone-local
@@ -570,7 +587,7 @@ test("kill-switch: an off with the default source names the only scope that can 
 	assert.equal(result.reason, "receipt-driven development is disabled: start is skipped because the default mode source keeps it off");
 	assert.equal(
 		result.next_action,
-		"Run `gentle-ai review mode enable --scope=global` to turn reviews on; receipt-driven development is opt-in and nothing here has enabled it yet. /gentle:review-mode enable only sets clone scope, which can never turn reviews on.",
+		"Run `gentle-ai review mode enable --scope=global` to opt in; RDD is off by default until explicitly enabled. /gentle:review-mode enable only clears a clone-local override and cannot enable global RDD.",
 	);
 	assert.ok(!/\/gentle:review-mode enable to turn/.test(String(result.next_action)), "a default off must never be sent to Pi's clone-scope command");
 });
@@ -603,7 +620,7 @@ function candidateConsent(cwd: string): ReviewConsentV2 {
 	return { schema: "gentle-ai.review-integration.consent/v2", contract: "gentle-ai.review-integration/v2", operation: "review.start", action: "consent_required", blocking: true, targetIdentity, projection: "workspace", riskLevel: "high", changedFiles: 1, changedLines: 1, headline: "Review this candidate", reason: "It changes a process boundary.", value: "Review catches regressions.", riskEvidence: ["shell process"], choices, offPath: { note: "Disable reviews separately.", command: "gentle-ai review mode disable" }, raw };
 }
 
-function relayedConsentNative(cwd: string): { native: NativeReviewCli; answers: NativeReviewConsentAnswer[]; startRequests: NativeStartRequest[]; answerRequests: NativeReviewConsentAnswerRequest[] } {
+function relayedConsentNative(cwd: string): { native: NativeReviewCli; consent: ReviewConsentV2; answers: NativeReviewConsentAnswer[]; startRequests: NativeStartRequest[]; answerRequests: NativeReviewConsentAnswerRequest[] } {
 	const { native } = fakeOrganicNative();
 	const consent = candidateConsent(cwd);
 	const answers: NativeReviewConsentAnswer[] = [];
@@ -619,7 +636,7 @@ function relayedConsentNative(cwd: string): { native: NativeReviewCli; answers: 
 		if (request.answer === "declined") return { kind: "declined", targetIdentity: consent.targetIdentity, projection: "workspace", riskLevel: "high", changedFiles: 1, changedLines: 1, consent: "declined_this_candidate", raw: { operation: "review/start", action: "declined", consent: "declined_this_candidate" } };
 		return { kind: "started", start: { lineageId: "native-lineage", state: "reviewing", riskLevel: "high", selectedLenses: ["review-risk", "review-resilience", "review-readability", "review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true } };
 	};
-	return { native, answers, startRequests, answerRequests };
+	return { native, consent, answers, startRequests, answerRequests };
 }
 
 async function answerConsent(controller: RegisteredTool, binding: unknown, answer: unknown, ctx: ExtensionContext): Promise<Record<string, unknown>> {
@@ -658,17 +675,17 @@ test("explicit consent follow-up grants or declines exactly once", async (t) => 
 		t.after(() => rmSync(cwd, { force: true }));
 		const canonicalCwd = realpathSync(cwd);
 		assert.equal(readReviewConsentLatch(cwd), false);
-		const { native, answers, startRequests, answerRequests } = relayedConsentNative(cwd);
+		const { native, answers, startRequests, answerRequests } = relayedConsentNative(canonicalCwd);
 		const { controller } = runtime(native);
 		const blocked = await blockedConsent(controller, `consent-${answer}`, headlessContext(cwd));
 		const result = await answerConsent(controller, blocked.consent_binding, answer, headlessContext(cwd));
 		assert.deepEqual(answers, [answer]);
 		assert.equal(startRequests.length, 1);
-		assert.equal(startRequests[0]?.cwd, cwd);
-		assert.equal(startRequests[0]?.targetIdentity, candidateConsent(cwd).targetIdentity);
+		assert.equal(startRequests[0]?.cwd, canonicalCwd);
+		assert.equal(startRequests[0]?.targetIdentity, candidateConsent(canonicalCwd).targetIdentity);
 		assert.equal(startRequests[0]?.projection, "workspace");
 		assert.equal(answerRequests.length, 1);
-		assert.equal(answerRequests[0]?.cwd, cwd);
+		assert.equal(answerRequests[0]?.cwd, canonicalCwd);
 		assert.equal(answerRequests[0]?.consent.targetIdentity, startRequests[0]?.targetIdentity);
 		if (answer === "granted") {
 			const actorBinding = result.actor_binding as { workspace_root: string; candidate_root: string };
@@ -684,6 +701,68 @@ test("explicit consent follow-up grants or declines exactly once", async (t) => 
 		}
 		await assert.rejects(() => answerConsent(controller, blocked.consent_binding, answer, headlessContext(cwd)), /unknown, expired, or already consumed/);
 	}
+});
+
+test("same-session registrations continue a pending consent exactly once through the registry that owns its candidate view", async (t) => {
+	const cwd = repository(t);
+	const sharedRegistry = new PendingReviewConsentRegistry();
+	const sessionId = "same-session-pending-consent";
+	const { native, consent, answers, answerRequests } = relayedConsentNative(cwd);
+	const registrationA = runtime(native, recordReviewConsentLatch, undefined, { pendingReviewConsentRegistry: sharedRegistry });
+	const registrationB = runtime(native, recordReviewConsentLatch, undefined, { pendingReviewConsentRegistry: sharedRegistry });
+	const context = headlessContext(cwd, [], sessionId);
+	const blocked = await blockedConsent(registrationA.controller, "same-session-a", context);
+	const result = await answerConsent(registrationB.controller, blocked.consent_binding, "granted", context);
+
+	assert.deepEqual(answers, ["granted"]);
+	assert.equal(answerRequests.length, 1);
+	assert.equal(answerRequests[0]?.consent, consent, "the second registration must forward A's original native consent");
+	assert.ok(result.result);
+	await assert.rejects(() => answerConsent(registrationB.controller, blocked.consent_binding, "granted", context), /unknown, expired, or already consumed/);
+});
+
+test("a different Pi session cannot answer another session's pending consent binding", async (t) => {
+	const cwd = repository(t);
+	const sharedRegistry = new PendingReviewConsentRegistry();
+	const { native, answers } = relayedConsentNative(cwd);
+	const registrationA = runtime(native, recordReviewConsentLatch, undefined, { pendingReviewConsentRegistry: sharedRegistry });
+	const registrationB = runtime(native, recordReviewConsentLatch, undefined, { pendingReviewConsentRegistry: sharedRegistry });
+	const sessionA = headlessContext(cwd, [], "session-a");
+	const sessionB = headlessContext(cwd, [], "session-b");
+	const blocked = await blockedConsent(registrationA.controller, "cross-session-a", sessionA);
+
+	await assert.rejects(() => answerConsent(registrationB.controller, blocked.consent_binding, "granted", sessionB), /unknown, expired, or already consumed/);
+	assert.deepEqual(answers, [], "a foreign session cannot reach native answerConsent");
+	const ownSessionBinding = await blockedConsent(registrationB.controller, "cross-session-b", sessionB);
+	const shutdown = registrationA.events.get("session_shutdown");
+	assert.ok(shutdown);
+	await shutdown({}, sessionA);
+	const result = await answerConsent(registrationB.controller, ownSessionBinding.consent_binding, "granted", sessionB);
+	assert.ok(result.result, "shutting down session A must not clear session B's pending binding");
+});
+
+test("session shutdown removes the shared pending binding and cleans its original candidate view", async (t) => {
+	const cwd = repository(t);
+	const sharedRegistry = new PendingReviewConsentRegistry();
+	const candidateViews = new CandidateViewRegistry();
+	let cleanupCalls = 0;
+	const cleanup = candidateViews.cleanup.bind(candidateViews);
+	candidateViews.cleanup = (token: string) => {
+		cleanupCalls += 1;
+		cleanup(token);
+	};
+	const { native, answers } = relayedConsentNative(cwd);
+	const registrationA = runtime(native, recordReviewConsentLatch, undefined, { candidateViews, pendingReviewConsentRegistry: sharedRegistry });
+	const registrationB = runtime(native, recordReviewConsentLatch, undefined, { pendingReviewConsentRegistry: sharedRegistry });
+	const context = headlessContext(cwd, [], "shutdown-session");
+	const blocked = await blockedConsent(registrationA.controller, "shutdown-a", context);
+	const shutdown = registrationA.events.get("session_shutdown");
+	assert.ok(shutdown);
+	await shutdown({}, context);
+
+	await assert.rejects(() => answerConsent(registrationB.controller, blocked.consent_binding, "granted", context), /unknown, expired, or already consumed/);
+	assert.deepEqual(answers, []);
+	assert.equal(cleanupCalls, 1, "shutdown must clean the candidate view materialized by registration A exactly once");
 });
 
 test("granted consent preserves the completed native start when local latch persistence fails", async (t) => {
@@ -799,6 +878,9 @@ test("session shutdown clears pending candidate consent bindings and is idempote
 });
 
 test("extension reload gives the same candidate a fresh consent binding instead of replaying lost local state", async (t) => {
+	// The runtime helper injects a fresh registry for each call, which models a
+	// cache-busted module reload. Same-loaded-module factory registrations use
+	// the shared-registry path exercised above instead.
 	const cwd = repository(t);
 	const { native, startRequests } = relayedConsentNative(cwd);
 	const beforeReload = await blockedConsent(runtime(native).controller, "consent-before-reload", headlessContext(cwd));
@@ -1026,7 +1108,7 @@ test("gentle:review-mode: an enable that cannot take effect says so and names th
 	assert.equal(notice.type, "warning", "a request that did not take effect is not an informational result");
 	assert.equal(
 		notice.message,
-		"receipt-driven development: off (decided by global)\nThat did not turn reviews back on: /gentle:review-mode only sets clone scope, and a clone-local setting can never override a global off. Run `gentle-ai review mode enable --scope=global` to turn them back on.",
+		"receipt-driven development: off (decided by global)\nThat did not turn reviews back on: /gentle:review-mode enable only clears a clone-local override, which cannot override a global off. Run `gentle-ai review mode enable --scope=global` to turn them back on.",
 	);
 });
 

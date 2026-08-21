@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -28,7 +28,7 @@ import { decodeReviewNextTransitionV3, type ReviewCaptureSubmissionV1, type Revi
 const FAKE_GENTLE_AI = `#!/usr/bin/env node
 const fs = require("node:fs");
 const argv = process.argv.slice(2);
-if (process.env.RELAY_FAKE_LOG) fs.appendFileSync(process.env.RELAY_FAKE_LOG, JSON.stringify({ argv, contract: process.env.${GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV} ?? null }) + "\\n");
+if (process.env.RELAY_FAKE_LOG) fs.appendFileSync(process.env.RELAY_FAKE_LOG, JSON.stringify({ argv, cwd: process.cwd(), contract: process.env.${GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV} ?? null }) + "\\n");
 if (argv.some((token) => token === "--materialize" || token.startsWith("--materialize="))) {
 	const mode = process.env.RELAY_FAKE_MATERIALIZE_MODE || "ok";
 	if (mode === "ok") { process.stdout.write(Buffer.from(process.env.RELAY_FAKE_PROMPT_B64 || "", "base64")); process.exit(0); }
@@ -40,11 +40,19 @@ if (argv.some((token) => token === "--materialize" || token.startsWith("--materi
 const inputToken = argv.find((token) => token === "--input" || token.startsWith("--input="));
 if (inputToken !== undefined) {
 	const mode = process.env.RELAY_FAKE_SUBMIT_MODE || "ok";
-	if (mode === "ok") {
+	if (mode === "ok" || mode === "cleanup-fail") {
 		const inputPath = inputToken.startsWith("--input=") ? inputToken.slice("--input=".length) : argv[argv.indexOf("--input") + 1];
 		const bytes = fs.readFileSync(inputPath);
 		if (process.env.RELAY_FAKE_SUBMIT_CAPTURE) fs.writeFileSync(process.env.RELAY_FAKE_SUBMIT_CAPTURE, bytes);
-		process.stdout.write(JSON.stringify({ schema: "gentle-ai.review-result-artifact/v2", admission_decision: "completed" }));
+		const accepted = JSON.stringify({ schema: "gentle-ai.review-result-artifact/v2", admission_decision: "completed" });
+		if (mode === "cleanup-fail") {
+			process.stdout.write(accepted, () => {
+				fs.chmodSync(require("node:path").dirname(require("node:path").dirname(inputPath)), 0o500);
+				process.exit(0);
+			});
+			return;
+		}
+		process.stdout.write(accepted);
 		process.exit(0);
 	}
 	process.stderr.write("capture binding does not match the current reviewing authority\\n");
@@ -80,6 +88,7 @@ interface RelayHarness {
 	piLogPath: string;
 	stdinCapturePath: string;
 	submitCapturePath: string;
+	targetCwd: string;
 	environment: NodeJS.ProcessEnv;
 }
 
@@ -96,6 +105,8 @@ function harness(t: test.TestContext, overrides: Record<string, string> = {}): R
 	const piLogPath = join(directory, "pi.log");
 	const stdinCapturePath = join(directory, "pi-stdin.bin");
 	const submitCapturePath = join(directory, "submitted.bin");
+	const targetCwd = join(directory, "target-worktree");
+	mkdirSync(targetCwd);
 	const environment: NodeJS.ProcessEnv = {
 		...process.env,
 		RELAY_FAKE_LOG: logPath,
@@ -107,7 +118,7 @@ function harness(t: test.TestContext, overrides: Record<string, string> = {}): R
 	// The relay itself must add the handshake; the base environment never
 	// carries it, so the fake-binary log proves the injection.
 	delete environment[GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV];
-	return { directory, gentleAi, pi, logPath, piLogPath, stdinCapturePath, submitCapturePath, environment };
+	return { directory, gentleAi, pi, logPath, piLogPath, stdinCapturePath, submitCapturePath, targetCwd, environment };
 }
 
 function readLog(path: string): Array<{ argv: string[]; contract: string | null; cwd?: string; entries?: string[] }> {
@@ -152,6 +163,7 @@ function relayRequest(fixture: RelayHarness, overrides: Record<string, unknown> 
 		submission: SUBMISSION,
 		gentleAiExecutable: fixture.gentleAi,
 		piExecutable: fixture.pi,
+		targetCwd: fixture.targetCwd,
 		environment: {
 			...fixture.environment,
 			RELAY_FAKE_PROMPT_B64: PROMPT_BYTES.toString("base64"),
@@ -229,11 +241,13 @@ test("relay happy path moves prompt and result bytes verbatim through a fresh em
 	const substituted = gentleAiCalls[1]!.argv.at(-1)!;
 	assert.match(substituted, /^--input=\S+$/);
 	assert.equal(substituted.includes("{{value}}"), false);
+	assert.equal(existsSync(substituted.slice("--input=".length)), false, "the coordinator removes its temporary result file after provider submission");
 	assert.equal(gentleAiCalls[1]!.argv.length, 2 + SUBMISSION.argumentTokens.length);
 	assert.equal(gentleAiCalls[1]!.argv.some((token) => token.includes("--agent") || token.includes("--materialize")), false);
 	// Handshake declared on both gentle-ai invocations even though the base
 	// environment carried none.
 	assert.deepEqual(gentleAiCalls.map((call) => call.contract), [GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT]);
+	assert.deepEqual(gentleAiCalls.map((call) => call.cwd), [fixture.targetCwd, fixture.targetCwd]);
 
 	const piCalls = readLog(fixture.piLogPath);
 	assert.equal(piCalls.length, 1);
@@ -325,6 +339,27 @@ test("relay scratch and staging directories are removed after failures too", asy
 	const piCalls = readLog(fixture.piLogPath);
 	assert.equal(piCalls.length, 1);
 	assert.equal(existsSync(piCalls[0]!.cwd!), false);
+});
+
+test("a result staging cleanup failure remains a typed submit failure", async (t) => {
+	const fixture = harness(t, { RELAY_FAKE_SUBMIT_MODE: "cleanup-fail" });
+	const scratchParent = mkdtempSync(join(tmpdir(), "gentle-pi-relay-cleanup-"));
+	const originalTmpdir = process.env.TMPDIR;
+	process.env.TMPDIR = scratchParent;
+	try {
+		const error = await rejectsWithRelayError(
+			runReviewHostRelaySlot(relayRequest(fixture)),
+			REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED,
+			"submit",
+		);
+		assert.equal(error.mutationOutcome, "unknown");
+		assert.match(error.message, /staging cleanup/i);
+	} finally {
+		if (originalTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = originalTmpdir;
+		chmodSync(scratchParent, 0o700);
+		rmSync(scratchParent, { recursive: true, force: true });
+	}
 });
 
 // ---------------------------------------------------------------------------
