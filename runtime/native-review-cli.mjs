@@ -14,12 +14,14 @@ import {
 	decodeReviewCapabilitiesV2,
 	decodeReviewConsentV2,
 	decodeReviewConsentV3,
+	decodeReviewAdvisoryFindingsV1,
 	decodeReviewFailureV2,
 	decodeReviewOperationV2,
 	decodeReviewRepairV2,
 	decodeReviewResultArtifactV2,
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
+
 
 
 
@@ -2530,6 +2532,7 @@ export class NativeReviewCliV216                            {
 				// nested object is private to lib/review-integration-v2.ts.
 				...(body.validation_request === undefined ? {} : { validationRequest: body.validation_request                                      }),
 				...(body.escalation === undefined ? {} : { escalation: requiredString(body.escalation) }),
+				...(envelope.advisoryFindings === undefined ? {} : { advisoryFindings: envelope.advisoryFindings }),
 			};
 		} finally {
 			if (directory !== undefined) await this.cleanupDirectory(directory).catch(() => undefined);
@@ -2751,12 +2754,17 @@ export class NativeReviewCliV216                            {
 					storeRevision: requiredString(result.store_revision),
 					...(result.validation_request === undefined ? {} : { validationRequest: result.validation_request                                      }),
 					...(result.escalation === undefined ? {} : { escalation: requiredString(result.escalation) }),
+					...(envelope.advisoryFindings === undefined ? {} : { advisoryFindings: envelope.advisoryFindings }),
 				};
 			}
-			const plain = exactObject(body, ["operation", "lineage_id", "state", "action", "store_revision"], ["receipt_path", "validation_request", "escalation"]);
+			const plain = exactObject(body, ["operation", "lineage_id", "state", "action", "store_revision"], ["receipt_path", "validation_request", "escalation", "advisory_findings"]);
 			if (plain.operation !== "review/finalize") throw new Error("wrong finalize discriminator");
 			const state = requiredString(plain.state);
 			if (!(NATIVE_FINALIZE_STATE                     ).includes(state)) throw new Error("unknown finalize state");
+			if (plain.advisory_findings !== undefined && state !== "approved") throw new TypeError("plain finalize advisory_findings requires state approved");
+			const advisoryFindings = plain.advisory_findings === undefined
+				? undefined
+				: decodeReviewAdvisoryFindingsV1(plain.advisory_findings, "plain finalize advisory_findings");
 			return {
 				lineageId: requiredString(plain.lineage_id),
 				state,
@@ -2765,6 +2773,7 @@ export class NativeReviewCliV216                            {
 				...(plain.receipt_path === undefined ? {} : { receiptPath: requiredString(plain.receipt_path) }),
 				...(plain.validation_request === undefined ? {} : { validationRequest: plain.validation_request                                      }),
 				...(plain.escalation === undefined ? {} : { escalation: requiredString(plain.escalation) }),
+				...(advisoryFindings === undefined ? {} : { advisoryFindings }),
 			};
 		});
 	}

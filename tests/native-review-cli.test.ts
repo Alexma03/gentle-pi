@@ -10,6 +10,7 @@ import {
 	NativeReviewCliV213 as NativeReviewCliV213Production,
 	NativeReviewCliV214,
 	NativeReviewCliV216,
+	clearNativeReviewCapabilitiesCacheForTesting,
 	createNodeExecFileAdapter,
 	type ExecFileAdapter,
 	type NativeStartRequest,
@@ -17,6 +18,7 @@ import {
 import {
 	NativeReviewCliV214 as RuntimeNativeReviewCliV214,
 	NativeReviewCliV216 as RuntimeNativeReviewCliV216,
+	clearNativeReviewCapabilitiesCacheForTesting as clearRuntimeNativeReviewCapabilitiesCacheForTesting,
 } from "../runtime/native-review-cli.mjs";
 import { GENTLE_AI_VERSION, setGentleAiDevBinaryEnvironmentForTesting } from "../lib/gentle-ai-binary.ts";
 
@@ -914,6 +916,74 @@ test("V216 executes the exact START operation and ordered tokens rendered by can
 			["review", "status", "--contract", "gentle-ai.review-integration/v2", "--cwd", "/repo", "--projection", "workspace", "--untracked-scope=select", `--expected-untracked-inventory=${`sha256:${"c".repeat(64)}`}`, "--intended-untracked=selected.ts", "--intended-untracked=second.ts", "--agent", "pi", "--next-transition"],
 			["review", "start", ...tokens],
 		]);
+	}
+});
+
+test("finalizeTransition preserves approved burned advisory_findings", async () => {
+	const digest = `sha256:${"a".repeat(64)}`;
+	const advisoryFindings = {
+		statement: "Approval stands; these findings require no correction.",
+		findings: [{
+			id: "review-advisory-001",
+			lens: "review-reliability",
+			location: "lib/review.ts:12",
+			severity: "WARNING",
+			disposition: "informational",
+		}],
+	};
+	const plainResult = {
+		operation: "review/finalize",
+		lineage_id: "review-advisory-finalize",
+		state: "approved",
+		action: "approval published",
+		store_revision: digest,
+		advisory_findings: advisoryFindings,
+	};
+	const responses = [
+		{
+			name: "negotiated envelope",
+			body: {
+				schema: "gentle-ai.review-integration.operation/v2",
+				contract: "gentle-ai.review-integration/v2",
+				operation: "review.finalize",
+				result: plainResult,
+			},
+		},
+		{ name: "plain transition", body: plainResult },
+	] as const;
+	for (const clientFactory of [
+		{
+			name: "source",
+			create: (adapter: ExecFileAdapter) => new NativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => digest),
+			clearCapabilities: clearNativeReviewCapabilitiesCacheForTesting,
+		},
+		{
+			name: "generated runtime",
+			create: (adapter: ExecFileAdapter) => new RuntimeNativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => digest),
+			clearCapabilities: clearRuntimeNativeReviewCapabilitiesCacheForTesting,
+		},
+	] as const) {
+		for (const response of responses) {
+			clientFactory.clearCapabilities();
+			try {
+				const queue = queuedAdapter([
+					{ stdout: JSON.stringify(await v216Capabilities(digest)) },
+					{ stdout: JSON.stringify(response.body) },
+				]);
+				const result = await clientFactory.create(queue.adapter).finalizeTransition({
+					cwd: "/repo",
+					argumentTokens: ["--lineage=review-advisory-finalize", "--captured-results=true"],
+				});
+				const label = `${clientFactory.name}/${response.name}`;
+				assert.deepEqual(result.advisoryFindings, advisoryFindings, label);
+				assert.deepEqual(queue.calls.map((call) => call.arguments), [
+					["review", "capabilities", "--contract", "gentle-ai.review-integration/v2"],
+					["review", "finalize", "--lineage=review-advisory-finalize", "--captured-results=true"],
+				], label);
+			} finally {
+				clientFactory.clearCapabilities();
+			}
+		}
 	}
 });
 

@@ -990,6 +990,50 @@ test("ambiguous native START runs target status first and follows only its decla
 	candidateViews.createOrReuse({ contributorRoot: cwd, replayKey }).cleanup();
 });
 
+test("schema-invalid post-mutation FINALIZE performs one FINALIZE and target-scoped STATUS only", async (t) => {
+	const cwd = repository(t);
+	const calls: string[] = [];
+	const statusRequests: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
+	const initial = targetStatusFixture({ action: "finalize", lineageId: "schema-invalid-finalize" });
+	const reconciled = targetStatusFixture({
+		applicability: "ambiguous",
+		action: "select_lineage",
+		replayability: "status_required",
+		lineageId: "schema-invalid-finalize",
+	});
+	const { controller } = runtime(fakeNative({
+		targetStatus: async (request) => {
+			calls.push("status");
+			statusRequests.push(request);
+			return statusRequests.length === 1 ? initial : reconciled;
+		},
+		finalize: async () => {
+			calls.push("finalize");
+			throw new NativeReviewCliError(
+				NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE,
+				NATIVE_REVIEW_OPERATION.FINALIZE,
+				true,
+				true,
+				"native finalize response is schema incompatible",
+			);
+		},
+		reviewStatus: async () => {
+			throw new Error("schema-invalid finalize must not use inventory status");
+		},
+	}));
+	const result = await controller.execute("schema-invalid-finalize", {
+		operation: "finalize",
+		lineageId: "schema-invalid-finalize",
+		input: "{}",
+	}, undefined, undefined, context(cwd));
+	assert.deepEqual(calls, ["status", "finalize", "status"]);
+	assert.deepEqual(statusRequests.map((request) => ({ cwd: request.cwd, lineageId: request.lineageId })), [
+		{ cwd, lineageId: "schema-invalid-finalize" },
+		{ cwd, lineageId: "schema-invalid-finalize" },
+	]);
+	assert.equal((result.details as { outcome?: string }).outcome, "native-mutation-status-reconciled");
+});
+
 test("ambiguous native FINALIZE returns the target-status action without a second mutation", async (t) => {
 	const cwd = repository(t);
 	const calls: string[] = [];
@@ -1571,6 +1615,72 @@ test("ordinary final verification at validating captures evidence then executes 
 			assert.equal("correction_step" in details, false, "ordinary final verification is not a correction transaction");
 		});
 	}
+});
+
+test("ordinary final verification with advisory findings completes once without STATUS reconciliation", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const advisory = true;\n");
+	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
+	const beforeCapture = bindCorrectionCollection(targetStatusFixture({
+		lineageId: "advisory-final-verification",
+		authorityState: "validating",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}));
+	const afterCapture = bindFinalVerificationTransition(targetStatusFixture({
+		lineageId: "advisory-final-verification",
+		authorityState: "validating",
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+	}), "passed");
+	frozen.cleanup();
+	const advisoryFindings = {
+		statement: "Approval stands; these findings require no correction.",
+		findings: [{
+			id: "review-advisory-001",
+			lens: "review-reliability",
+			location: "lib/review.ts:12",
+			severity: "WARNING",
+			disposition: "informational",
+		}],
+	};
+	const calls: string[] = [];
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			calls.push("status");
+			return calls.filter((call) => call === "status").length === 1 ? beforeCapture : afterCapture;
+		},
+		captureEvidence: async () => {
+			calls.push("capture-evidence");
+			return capturedCorrectionEvidence(beforeCapture, "passed", "6");
+		},
+		finalizeTransition: async () => {
+			calls.push("finalize-transition");
+			return {
+				lineageId: "advisory-final-verification",
+				state: "approved",
+				action: "terminal",
+				storeRevision: "r2",
+				advisoryFindings,
+			};
+		},
+		finalize: async () => {
+			throw new Error("ordinary final verification must use the provider finalize transition");
+		},
+	}), undefined, new CandidateViewRegistry());
+	const result = await controller.execute("advisory-final-verification", {
+		operation: "finalize",
+		lineageId: "advisory-final-verification",
+		input: JSON.stringify({
+			final_evidence: "verification run: passed",
+			final_verification_outcome: "passed",
+		}),
+	}, undefined, undefined, context(cwd));
+	const details = result.details as { result?: { advisory_findings?: unknown } };
+	assert.deepEqual(calls, ["status", "capture-evidence", "status", "finalize-transition"]);
+	assert.deepEqual(details.result?.advisory_findings, advisoryFindings);
 });
 
 test("ordinary final verification rejects a Pi-authored targeted validation document before any capture", async (t) => {
