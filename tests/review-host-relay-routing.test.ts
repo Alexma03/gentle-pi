@@ -140,7 +140,6 @@ async function runFinalize(cwd: string, harness: RoutingHarness, lineageId: stri
 	return await __testing.executeReviewControllerOperation(
 		finalizeParameters(lineageId, input),
 		cwd,
-		new Map(),
 		harness.native,
 	) as Record<string, unknown>;
 }

@@ -598,6 +598,7 @@ test("next_transition.execute.binding stays open, as its schema declares no prop
 // contract violation (it would hand the caller a way to author the verdict).
 test("next_transition decodes the self-contained provider role capture vectors strictly", () => {
 	const tree = "b".repeat(40);
+	const policyContent = "# frozen targeted-validation policy\r\nrule: preserve exact causal evidence\t\n";
 	const validationRequest = {
 		schema: "gentle-ai.review-targeted-validation-request/v1",
 		request_hash: digest,
@@ -605,12 +606,42 @@ test("next_transition decodes the self-contained provider role capture vectors s
 		expected_revision: digest,
 		target_identity: digest,
 		fix_finding_ids: ["RISK-001"],
+		policy_content: policyContent,
+		fix_findings: [{
+			id: "RISK-001",
+			lens: "review-risk",
+			location: "lib/a.ts:1",
+			severity: "BLOCKER",
+			claim: "the corrected candidate must retain its proof",
+			proof_refs: ["lib/a.ts:1"],
+			evidence_class: "deterministic",
+			causal_disposition: "introduced",
+		}],
+		fix_classifications: [{
+			finding_id: "RISK-001",
+			severity: "BLOCKER",
+			class: "deterministic",
+			causal_disposition: "introduced",
+			proof: "the frozen diff demonstrates the correction boundary",
+		}],
 		projection: "workspace",
 		correction_candidate_tree: tree,
 		correction_target_identity: digest,
 		correction_paths: ["lib/a.ts"],
 		correction_paths_digest: digest,
 	};
+	const expectedFixFindings = validationRequest.fix_findings.map(({ proof_refs: proofRefs, evidence_class: evidenceClass, causal_disposition: causalDisposition, ...finding }) => ({
+		...finding,
+		proofRefs,
+		evidenceClass,
+		causalDisposition,
+	}));
+	const expectedFixClassifications = validationRequest.fix_classifications.map(({ finding_id: findingId, class: classValue, causal_disposition: causalDisposition, ...finding }) => ({
+		...finding,
+		findingId,
+		class: classValue,
+		causalDisposition,
+	}));
 	const roleInput = (name: string, captureOperation: string, schema: string, extra: Record<string, unknown> = {}) => ({
 		kind: "collect",
 		reason_code: "provider_refuter_required",
@@ -650,6 +681,50 @@ test("next_transition decodes the self-contained provider role capture vectors s
 	const decodedValidator = decodeReviewNextTransitionV3(validator);
 	assert.equal(decodedValidator.collect?.inputs[0]?.captureOperation, "review.capture-validation");
 	assert.equal(decodedValidator.collect?.inputs[0]?.validationRequest?.requestHash, digest);
+	assert.equal(decodedValidator.collect?.inputs[0]?.validationRequest?.policyContent, policyContent);
+	assert.deepEqual(decodedValidator.collect?.inputs[0]?.validationRequest?.fixFindings, expectedFixFindings);
+	assert.deepEqual(decodedValidator.collect?.inputs[0]?.validationRequest?.fixClassifications, expectedFixClassifications);
+
+	const statusWithValidation = fixture<JsonObject>("status.fixture.json");
+	(statusWithValidation.authority as JsonObject).state = "correction_required";
+	statusWithValidation.validation_request = validationRequest;
+	statusWithValidation.next_transition = validator;
+	const decodedStatus = decodeReviewStatusV3(statusWithValidation);
+	assert.equal(decodedStatus.validationRequest?.policyContent, policyContent);
+	assert.deepEqual(decodedStatus.validationRequest?.fixFindings, expectedFixFindings);
+	assert.deepEqual(decodedStatus.validationRequest?.fixClassifications, expectedFixClassifications);
+	assert.deepEqual(decodedStatus.nextTransition?.collect?.inputs[0]?.validationRequest, decodedStatus.validationRequest);
+
+	const unknownRequest: JsonObject = clone(validationRequest);
+	unknownRequest.unadvertised = true;
+	assert.throws(
+		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: unknownRequest })),
+		/not allowed/,
+	);
+	const unknownFinding: JsonObject = clone(validationRequest);
+	((unknownFinding.fix_findings as JsonObject[])[0]!).unadvertised = true;
+	assert.throws(
+		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: unknownFinding })),
+		/not allowed/,
+	);
+	const malformedFinding: JsonObject = clone(validationRequest);
+	((malformedFinding.fix_findings as JsonObject[])[0]!).proof_refs = "lib/a.ts:1";
+	assert.throws(
+		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: malformedFinding })),
+		/proof_refs/,
+	);
+	const unknownClassification: JsonObject = clone(validationRequest);
+	((unknownClassification.fix_classifications as JsonObject[])[0]!).unadvertised = true;
+	assert.throws(
+		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: unknownClassification })),
+		/not allowed/,
+	);
+	const malformedClassification: JsonObject = clone(validationRequest);
+	((malformedClassification.fix_classifications as JsonObject[])[0]!).class = "unsupported";
+	assert.throws(
+		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: malformedClassification })),
+		/class/,
+	);
 
 	assert.throws(
 		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1")),

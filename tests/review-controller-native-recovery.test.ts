@@ -200,14 +200,12 @@ function recoveryTargetStatus(lineageId: string, overrides: Record<string, unkno
 async function runControllerOperation(
 	parameters: Record<string, unknown>,
 	native: NativeReviewCli | null,
-	pendingAuthorizations: Map<string, unknown> = new Map(),
 	signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
 	const cwd = scratchDir("gentle-pi-native-recovery-");
 	return await __testing.executeReviewControllerOperation(
 		parameters,
 		cwd,
-		pendingAuthorizations as Map<string, never>,
 		native,
 		signal,
 	);
@@ -620,9 +618,8 @@ test("native recovery wrappers accept the published 2.1.9 contract and refuse ol
 	);
 });
 
-test("RESET maps to native review reclaim with the exact audited inputs and clears pending authorizations", async () => {
+test("RESET maps to native review reclaim with the exact audited inputs", async () => {
 	const { native, calls } = fakeRecoveryNative(RECLAIM_RECORD);
-	const pending = new Map<string, unknown>([["stale", { command: "git push" }]]);
 	const details = await runControllerOperation({
 		operation: "reset",
 		input: JSON.stringify({
@@ -634,7 +631,7 @@ test("RESET maps to native review reclaim with the exact audited inputs and clea
 			actor: "maintainer",
 			reason: "incomplete entry",
 		}),
-	}, native, pending);
+	}, native);
 	assert.equal(details.operation, "reset");
 	assert.equal(details.native_operation, "review reclaim");
 	assert.equal(details.mutation_performed, true);
@@ -646,12 +643,10 @@ test("RESET maps to native review reclaim with the exact audited inputs and clea
 	assert.equal(calls[0]?.request.lineage, "stuck-lineage");
 	assert.equal(calls[0]?.request.actor, "maintainer");
 	assert.equal(calls[0]?.request.reason, "incomplete entry");
-	assert.equal(pending.size, 0);
 });
 
 test("RESET without the native reclaim inputs returns a structured request instead of inventing values", async () => {
 	const { native, calls } = fakeRecoveryNative(RECLAIM_RECORD);
-	const pending = new Map<string, unknown>([["stale", { command: "git push" }]]);
 	const details = await runControllerOperation({
 		operation: "reset",
 		input: JSON.stringify({
@@ -660,7 +655,7 @@ test("RESET without the native reclaim inputs returns a structured request inste
 			inventoryHash: "d".repeat(64),
 			confirmation: "DESTROY REVIEW AUTHORITY repo-id",
 		}),
-	}, native, pending);
+	}, native);
 	assert.equal(details.status, "blocked");
 	assert.equal(details.outcome, "native-input-required");
 	assert.equal(details.native_operation, "review reclaim");
@@ -668,7 +663,6 @@ test("RESET without the native reclaim inputs returns a structured request inste
 	assert.equal(details.mutation_performed, false);
 	assert.equal(details.mutation_outcome, "none");
 	assert.equal(calls.length, 0);
-	assert.equal(pending.size, 1);
 });
 
 test("RESET without a native client fails closed as unavailable", async () => {
@@ -850,7 +844,6 @@ test("RECOVER surfaces every missing successor input including an unsupported di
 
 test("RECONCILE_AUTHORITY routes one exact native mutation and returns its audit record", async () => {
 	const { native, calls } = fakeRecoveryNative(RECONCILE_RECORD);
-	const pending = new Map<string, unknown>([["stale", { command: "git push" }]]);
 	const details = await runControllerOperation({
 		operation: "reconcile-authority",
 		input: JSON.stringify({
@@ -861,7 +854,7 @@ test("RECONCILE_AUTHORITY routes one exact native mutation and returns its audit
 			actor: "maintainer",
 			reason: "invalid recovery edge",
 		}),
-	}, native, pending);
+	}, native);
 	assert.equal(details.operation, "reconcile-authority");
 	assert.equal(details.native_operation, "review reconcile-authority");
 	assert.equal(details.mutation_performed, true);
@@ -873,7 +866,6 @@ test("RECONCILE_AUTHORITY routes one exact native mutation and returns its audit
 	assert.equal(calls[0]?.request.expectedPredecessorRevision, "predecessor-revision");
 	assert.equal(calls[0]?.request.expectedSuccessorRevision, "successor-revision");
 	assert.equal(calls[0]?.request.maintainerAuthorization, RECONCILE_AUTHORIZATION);
-	assert.equal(pending.size, 0);
 });
 
 test("RECONCILE_AUTHORITY requests every exact native binding before authorization or mutation", async () => {
@@ -1457,9 +1449,9 @@ test("captureEvidenceSubmission executes the provider-rendered submission tokens
 		"--input={{input}}",
 	];
 	let staged = "";
-	const calls: Array<{ arguments: readonly string[] }> = [];
+	const calls: Array<{ arguments: readonly string[]; cwd: string }> = [];
 	const cli = new NativeReviewCliV216(async (request) => {
-		calls.push({ arguments: request.arguments });
+		calls.push({ arguments: request.arguments, cwd: request.cwd });
 		if (request.arguments[1] === "capabilities") return { stdout: JSON.stringify(capabilitiesBody), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 		const inputToken = request.arguments.find((token) => token.startsWith("--input="));
 		assert.ok(inputToken !== undefined);
@@ -1473,8 +1465,10 @@ test("captureEvidenceSubmission executes the provider-rendered submission tokens
 		inputSubstitutionLocation: 5,
 		outcome: "passed",
 		evidenceDocument: evidence,
+		executionCwd: "/execution",
 	});
 	assert.equal(staged, evidence, "the evidence bytes must be staged exactly");
+	assert.equal(calls[1]!.cwd, "/execution", "repository-context submissions may override only the adapter process cwd");
 	assert.equal(captured.recordDigest, record.record_digest);
 	assert.equal(captured.targetIdentity, record.target_identity);
 	const argv = calls[1]!.arguments;

@@ -9,7 +9,7 @@
 // schemas and the controller sequencing was never driven through a full
 // lifecycle before merge. Three check groups:
 //   1. Full direct-lane lifecycles against the override binary through
-//      runtime/*.mjs (low to gate allow; medium consent/v3 granted).
+//      runtime/*.mjs (terminal approval burns authority; medium consent/v3 granted).
 //   2. Controller sequencing: at every step the client's decoded offered
 //      next step must equal the native transition, and correction evidence
 //      must be collected before targeted validation is ever offered
@@ -22,9 +22,9 @@
 // tests/*.test.ts only.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 import {
 	GENTLE_AI_DEV_BINARY_ENV,
@@ -44,15 +44,19 @@ import {
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
 } from "../../runtime/review-integration-v2.mjs";
-// The recovered-successor checks drive the CONTROLLER (not just the runtime
-// adapter) against the live binary; Node's default type stripping loads the
-// authored TypeScript directly.
-import { __testing } from "../../extensions/gentle-ai.ts";
-import { CandidateViewRegistry, injectReviewCandidateView } from "../../lib/review-candidate-view.ts";
+import { CandidateViewRegistry } from "../../lib/review-candidate-view.ts";
 
 const WITH_MODEL = process.argv.includes("--with-model");
 const CONTRACT = "gentle-ai.review-integration/v2";
-const KNOWN_RED_SEQUENCING = "known-red pending fix/validate-before-evidence";
+const FAKE_PI_VALIDATOR_PATH_PREFIX = "gentle-pi-validator-result-";
+const SANDBOX_ENVIRONMENT_NAMES = [
+	"HOME",
+	"XDG_CONFIG_HOME",
+	"XDG_CACHE_HOME",
+	"XDG_DATA_HOME",
+	"XDG_STATE_HOME",
+	"TMPDIR",
+];
 
 // A schema-incompatible failure mid-lifecycle means the forward decoder lags
 // a field gentle-ai main already emits: the exact parity gap this battery
@@ -113,6 +117,38 @@ function resolveBatteryBinary() {
 	);
 }
 
+function snapshotProcessEnvironment() {
+	return new Map(Object.entries(process.env));
+}
+
+function restoreProcessEnvironment(snapshot) {
+	for (const name of Object.keys(process.env)) {
+		if (!snapshot.has(name)) delete process.env[name];
+	}
+	for (const [name, value] of snapshot) process.env[name] = value;
+}
+
+function processEnvironmentMatches(snapshot) {
+	const names = Object.keys(process.env);
+	return names.length === snapshot.size && names.every((name) => snapshot.get(name) === process.env[name]);
+}
+
+function configureSandboxEnvironment(root) {
+	const sandbox = {
+		HOME: join(root, "home"),
+		XDG_CONFIG_HOME: join(root, "xdg-config"),
+		XDG_CACHE_HOME: join(root, "xdg-cache"),
+		XDG_DATA_HOME: join(root, "xdg-data"),
+		XDG_STATE_HOME: join(root, "xdg-state"),
+		TMPDIR: join(root, "tmp"),
+	};
+	for (const name of SANDBOX_ENVIRONMENT_NAMES) {
+		mkdirSync(sandbox[name], { recursive: true, mode: 0o700 });
+		process.env[name] = sandbox[name];
+	}
+	return sandbox;
+}
+
 // --- raw native access (the battery's independent view of the binary) ---
 
 function rawInvoke(binary, cwd, args) {
@@ -128,17 +164,53 @@ function rawInvoke(binary, cwd, args) {
 	return body;
 }
 
-function rawStatus(binary, cwd) {
-	return rawInvoke(binary, cwd, [
-		"review", "status", "--contract", CONTRACT, "--cwd", cwd,
-		"--projection", "workspace", "--next-transition",
+function sandboxReviewModeInvoke(binary, cwd, args) {
+	return JSON.parse(execFileSync(binary, args, {
+		cwd,
+		encoding: "utf8",
+		env: gentleAiProcessEnvironment(),
+	}));
+}
+
+function sandboxReviewModeStatus(binary, cwd, expectedEffective, expectedSource, phase) {
+	const response = sandboxReviewModeInvoke(binary, cwd, [
+		"review", "mode", "status", "--scope", "global", "--cwd", cwd, "--json",
 	]);
+	const status = response?.status;
+	if (status?.effective !== expectedEffective || status.source !== expectedSource) {
+		throw new Error(`${phase}: sandbox RDD mode expected effective=${expectedEffective} source=${expectedSource}, got ${JSON.stringify(status)}`);
+	}
+	return status;
+}
+
+function enableSandboxReviewMode(binary, cwd) {
+	sandboxReviewModeInvoke(binary, cwd, [
+		"review", "mode", "enable", "--scope", "global", "--cwd", cwd, "--json",
+	]);
+}
+
+function rawStatus(binary, cwd, lineageId) {
+	const args = [
+		"review", "status", "--contract", CONTRACT, "--cwd", cwd,
+		"--projection", "workspace", "--agent", "pi", "--next-transition",
+	];
+	if (lineageId !== undefined) args.push("--lineage", lineageId);
+	return rawInvoke(binary, cwd, args);
+}
+
+// START negotiates the Pi transport itself. Every later STATUS in this direct
+// lane must name that same public transport so it observes the same compact-v2
+// lifecycle rather than an agent-less view of it.
+function piDirectCli(cli) {
+	const targetStatus = cli.targetStatus.bind(cli);
+	cli.targetStatus = (request) => targetStatus({ ...request, agent: "pi" });
+	return cli;
 }
 
 // --- scratch repositories ---
 
 function git(cwd, ...args) {
-	execFileSync("git", args, { cwd, encoding: "utf8" });
+	return execFileSync("git", args, { cwd, encoding: "utf8" });
 }
 
 function scratchRepo(root, name) {
@@ -151,17 +223,6 @@ function scratchRepo(root, name) {
 	return cwd;
 }
 
-// A LINKED git worktree (not the primary checkout) of a fresh scratch repo:
-// the field shape the reported defect was hit in.
-function scratchLinkedWorktree(root, name) {
-	const primary = scratchRepo(root, `${name}-primary`);
-	const linked = join(root, `${name}-linked`);
-	git(primary, "worktree", "add", "-q", linked, "-b", `feature/${name}`);
-	git(linked, "config", "user.email", "crosslane@example.com");
-	git(linked, "config", "user.name", "Cross Lane Battery");
-	return linked;
-}
-
 function write(cwd, name, content) {
 	const path = join(cwd, name);
 	mkdirSync(dirname(path), { recursive: true });
@@ -171,6 +232,128 @@ function write(cwd, name, content) {
 function commitAll(cwd, message) {
 	git(cwd, "add", "-A");
 	git(cwd, "commit", "-q", "-m", message);
+}
+
+// `review.capture-validation --execute=true` owns its Pi subprocess. This
+// battery supplies only a deterministic executable in its own scratch root.
+// The Go sandbox retains PATH, so each call carries its exact JSON in a
+// battery-owned opaque PATH entry; the fake reads the Go-rendered prompt and
+// emits that value only. It has no repository, HOME, network, model, provider,
+// profile, or active-worktree access.
+function installFakePi(root) {
+	const directory = join(root, "fake-pi-bin");
+	const executable = join(directory, "pi");
+	const log = join(root, "fake-pi-invocations.log");
+	const original = { path: process.env.PATH };
+	const basePath = `${directory}${delimiter}${original.path ?? ""}`;
+	mkdirSync(directory, { recursive: true });
+	writeFileSync(executable, `#!/bin/sh
+set -eu
+/bin/cat >/dev/null
+result=""
+old_ifs=$IFS
+IFS=:
+for entry in $PATH; do
+  case "$entry" in
+    ${FAKE_PI_VALIDATOR_PATH_PREFIX}*)
+      encoded="\${entry#${FAKE_PI_VALIDATOR_PATH_PREFIX}}"
+      result=$(printf '%b' "$encoded")
+      break
+      ;;
+  esac
+done
+IFS=$old_ifs
+if [ -z "$result" ]; then
+  printf '%s\\n' fake-pi-targeted-validator:missing-result >> '${log}'
+  exit 64
+fi
+printf '%s\\n' fake-pi-targeted-validator:emitted-result >> '${log}'
+printf '%s' "$result"
+`);
+	chmodSync(executable, 0o700);
+	process.env.PATH = basePath;
+
+	function restore(name, value) {
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+	}
+
+	return {
+		setResult(result) {
+			const octal = Buffer.from(result, "utf8").toString("hex").match(/../g)?.map((byte) => `\\${Number.parseInt(byte, 16).toString(8).padStart(3, "0")}`).join("");
+			if (octal === undefined) throw new Error("fake Pi validator result could not be encoded for its isolated environment");
+			process.env.PATH = `${directory}${delimiter}${FAKE_PI_VALIDATOR_PATH_PREFIX}${octal}${delimiter}${original.path ?? ""}`;
+		},
+		clearResult() {
+			process.env.PATH = basePath;
+		},
+		invocationCount() {
+			if (!existsSync(log)) return 0;
+			return readFileSync(log, "utf8").split("\n").filter((line) => line.startsWith("fake-pi-targeted-validator:")).length;
+		},
+		logSummary() {
+			return existsSync(log) ? readFileSync(log, "utf8").trim() : "not invoked";
+		},
+		assertInvocation(before, step) {
+			const count = this.invocationCount();
+			if (count !== before + 1) {
+				throw new Error(`${step}: fake Pi invocation count=${count}, expected ${before + 1}`);
+			}
+		},
+		restore() {
+			restore("PATH", original.path);
+			if (process.env.PATH !== original.path) {
+				throw new Error("fake Pi cleanup did not restore the sandbox process environment");
+			}
+		},
+	};
+}
+
+function targetedValidatorDocument(validationRequest, originalEvidence, regressionEvidence) {
+	if (typeof validationRequest?.requestHash !== "string" || typeof validationRequest?.correctionTargetIdentity !== "string") {
+		throw new Error("targeted validation is missing its request hash or correction target identity");
+	}
+	const findingIds = validationRequest.fixFindingIds;
+	if (!Array.isArray(findingIds) || findingIds.length === 0 || findingIds.some((id) => typeof id !== "string" || id.length === 0)) {
+		throw new Error("targeted validation is missing its bound correction finding IDs");
+	}
+	const findingEvidence = `bound correction finding IDs: ${findingIds.join(", ")}`;
+	return JSON.stringify({
+		targeted_validation_request_hash: validationRequest.requestHash,
+		correction_target_identity: validationRequest.correctionTargetIdentity,
+		original_criteria: { passed: true, evidence: [originalEvidence, findingEvidence] },
+		correction_regression: { passed: true, evidence: [regressionEvidence, findingEvidence] },
+		follow_ups: [],
+	});
+}
+
+async function captureTargetedValidation(fakePi, cli, cwd, validationInput, validationRequest, lineageId, step, originalEvidence, regressionEvidence) {
+	if (validationInput?.captureOperation !== "review.capture-validation") {
+		throw new Error(`${step}: expected review.capture-validation, got ${validationInput?.captureOperation ?? "(none)"}`);
+	}
+	const argumentTokens = validationInput.arguments.map((argument) => argument.token);
+	if (argumentTokens.some((token) => token === undefined)) {
+		throw new Error(`${step}: provider validation capture omitted an exact argument token`);
+	}
+	const before = fakePi.invocationCount();
+	fakePi.setResult(targetedValidatorDocument(validationRequest, originalEvidence, regressionEvidence));
+	let captured;
+	try {
+		captured = await cli.captureProviderRole({
+			cwd,
+			captureOperation: "review.capture-validation",
+			argumentTokens,
+		});
+	} catch (error) {
+		throw new Error(`${step}: Go-owned validation capture rejected exact tokens ${argumentTokens.join(" ")} ${JSON.stringify(error instanceof Error ? error.diagnostics : undefined)}; fake Pi=${fakePi.logSummary()}`, { cause: error });
+	} finally {
+		fakePi.clearResult();
+	}
+	fakePi.assertInvocation(before, step);
+	if (!captured.captured || captured.role !== "targeted-validator" || captured.lineageId !== lineageId) {
+		throw new Error(`${step}: provider validation capture did not preserve the exact lineage: ${JSON.stringify(captured)}`);
+	}
+	return captured;
 }
 
 // --- transition parity: the controller's offered next step vs the native one ---
@@ -225,6 +408,58 @@ function substitute(tokens, slots) {
 	});
 }
 
+async function assertTerminalApprovalBurn(binary, cli, cwd, lineageId, step) {
+	const raw = rawStatus(binary, cwd, lineageId);
+	const status = await cli.targetStatus({ cwd, lineageId });
+	assertOfferedStepMatchesNative(`${step}: post-burn`, status, raw);
+	if (raw.applicability !== "unrelated" || status.applicability !== "unrelated") {
+		throw new Error(`${step}: approved lineage STATUS must be absent from the current target, raw=${raw.applicability} decoded=${status.applicability}`);
+	}
+	if (raw.authority !== undefined || status.authority !== undefined) {
+		throw new Error(`${step}: terminal approval left live authority ${JSON.stringify(raw.authority)}`);
+	}
+	if (raw.receipt?.status !== "not_applicable" || raw.receipt?.identity !== undefined || status.receipt.status !== "not_applicable" || status.receipt.identity !== undefined) {
+		throw new Error(`${step}: terminal approval left receipt evidence raw=${JSON.stringify(raw.receipt)} decoded=${JSON.stringify(status.receipt)}`);
+	}
+	if (raw.validation_request !== undefined || status.validationRequest !== undefined) {
+		throw new Error(`${step}: terminal approval left validation evidence`);
+	}
+	if (raw.action !== "start" || status.action !== "start" || status.nextTransition?.execute?.operation !== "review.start") {
+		throw new Error(`${step}: approved lineage STATUS manufactured approval instead of a fresh start, raw=${summarizeRaw(raw.next_transition)} decoded=${summarizeDecoded(status.nextTransition)}`);
+	}
+	if (git(cwd, "diff", "--cached", "--name-only") !== "") {
+		throw new Error(`${step}: terminal approval left staged repository content`);
+	}
+	return "approved finalize response is the approval proof; exact-lineage STATUS is unrelated with no authority, receipt, validation, or staging and offers fresh review.start";
+}
+
+async function startActiveMediumLineage(binary, cli, cwd, step) {
+	let raw = rawStatus(binary, cwd);
+	let status = await cli.targetStatus({ cwd });
+	assertOfferedStepMatchesNative(`${step}: pre-start`, status, raw);
+	let consent;
+	try {
+		await cli.start({ cwd, targetIdentity: status.targetIdentity, projection: "workspace" });
+		throw new Error(`${step}: medium start unexpectedly proceeded without consent`);
+	} catch (error) {
+		if (!(error instanceof NativeReviewConsentRequiredError)) {
+			throw new Error(`${step}: START did not follow its fresh candidate transition ${summarizeDecoded(status.nextTransition)}`, { cause: error });
+		}
+		consent = error.consent;
+	}
+	const answer = await cli.answerConsent({ cwd, consent, answer: "granted" });
+	if (answer.kind !== "started" || answer.start.state !== "reviewing" || answer.start.riskLevel !== "medium") {
+		throw new Error(`${step}: granted medium start did not create a live reviewing authority`);
+	}
+	raw = rawStatus(binary, cwd, answer.start.lineageId);
+	status = await cli.targetStatus({ cwd, lineageId: answer.start.lineageId });
+	assertOfferedStepMatchesNative(`${step}: active`, status, raw);
+	if (raw.authority?.lineage_id !== answer.start.lineageId || raw.authority?.state !== "reviewing") {
+		throw new Error(`${step}: active authority is missing or changed ${JSON.stringify(raw.authority)}`);
+	}
+	return { start: answer.start, raw, status };
+}
+
 // --- checks ---
 
 async function lowLifecycle(binary, cli, root) {
@@ -244,21 +479,21 @@ async function lowLifecycle(binary, cli, root) {
 		throw new Error(`low start decoded riskLevel=${start.riskLevel} state=${start.state} lensesRequired=${start.lensesRequired}`);
 	}
 
-	raw = rawStatus(binary, cwd);
-	status = await cli.targetStatus({ cwd });
+	raw = rawStatus(binary, cwd, start.lineageId);
+	status = await cli.targetStatus({ cwd, lineageId: start.lineageId });
 	assertOfferedStepMatchesNative("pre-finalize", status, raw);
 	if (status.nextTransition?.execute?.operation !== "review.finalize") {
-		throw new Error(`expected review.finalize, got ${summarizeDecoded(status.nextTransition)}`);
+		throw new Error(`expected review.finalize, got ${summarizeDecoded(status.nextTransition)} after start ${JSON.stringify({ state: start.state, action: start.action, raw: start.raw })}; post-start STATUS ${JSON.stringify(raw)}`);
 	}
 	const finalize = await cli.finalizeTransition({ cwd, argumentTokens: executeTokens(status.nextTransition) });
 	if (finalize.state !== "approved") throw new Error(`finalize state=${finalize.state}`);
+	const burn = await assertTerminalApprovalBurn(binary, cli, cwd, finalize.lineageId, "low lifecycle");
 
-	git(cwd, "add", "-A");
 	const validate = await cli.validate({ cwd, gate: "pre-commit", lineageId: finalize.lineageId });
-	if (!validate.allowed || validate.result !== "allow") {
-		throw new Error(`gate result=${validate.result} allowed=${validate.allowed}`);
+	if (validate.allowed || validate.result !== "invalidated" || validate.action !== "repository-policy" || validate.delivery !== "unmanaged") {
+		throw new Error(`gate must be informational/unmanaged after burn: result=${validate.result} allowed=${validate.allowed} action=${validate.action} delivery=${validate.delivery}`);
 	}
-	return "start (low, zero lenses) -> finalize approved -> pre-commit validate allow, offered step matched native at every hop";
+	return `start (low, zero lenses) -> finalize approved -> ${burn}; pre-commit gate is informational/non-deciding unmanaged, not a receipt allow`;
 }
 
 async function mediumConsent(binary, cli, root) {
@@ -288,13 +523,13 @@ async function mediumConsent(binary, cli, root) {
 	if (granted.state !== "reviewing" || granted.riskLevel !== "medium" || granted.selectedLenses.length !== 1) {
 		throw new Error(`granted state=${granted.state} risk=${granted.riskLevel} lenses=${granted.selectedLenses.length}`);
 	}
-	return { cwd, note: "consent/v3 surfaced through the direct decoder lane; granted answer created a reviewing medium lineage" };
+	return { cwd, lineageId: granted.lineageId, note: "consent/v3 surfaced through the direct decoder lane; granted answer created a reviewing medium lineage" };
 }
 
 // sequencingLifecycle drives a scripted correction on its own medium lineage
 // and checks, at every step, that the client's decoded offered step equals
 // the native transition - including the evidence-before-validation ordering.
-async function sequencingLifecycle(binary, cli, root) {
+async function sequencingLifecycle(binary, cli, root, fakePi) {
 	const cwd = scratchRepo(root, "pi-sequencing");
 	const base = "export function greet(name) {\n  return \"hi \" + name;\n}\n";
 	write(cwd, "src/greet.js", base);
@@ -314,10 +549,11 @@ async function sequencingLifecycle(binary, cli, root) {
 	}
 	const sequencingAnswer = await cli.answerConsent({ cwd, consent, answer: "granted" });
 	if (sequencingAnswer.kind !== "started") throw new Error(`granted answer kind=${sequencingAnswer.kind}`);
+	const sequencingLineageId = sequencingAnswer.start.lineageId;
 
 	// Reviewer slot: capture one deterministic candidate-causal blocker.
-	raw = rawStatus(binary, cwd);
-	status = await cli.targetStatus({ cwd });
+	raw = rawStatus(binary, cwd, sequencingLineageId);
+	status = await cli.targetStatus({ cwd, lineageId: sequencingLineageId });
 	assertOfferedStepMatchesNative("reviewer-slot", status, raw);
 	const reviewerInput = status.nextTransition?.collect?.inputs[0];
 	if (reviewerInput?.captureOperation !== "review.capture-result") {
@@ -352,8 +588,8 @@ async function sequencingLifecycle(binary, cli, root) {
 	]);
 
 	// Finalize into correction_required through the client.
-	raw = rawStatus(binary, cwd);
-	status = await cli.targetStatus({ cwd });
+	raw = rawStatus(binary, cwd, sequencingLineageId);
+	status = await cli.targetStatus({ cwd, lineageId: sequencingLineageId });
 	assertOfferedStepMatchesNative("post-capture", status, raw);
 	if (status.nextTransition?.execute?.operation !== "review.finalize") {
 		throw new Error(`expected review.finalize, got ${summarizeDecoded(status.nextTransition)}`);
@@ -362,8 +598,8 @@ async function sequencingLifecycle(binary, cli, root) {
 	if (finalize.state !== "correction_required") throw new Error(`finalize state=${finalize.state}`);
 
 	// Correction plan forecast is submitted BEFORE editing.
-	raw = rawStatus(binary, cwd);
-	status = await cli.targetStatus({ cwd });
+	raw = rawStatus(binary, cwd, sequencingLineageId);
+	status = await cli.targetStatus({ cwd, lineageId: sequencingLineageId });
 	assertOfferedStepMatchesNative("correction-plan", status, raw);
 	const planInput = raw.next_transition?.collect?.inputs[0];
 	if (planInput?.capture_operation !== "external.plan_correction") {
@@ -377,8 +613,8 @@ async function sequencingLifecycle(binary, cli, root) {
 
 	// THE sequencing class check: correction evidence must be collected
 	// before any targeted validation is offered.
-	raw = rawStatus(binary, cwd);
-	status = await cli.targetStatus({ cwd });
+	raw = rawStatus(binary, cwd, sequencingLineageId);
+	status = await cli.targetStatus({ cwd, lineageId: sequencingLineageId });
 	assertOfferedStepMatchesNative("post-fix", status, raw);
 	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
 	// An offered validation STEP is a targeted-validation collect input. The
@@ -389,10 +625,10 @@ async function sequencingLifecycle(binary, cli, root) {
 		inputs.some((input) => input.captureOperation === "external.run_targeted_validation" || input.captureOperation === "review.capture-validation");
 	const evidenceInputs = inputs.filter((input) => input.captureOperation === "review.capture-evidence");
 	if (validationOffered) {
-		throw new Error(`${KNOWN_RED_SEQUENCING}: targeted validation was offered before correction evidence was captured`);
+		throw new Error("targeted validation was offered before correction evidence was captured");
 	}
 	if (evidenceInputs.length !== 1) {
-		throw new Error(`${KNOWN_RED_SEQUENCING}: expected exactly one review.capture-evidence input before validation, got ${summarizeDecoded(status.nextTransition)}`);
+		throw new Error(`expected exactly one review.capture-evidence input before validation, got ${summarizeDecoded(status.nextTransition)}`);
 	}
 	pass("sequencing: evidence collected before targeted validation", "correction status offers exactly one review.capture-evidence and no validation until evidence lands");
 
@@ -408,8 +644,8 @@ async function sequencingLifecycle(binary, cli, root) {
 	if (evidence.outcome !== "passed") throw new Error(`evidence outcome=${evidence.outcome}`);
 
 	// Only now may targeted validation be offered.
-	raw = rawStatus(binary, cwd);
-	status = await cli.targetStatus({ cwd });
+	raw = rawStatus(binary, cwd, sequencingLineageId);
+	status = await cli.targetStatus({ cwd, lineageId: sequencingLineageId });
 	assertOfferedStepMatchesNative("post-evidence", status, raw);
 	const validationInput = raw.next_transition?.collect?.inputs[0];
 	if (
@@ -421,24 +657,37 @@ async function sequencingLifecycle(binary, cli, root) {
 	if (status.validationRequest === undefined) {
 		throw new Error("decoded status is missing the validation request after evidence capture");
 	}
-	const validatorFile = join(root, "pi-validator.json");
-	writeFileSync(validatorFile, JSON.stringify({
-		targeted_validation_request_hash: status.validationRequest.requestHash,
-		correction_target_identity: status.validationRequest.correctionTargetIdentity,
-		original_criteria: { passed: true, evidence: ["frozen correction tree guards name == null before toUpperCase per the embedded diff"] },
-		correction_regression: { passed: true, evidence: ["greet() is untouched by the correction diff; only shout gained the guard"] },
-		follow_ups: [],
-	}));
-	const validationTokens = substitute(validationInput.submission.argument_tokens, { value: validatorFile });
-	const approved = rawInvoke(binary, root, ["review", validationInput.submission.operation_token, ...validationTokens]);
-	const approvedState = approved?.result?.state ?? approved?.state;
-	if (approvedState !== "approved") throw new Error(`validation finalize state=${approvedState}`);
-	return "offered step matched native at every hop; plan -> fix -> evidence -> targeted validation -> approved receipt";
+	const capturedValidation = status.nextTransition?.collect?.inputs?.[0];
+	await captureTargetedValidation(
+		fakePi,
+		cli,
+		cwd,
+		capturedValidation,
+		status.validationRequest,
+		sequencingLineageId,
+		"sequencing targeted validation",
+		"frozen correction tree guards name == null before toUpperCase per the embedded diff",
+		"greet() is untouched by the correction diff; only shout gained the guard",
+	);
+	raw = rawStatus(binary, cwd, sequencingLineageId);
+	status = await cli.targetStatus({ cwd, lineageId: sequencingLineageId });
+	assertOfferedStepMatchesNative("post-validation-capture", status, raw);
+	if (status.nextTransition?.execute?.operation !== "review.finalize") {
+		throw new Error(`provider validation capture did not offer finalization, got ${summarizeDecoded(status.nextTransition)}`);
+	}
+	const finalizeTokens = executeTokens(status.nextTransition);
+	if (!finalizeTokens.includes("--captured-evidence=true")) {
+		throw new Error(`provider validation capture must finalize with --captured-evidence=true, got ${finalizeTokens.join(" ")}`);
+	}
+	const approvalFinalize = await cli.finalizeTransition({ cwd, argumentTokens: finalizeTokens });
+	if (approvalFinalize.state !== "approved") throw new Error(`post-validation finalize state=${approvalFinalize.state}`);
+	const burn = await assertTerminalApprovalBurn(binary, cli, cwd, sequencingLineageId, "sequencing lifecycle");
+	return `offered step matched native at every hop through approval; plan -> fix -> evidence -> targeted validation -> ${burn}`;
 }
 
 // abandonLifecycle drives the audited abandon end-to-end through the real
-// adapter runtime against the real binary: start a low lineage, abandon it
-// with the adapter-built maintainer authorization, and confirm the native
+// adapter runtime against the real binary: start an independent active medium
+// lineage, abandon it with the adapter-built maintainer authorization, and confirm the native
 // gate accepted the binding, committed a quarantine record, and no longer
 // offers the lineage as live authority. RED-provable: the check asserts the
 // adapter-built binding is exactly the nine-line
@@ -448,17 +697,14 @@ async function sequencingLifecycle(binary, cli, root) {
 // by the native gate anyway.
 async function abandonLifecycle(binary, cli, root) {
 	const cwd = scratchRepo(root, "pi-abandon");
-	write(cwd, "docs/abandon-guide.md", "# Abandon guide\n\nline one\n");
-	commitAll(cwd, "docs: abandon guide");
-	write(cwd, "docs/abandon-guide.md", "# Abandon guide\n\nline one\nline two, purely passive documentation\n");
+	write(cwd, "src/abandon.js", "export function retain(value) {\n  return value;\n}\n");
+	commitAll(cwd, "feat: abandon authority");
+	write(cwd, "src/abandon.js", "export function retain(value) {\n  return value;\n}\nexport function duplicate(value) {\n  return value + value;\n}\n");
 
-	let raw = rawStatus(binary, cwd);
-	let status = await cli.targetStatus({ cwd });
-	assertOfferedStepMatchesNative("pre-start", status, raw);
-	const start = await cli.start({ cwd, targetIdentity: status.targetIdentity, projection: "workspace" });
-	if (start.state !== "reviewing") throw new Error(`abandon precondition start state=${start.state}`);
-
-	raw = rawStatus(binary, cwd);
+	const active = await startActiveMediumLineage(binary, cli, cwd, "abandon lifecycle");
+	const start = active.start;
+	let raw = active.raw;
+	let status;
 	if (raw.authority?.lineage_id !== start.lineageId || typeof raw.authority?.revision !== "string") {
 		throw new Error(`live authority missing for started lineage ${start.lineageId}: ${JSON.stringify(raw.authority)}`);
 	}
@@ -500,8 +746,8 @@ async function abandonLifecycle(binary, cli, root) {
 	}
 
 	// The abandoned lineage must no longer be offered as live authority.
-	raw = rawStatus(binary, cwd);
-	status = await cli.targetStatus({ cwd });
+	raw = rawStatus(binary, cwd, start.lineageId);
+	status = await cli.targetStatus({ cwd, lineageId: start.lineageId });
 	assertOfferedStepMatchesNative("post-abandon", status, raw);
 	if (raw.authority !== null && raw.authority !== undefined) {
 		throw new Error(`post-abandon status still reports live authority ${JSON.stringify(raw.authority)}`);
@@ -509,292 +755,66 @@ async function abandonLifecycle(binary, cli, root) {
 	if (status.nextTransition?.execute?.operation !== "review.start") {
 		throw new Error(`post-abandon expected a fresh review.start, got ${summarizeDecoded(status.nextTransition)}`);
 	}
-	return "adapter-built nine-line v2 binding accepted natively; quarantine record committed; post-abandon status offers only a fresh start";
+	return "independent active medium lineage used the adapter-built nine-line v2 binding; native quarantine record committed; post-abandon status offers only a fresh start before any terminal approval burn";
 }
 
-// recoveredSuccessorLifecycle reproduces the maintainer's live scenario
-// (2026-08-16, Engram #12461/#12466): a lineage recovered EXTERNALLY through
-// the native CLI, then driven by the Pi controller from STATUS alone.
-//   1. approve a low documentation lineage;
-//   2. change the scope with a code edit (medium risk);
-//   3. native `review recover --disposition scope_changed` with the explicit
-//      LF-only gentle-ai.review-recovery-authorization/v1 binding (an ACTIVE
-//      reviewing predecessor refuses recovery, so approval comes first);
-//   4. defect A: the controller's dispatch binding must hydrate from the
-//      STATUS the controller itself decodes — before that STATUS, dispatch
-//      refuses with current-binding-missing;
-//   5. defect B: finalize at reviewer_results_required must surface the
-//      provider-offered review.capture-result step, never the correction
-//      evidence-first-ordering lane;
-//   6. the drive completes to one really captured lens.
-async function recoveredSuccessorLifecycle(binary, cli, root) {
-	const cwd = scratchRepo(root, "pi-recovered");
-	write(cwd, "docs/recover-guide.md", "# Recover guide\n\nline one\n");
-	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\n");
-	commitAll(cwd, "feat: base");
-	write(cwd, "docs/recover-guide.md", "# Recover guide\n\nline one\nline two, purely passive documentation\n");
+// A native approval burns its authority. This public-contract check proves a
+// burned predecessor cannot seed live recovery after the workspace candidate
+// changes; recovered-successor controller hydration remains unit-covered.
+async function burnedPredecessorScopeIsolation(binary, cli, root) {
+	const cwd = scratchRepo(root, "pi-burned-predecessor");
+	write(cwd, "docs/recovery-contract.md", "# Recovery contract\n\nbase\n");
+	write(cwd, "src/fresh-scope.js", "export function freshScope(value) {\n  return value;\n}\n");
+	commitAll(cwd, "docs: recovery contract base");
+	write(cwd, "docs/recovery-contract.md", "# Recovery contract\n\nbase\n\npassive predecessor update\n");
 
-	// Low predecessor to approval.
 	let raw = rawStatus(binary, cwd);
 	let status = await cli.targetStatus({ cwd });
-	assertOfferedStepMatchesNative("pre-start", status, raw);
-	const start = await cli.start({ cwd, targetIdentity: status.targetIdentity, projection: "workspace" });
-	if (start.riskLevel !== "low" || start.state !== "reviewing") throw new Error(`predecessor start risk=${start.riskLevel} state=${start.state}`);
-	status = await cli.targetStatus({ cwd });
+	assertOfferedStepMatchesNative("burned predecessor: pre-start", status, raw);
+	const predecessorTarget = status.targetIdentity;
+	const start = await cli.start({ cwd, targetIdentity: predecessorTarget, projection: "workspace" });
+	if (start.state !== "reviewing" || start.riskLevel !== "low") {
+		throw new Error(`burned predecessor did not create a low reviewing lineage: ${JSON.stringify(start)}`);
+	}
+	raw = rawStatus(binary, cwd, start.lineageId);
+	status = await cli.targetStatus({ cwd, lineageId: start.lineageId });
+	assertOfferedStepMatchesNative("burned predecessor: pre-finalize", status, raw);
 	if (status.nextTransition?.execute?.operation !== "review.finalize") {
-		throw new Error(`expected review.finalize, got ${summarizeDecoded(status.nextTransition)}`);
+		throw new Error(`burned predecessor expected review.finalize, got ${summarizeDecoded(status.nextTransition)}`);
 	}
-	const finalize = await cli.finalizeTransition({ cwd, argumentTokens: executeTokens(status.nextTransition) });
-	if (finalize.state !== "approved") throw new Error(`predecessor finalize state=${finalize.state}`);
+	const approved = await cli.finalizeTransition({ cwd, argumentTokens: executeTokens(status.nextTransition) });
+	if (approved.state !== "approved") throw new Error(`burned predecessor finalize state=${approved.state}`);
+	const burn = await assertTerminalApprovalBurn(binary, cli, cwd, approved.lineageId, "burned predecessor");
 
-	// External scope change: code joins the approved documentation change.
-	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\nexport function twice(a) {\n  return a + a;\n}\n");
-	raw = rawStatus(binary, cwd);
-	const successor = "recovered-successor-crosslane";
-	const authorization = [
-		"gentle-ai.review-recovery-authorization/v1",
-		`predecessor_lineage=${finalize.lineageId}`,
-		`predecessor_revision=${finalize.storeRevision}`,
-		`target_identity=${raw.target_identity}`,
-		"actor=cross-lane-battery",
-		"reason=scope changed after approval",
-	].join("\n");
-	rawInvoke(binary, cwd, [
-		"review", "recover", "--cwd", cwd,
-		"--predecessor-lineage", finalize.lineageId,
-		"--expected-predecessor-revision", finalize.storeRevision,
-		"--successor-lineage", successor,
-		"--disposition", "scope_changed",
-		"--actor", "cross-lane-battery",
-		"--reason", "scope changed after approval",
-		"--maintainer-authorization", authorization,
-	]);
-
-	const registry = new CandidateViewRegistry();
-	try {
-		// Defect A: before the controller decodes the successor's STATUS, the
-		// dispatch registry knows nothing — the refusal is the pre-fix shape.
-		let refused = false;
-		try {
-			injectReviewCandidateView({ agent: "review-reliability", task: "probe", mode: "task" }, registry);
-		} catch (error) {
-			refused = /no current controller-owned candidate view lineage binding/.test(String(error instanceof Error ? error.message : error));
+	write(cwd, "src/fresh-scope.js", "export function freshScope(value) {\n  return value;\n}\nexport function freshScopeTwice(value) {\n  return freshScope(value) + freshScope(value);\n}\n");
+	const exactRaw = rawStatus(binary, cwd, approved.lineageId);
+	const exactStatus = await cli.targetStatus({ cwd, lineageId: approved.lineageId });
+	assertOfferedStepMatchesNative("burned predecessor: exact lineage after scope change", exactStatus, exactRaw);
+	const freshRaw = rawStatus(binary, cwd);
+	const freshStatus = await cli.targetStatus({ cwd });
+	assertOfferedStepMatchesNative("burned predecessor: selectorless fresh candidate", freshStatus, freshRaw);
+	if (freshStatus.targetIdentity === predecessorTarget || freshStatus.nextTransition?.execute?.operation !== "review.start") {
+		throw new Error(`scope change did not expose a distinct fresh review.start candidate: ${summarizeDecoded(freshStatus.nextTransition)}`);
+	}
+	for (const [label, document] of [["exact", exactRaw], ["decoded exact", exactStatus], ["fresh", freshRaw], ["decoded fresh", freshStatus]]) {
+		if (document.authority !== undefined && document.authority !== null) {
+			throw new Error(`${label} STATUS derived live authority from burned predecessor ${JSON.stringify(document.authority)}`);
 		}
-		if (!refused) throw new Error("pre-STATUS dispatch unexpectedly resolved a binding for the recovered successor");
-		await __testing.executeReviewControllerOperation({ operation: "status", lineageId: successor }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
-		if (!registry.hasCurrentBinding()) {
-			throw new Error("controller STATUS did not hydrate the candidate-view dispatch binding for the recovered successor");
-		}
-		const dispatch = { agent: "review-reliability", task: "review the recovered successor", mode: "task" };
-		injectReviewCandidateView(dispatch, registry);
-		if (!dispatch.task.includes(successor)) throw new Error("hydrated dispatch context is not bound to the recovered successor lineage");
-		pass(
-			"recovered binding: STATUS hydrates controller dispatch",
-			"external scope_changed successor driven from STATUS alone: pre-STATUS dispatch refused, post-STATUS dispatch injected the successor candidate context (a controller without STATUS hydration fails here)",
-		);
-
-		// Defect B: finalize must follow the provider transition for reviewer
-		// results and never the correction evidence-first-ordering lane. On a
-		// provider that admits the pi transport the correct route is the host
-		// relay; the pi-subprocess hop is stubbed to keep this check free.
-		let relaySlots = 0;
-		__testing.setReviewHostRelayRunnerForTesting(async (request) => {
-			relaySlots += 1;
-			return { promptByteLength: request.captureArgumentTokens.length, resultByteLength: 0, submission: "{}" };
-		});
-		let finalizeEnvelope;
-		try {
-			finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({ reviewer_run_acknowledged: true }) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
-		} finally {
-			__testing.setReviewHostRelayRunnerForTesting();
-		}
-		const routedToRelay = relaySlots > 0 && finalizeEnvelope.host_relay?.transport === "pi_host_relay";
-		const routedToBlockedCapture = finalizeEnvelope.outcome === "reviewer-results-required"
-			&& /capture the reviewer result first/i.test(String(finalizeEnvelope.reason))
-			&& finalizeEnvelope.mutation_performed === false;
-		if (!routedToRelay && !routedToBlockedCapture) {
-			throw new Error(`finalize routed to ${String(finalizeEnvelope.outcome ?? finalizeEnvelope.status)} instead of the provider reviewer-result step`);
-		}
-		if (JSON.stringify(finalizeEnvelope).includes("evidence-first-ordering")) {
-			throw new Error("finalize still leaked the correction evidence-first-ordering lane");
-		}
-		pass(
-			"recovered routing: finalize offers capture-result, never evidence ordering",
-			routedToRelay
-				? "finalize followed the provider transition into the pi host relay for the outstanding reviewer result. Accepting either provider-correct route (relay when the provider admits the pi transport, blocked capture-result otherwise) is NOT a relaxation of the evidence-ordering guard: this check still fails on any evidence-first-ordering leak in the envelope, and on any route that is neither of the two"
-				: "document-free finalize at reviewer_results_required returned the actionable review.capture-result block with zero mutations. Accepting either provider-correct route (relay when the provider admits the pi transport, blocked capture-result otherwise) is NOT a relaxation of the evidence-ordering guard: this check still fails on any evidence-first-ordering leak in the envelope, and on any route that is neither of the two",
-		);
-
-		// Complete the drive to one really captured lens through the exact
-		// provider collect input.
-		raw = rawStatus(binary, cwd);
-		const input = raw.next_transition?.collect?.inputs?.[0];
-		if (input?.capture_operation !== "review.capture-result") throw new Error(`expected review.capture-result, got ${summarizeRaw(raw.next_transition)}`);
-		const args = rawArgumentValues(input);
-		const reviewerFile = join(root, "pi-recovered-reviewer.json");
-		writeFileSync(reviewerFile, JSON.stringify({
-			subject_hash: args["subject-hash"],
-			inspection: { status: "completed", paths: (input.changed_path_manifest ?? []).map((entry) => entry.path) },
-			evidence: ["twice(a) returns a + a: pure arithmetic introduced by the candidate hunk with no external effects"],
-			findings: [],
-		}));
-		const artifact = rawInvoke(binary, cwd, [
-			"review", "capture-result",
-			"--lineage", args.lineage,
-			"--expected-revision", args["expected-revision"],
-			"--target", args.target,
-			"--repository-context", args["repository-context"],
-			"--lens", args.lens,
-			"--order", args.order,
-			"--subject-hash", args["subject-hash"],
-			"--input", reviewerFile,
-		]);
-		if (artifact?.schema !== "gentle-ai.review-result-artifact/v2") throw new Error(`successor lens capture returned schema=${artifact?.schema}`);
-		return "low predecessor approved -> native scope_changed recover (explicit v1 binding) -> controller drove the successor from STATUS alone to one captured lens";
-	} finally {
-		try {
-			registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);
-		} catch {
-			// No hydrated view to clean when the check failed before binding.
+		for (const key of ["recovery", "recovery_disposition", "recoveryDisposition", "successor", "successor_lineage", "successorLineage", "recovered_successor", "recoveredSuccessor"]) {
+			if (document[key] !== undefined && document[key] !== null) {
+				throw new Error(`${label} STATUS derived ${key} from burned predecessor: ${JSON.stringify(document[key])}`);
+			}
 		}
 	}
+	return `native approval -> ${burn}; after scope mutation, exact burned-lineage STATUS and selectorless fresh-candidate STATUS expose no live authority, recovery disposition, or successor. Recovered-successor controller hydration remains unit-covered; live cross-lane no longer assumes durable approved authority`;
 }
 
-// externallyRecoveredSuccessor performs the shared setup both recovered-
-// lineage checks need: approve a predecessor in `cwd`, change the scope, and
-// create a successor through the EXTERNAL native `review recover` command
-// with its explicit LF-only v1 binding. Returns the successor lineage id.
-async function externallyRecoveredSuccessor(binary, cli, cwd, successor) {
-	let raw = rawStatus(binary, cwd);
-	let status = await cli.targetStatus({ cwd });
-	assertOfferedStepMatchesNative("pre-start", status, raw);
-	const start = await cli.start({ cwd, targetIdentity: status.targetIdentity, projection: "workspace" });
-	if (start.state !== "reviewing") throw new Error(`predecessor start state=${start.state}`);
-	status = await cli.targetStatus({ cwd });
-	if (status.nextTransition?.execute?.operation !== "review.finalize") {
-		throw new Error(`expected review.finalize, got ${summarizeDecoded(status.nextTransition)}`);
-	}
-	const finalize = await cli.finalizeTransition({ cwd, argumentTokens: executeTokens(status.nextTransition) });
-	if (finalize.state !== "approved") throw new Error(`predecessor finalize state=${finalize.state}`);
-	// The caller has already staged its scope change in the worktree.
-	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\nexport function twice(a) {\n  return a + a;\n}\n");
-	raw = rawStatus(binary, cwd);
-	const authorization = [
-		"gentle-ai.review-recovery-authorization/v1",
-		`predecessor_lineage=${finalize.lineageId}`,
-		`predecessor_revision=${finalize.storeRevision}`,
-		`target_identity=${raw.target_identity}`,
-		"actor=cross-lane-battery",
-		"reason=scope changed after approval",
-	].join("\n");
-	rawInvoke(binary, cwd, [
-		"review", "recover", "--cwd", cwd,
-		"--predecessor-lineage", finalize.lineageId,
-		"--expected-predecessor-revision", finalize.storeRevision,
-		"--successor-lineage", successor,
-		"--disposition", "scope_changed",
-		"--actor", "cross-lane-battery",
-		"--reason", "scope changed after approval",
-		"--maintainer-authorization", authorization,
-	]);
-	return successor;
-}
-
-// recoveredSuccessorFieldFlow reproduces the FIELD-REPORTED flow (2026-08-16,
-// gentle-pi 402f9f77 + gentle-ai 2.4.0-main): the candidate lives in a LINKED
-// git worktree with UNCOMMITTED tracked modifications, the successor came
-// from an external native recover, and the session drives `finalize` FIRST
-// and dispatches the reviewer straight after — never calling the STATUS
-// controller operation. Hydration wired only into STATUS leaves that flow
-// refusing, which is exactly what the maintainer hit after #340.
-//
-// Residual gap, honestly stated: the battery cannot age a lineage by days or
-// span real OS processes; it reproduces linked-worktree placement, dirty
-// tracked files, external recovery, and a FRESH controller registry (the
-// property a new process actually contributes), not wall-clock age.
-async function recoveredSuccessorFieldFlow(binary, cli, root) {
-	const cwd = scratchLinkedWorktree(root, "pi-recovered-linked");
-	write(cwd, "docs/recover-guide.md", "# Recover guide\n\nline one\n");
-	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\n");
-	commitAll(cwd, "feat: base");
-	write(cwd, "docs/recover-guide.md", "# Recover guide\n\nline one\nline two, purely passive documentation\n");
-	const successor = await externallyRecoveredSuccessor(binary, cli, cwd, "recovered-linked-successor");
-	// The tracked scope change stays UNCOMMITTED, like the reported worktree.
-	const dirty = execFileSync("git", ["status", "--porcelain"], { cwd, encoding: "utf8" });
-	if (!/^ M src\/mul\.js$/m.test(dirty)) throw new Error(`expected an uncommitted tracked modification, got ${JSON.stringify(dirty)}`);
-
-	// A brand-new registry stands in for the fresh Pi session.
-	const registry = new CandidateViewRegistry();
-	try {
-		// The pi-subprocess hop is stubbed: this check is about the dispatch
-		// binding the finalize-first flow leaves behind, on whichever route the
-		// provider offers (host relay when it admits the pi transport).
-		__testing.setReviewHostRelayRunnerForTesting(async (request) => ({ promptByteLength: request.captureArgumentTokens.length, resultByteLength: 0, submission: "{}" }));
-		let finalizeEnvelope;
-		try {
-			finalizeEnvelope = await __testing.executeReviewControllerOperation({ operation: "finalize", lineageId: successor, input: JSON.stringify({ reviewer_run_acknowledged: true }) }, cwd, new Map(), cli, undefined, undefined, undefined, registry);
-		} finally {
-			__testing.setReviewHostRelayRunnerForTesting();
-		}
-		const routed = finalizeEnvelope.outcome === "reviewer-results-required" || finalizeEnvelope.host_relay?.transport === "pi_host_relay";
-		if (!routed) {
-			throw new Error(`finalize routed to ${String(finalizeEnvelope.outcome ?? finalizeEnvelope.status)} instead of the provider reviewer-result step`);
-		}
-		if (JSON.stringify(finalizeEnvelope).includes("evidence-first-ordering")) {
-			throw new Error("finalize leaked the correction evidence-first-ordering lane");
-		}
-		const binding = finalizeEnvelope.dispatch_binding;
-		if (binding === undefined) throw new Error("the blocked finalize envelope does not report a dispatch-binding hydration outcome");
-		if (binding.hydrated !== true) {
-			throw new Error(`finalize reported hydration failure ${String(binding.reason)}: ${String(binding.message)}`);
-		}
-		if (!registry.hasCurrentBinding()) throw new Error("finalize did not hydrate the candidate-view dispatch binding");
-		// The reviewer dispatch the maintainer runs next must resolve.
-		const dispatch = { agent: "review-reliability", task: "review the recovered successor", mode: "task" };
-		injectReviewCandidateView(dispatch, registry);
-		if (!dispatch.task.includes(successor)) throw new Error("hydrated dispatch context is not bound to the recovered successor lineage");
-		return "linked worktree + uncommitted tracked changes + external recover: finalize-first (no STATUS call) hydrated the dispatch binding and the reviewer dispatch resolved, on whichever provider-correct route was offered, and the envelope still carries no evidence-first-ordering leak; residual gap: the battery cannot age a lineage by days or span OS processes, only a fresh registry";
-	} finally {
-		try {
-			registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);
-		} catch {
-			// No hydrated view to clean when the check failed before binding.
-		}
-	}
-}
-
-// relayMaterializeSlotLifecycle covers the shape every earlier check missed:
-// the provider's MATERIALIZE-marked host-relay slot (agent=pi,
-// materialize=true, provider submission) on an externally recovered lineage.
-// Measured root cause (third field report): the adapter's negotiated STATUS
-// never named its agent, so the provider only ever returned a bare
-// capture-result input, reviewHostRelaySlots() saw zero slots, and the relay
-// never ran. This check fails on any build that drops `--agent pi`.
-//
-// Residual gap, stated honestly: the locked-down pi subprocess and the final
-// provider submit leg are NOT executed here — those cost model spend. The
-// check drives everything up to and including the REAL materialize leg
-// against the real binary (the provider-issued tokens must actually produce
-// prompt bytes), and stubs only the pi-subprocess hop.
-// correctedLifecycleThroughAdapter drives the shape three field defects in a
-// row escaped through: a MEDIUM candidate taken all the way through detection,
-// bounded correction, evidence and targeted validation to an approved receipt
-// THROUGH THE ADAPTER — not the clean-approval path, and not raw CLI.
-//
-// Field defect it locks down (Engram #12547): after an admitted correction the
-// candidate identity legitimately moves, and a FINALIZE that merely follows the
-// provider's own execute transition carries no documents. That made the
-// adapter resolve the START-time reviewer view and report
-// `candidate-target-projection-drift`, so no corrected lineage could ever reach
-// a receipt through Pi.
-//
-// The controller-driven client is built from lib/*.ts on purpose: the battery's
-// shared `cli` comes from runtime/*.mjs, and mixing that module instance with
-// the extension's lib/*.ts instance breaks `instanceof` across the boundary,
-// which silently turns the consent path into a generic failure.
-async function correctedLifecycleThroughAdapter(binary, root) {
+// correctedLifecycleThroughAdapter drives a medium candidate through the
+// controller's corrected-candidate binding, then follows the provider-owned
+// validation role vector and finalization transition to a burned approval.
+async function correctedLifecycleThroughAdapter(binary, root, fakePi) {
 	const { createNativeReviewCli } = await import("../../lib/native-review-cli.ts");
-	const cli = createNativeReviewCli(undefined, binary);
+	const cli = piDirectCli(createNativeReviewCli(undefined, binary));
 	const cwd = scratchRepo(root, "pi-corrected");
 	const base = "export function parsePath(input) {\n  return input.split(\"/\");\n}\n";
 	write(cwd, "src/parse.js", base);
@@ -825,10 +845,10 @@ async function correctedLifecycleThroughAdapter(binary, root) {
 		boundLineageId = lineageId;
 		if (envelope.result?.state !== "reviewing" || lineageId === undefined) throw new Error(`granted START state=${String(envelope.result?.state)}`);
 		if (!registry.hasCurrentBinding()) throw new Error("START did not bind the immutable reviewer view for this session");
-		const startTree = rawStatus(binary, cwd).projection.current_candidate_tree;
+		const startTree = rawStatus(binary, cwd, lineageId).projection.current_candidate_tree;
 
 		// Reviewer slot: one deterministic candidate-caused BLOCKER.
-		let raw = rawStatus(binary, cwd);
+		let raw = rawStatus(binary, cwd, lineageId);
 		let slot = raw.next_transition?.collect?.inputs?.[0];
 		if (slot?.capture_operation !== "review.capture-result") throw new Error(`expected review.capture-result, got ${summarizeRaw(raw.next_transition)}`);
 		let args = rawArgumentValues(slot);
@@ -855,14 +875,14 @@ async function correctedLifecycleThroughAdapter(binary, root) {
 		if (envelope.result?.state !== "correction_required") throw new Error(`finalize after capture state=${String(envelope.result?.state ?? envelope.outcome)}`);
 
 		// Bounded correction: forecast BEFORE editing, then the edit.
-		raw = rawStatus(binary, cwd);
+		raw = rawStatus(binary, cwd, lineageId);
 		const planInput = raw.next_transition?.collect?.inputs?.[0];
 		if (planInput?.capture_operation !== "external.plan_correction") throw new Error(`expected external.plan_correction, got ${summarizeRaw(raw.next_transition)}`);
 		const bounds = planInput.submission?.values?.[0] ?? {};
 		envelope = await controller({ operation: "finalize", lineageId, input: JSON.stringify({ correction_line_forecast: bounds.minimum ?? 1 }) });
 		if (envelope.result?.state !== "correction_required") throw new Error(`correction forecast rejected: ${JSON.stringify(envelope.diagnostics ?? envelope.outcome)}`);
 		write(cwd, "src/parse.js", `${base}export function lastComponent(input) {\n  const parts = input.split("/");\n  return parts[parts.length - 1];\n}\n`);
-		const correctedTree = rawStatus(binary, cwd).projection.current_candidate_tree;
+		const correctedTree = rawStatus(binary, cwd, lineageId).projection.current_candidate_tree;
 		if (correctedTree === startTree) throw new Error("the correction did not move the candidate identity");
 
 		// THE REGRESSION PROBE: a FINALIZE that just follows the provider
@@ -873,37 +893,40 @@ async function correctedLifecycleThroughAdapter(binary, root) {
 			throw new Error("document-free FINALIZE on the corrected candidate still reports candidate-target-projection-drift");
 		}
 
-		// Correction evidence, then targeted validation, to the receipt.
+		// Correction evidence enters through the controller. The provider then owns
+		// the entire validation path: exact role tokens, Go-owned capture, fresh
+		// exact-lineage STATUS, and its captured-evidence finalization vector.
 		envelope = await controller({ operation: "finalize", lineageId, input: JSON.stringify({ final_evidence: "node --check src/parse.js passed; lastComponent now returns the final component", final_verification_passed: true }) });
 		if (envelope.diagnostics?.code === "candidate-target-projection-drift") throw new Error("evidence FINALIZE reported candidate-target-projection-drift");
-		raw = rawStatus(binary, cwd);
-		const validationInput = raw.next_transition?.collect?.inputs?.[0];
-		if (validationInput?.capture_operation !== "external.run_targeted_validation") {
-			return `corrected lineage reached ${String(raw.authority?.state)} through the adapter with no candidate-target-projection-drift at any step; residual gap: this provider renders targeted validation as the Go-owned ${String(validationInput?.capture_operation)} vector, which costs a model run, so the battery stops before the receipt`;
+		raw = rawStatus(binary, cwd, lineageId);
+		let status = await cli.targetStatus({ cwd, lineageId });
+		assertOfferedStepMatchesNative("corrected lifecycle: targeted validation", status, raw);
+		const validationInput = status.nextTransition?.collect?.inputs?.[0];
+		await captureTargetedValidation(
+			fakePi,
+			cli,
+			cwd,
+			validationInput,
+			status.validationRequest,
+			lineageId,
+			"corrected targeted validation",
+			"frozen correction tree returns parts[parts.length - 1]",
+			"parsePath is untouched by the correction diff",
+		);
+		raw = rawStatus(binary, cwd, lineageId);
+		status = await cli.targetStatus({ cwd, lineageId });
+		assertOfferedStepMatchesNative("corrected lifecycle: post-validation capture", status, raw);
+		if (status.nextTransition?.execute?.operation !== "review.finalize") {
+			throw new Error(`corrected validation capture did not offer finalization, got ${summarizeDecoded(status.nextTransition)}`);
 		}
-		// The evidence-only FINALIZE above already advanced the provider to
-		// targeted validation, so the receipt is completed through the exact
-		// provider-rendered submission (the same way the sequencing check does).
-		// Re-calling FINALIZE with final_evidence AND validation re-enters
-		// evidence capture on this provider; that lane question is pre-existing
-		// and out of scope for this defect, and is noted rather than papered over.
-		const request = raw.validation_request ?? validationInput.validation_request;
-		const validatorFile = join(root, "pi-corrected-validator.json");
-		writeFileSync(validatorFile, JSON.stringify({
-			targeted_validation_request_hash: request.request_hash,
-			correction_target_identity: request.correction_target_identity,
-			original_criteria: { passed: true, evidence: ["frozen correction tree returns parts[parts.length - 1]"] },
-			correction_regression: { passed: true, evidence: ["parsePath is untouched by the correction diff"] },
-			follow_ups: [],
-		}));
-		const submitted = rawInvoke(binary, root, ["review", validationInput.submission.operation_token,
-			...substitute(validationInput.submission.argument_tokens, { value: validatorFile })]);
-		const finalState = submitted?.result?.state ?? submitted?.state ?? rawStatus(binary, cwd).authority?.state;
-		if (finalState !== "approved") throw new Error(`corrected lineage ended at ${String(finalState)} instead of approved`);
-		// The receipt must be the adapter-validatable one for the corrected tree.
-		const gate = await controller({ operation: "status", lineageId });
-		if (gate.result?.authority?.state !== "approved") throw new Error(`adapter status does not see the approved corrected lineage: ${String(gate.result?.authority?.state)}`);
-		return "medium candidate driven through the adapter: BLOCKER detected -> bounded correction -> document-free provider-transition FINALIZE with no candidate-target-projection-drift -> correction evidence -> targeted validation -> approved receipt the adapter can see. Residual gap: the final targeted-validation document is submitted through the exact provider-rendered vector, because a combined evidence+validation FINALIZE re-enters evidence capture on this provider (pre-existing lane question, not this defect)";
+		const finalizeTokens = executeTokens(status.nextTransition);
+		if (!finalizeTokens.includes("--captured-evidence=true")) {
+			throw new Error(`corrected validation capture must finalize with --captured-evidence=true, got ${finalizeTokens.join(" ")}`);
+		}
+		const approved = await cli.finalizeTransition({ cwd, argumentTokens: finalizeTokens });
+		if (approved.state !== "approved") throw new Error(`corrected lineage ended at ${approved.state} instead of approved`);
+		const burn = await assertTerminalApprovalBurn(binary, cli, cwd, lineageId, "corrected lifecycle");
+		return `medium candidate driven through the adapter: BLOCKER detected -> bounded correction -> document-free provider-transition FINALIZE with no candidate-target-projection-drift -> correction evidence -> Go-owned targeted validation -> ${burn}`;
 	} finally {
 		// Candidate views are materialized read-only; leaving one behind makes
 		// the battery's own root cleanup fail with EACCES.
@@ -917,62 +940,8 @@ async function correctedLifecycleThroughAdapter(binary, root) {
 	}
 }
 
-async function relayMaterializeSlotLifecycle(binary, cli, root) {
-	const cwd = scratchLinkedWorktree(root, "pi-relay-slot");
-	write(cwd, "docs/relay-guide.md", "# Relay guide\n\nline one\n");
-	write(cwd, "src/mul.js", "export function mul(a, b) {\n  return a * b;\n}\n");
-	commitAll(cwd, "feat: base");
-	write(cwd, "docs/relay-guide.md", "# Relay guide\n\nline one\nline two, purely passive documentation\n");
-	const successor = await externallyRecoveredSuccessor(binary, cli, cwd, "relay-materialize-successor");
-
-	const relayed = [];
-	let materializedBytes = 0;
-	const registry = new CandidateViewRegistry();
-	__testing.setReviewHostRelayRunnerForTesting(async (request) => {
-		relayed.push(request);
-		// The REAL materialize leg: the provider-issued tokens must produce a
-		// non-empty opaque prompt from the real binary. No model spend.
-		const prompt = execFileSync(binary, ["review", "capture-result", ...request.captureArgumentTokens], {
-			cwd,
-			env: gentleAiProcessEnvironment(),
-			maxBuffer: 64 * 1024 * 1024,
-		});
-		materializedBytes = prompt.length;
-		if (materializedBytes === 0) throw new Error("provider materialize produced no prompt bytes");
-		return { promptByteLength: materializedBytes, resultByteLength: 0, submission: "{}" };
-	});
-	try {
-		const envelope = await __testing.executeReviewControllerOperation(
-			{ operation: "finalize", lineageId: successor, input: JSON.stringify({ reviewer_run_acknowledged: true }) },
-			cwd, new Map(), cli, undefined, undefined, undefined, registry,
-		);
-		if (relayed.length !== 1) {
-			throw new Error(`the provider materialize slot never reached the host relay (relayed ${relayed.length}); outcome=${String(envelope.outcome ?? envelope.status)}`);
-		}
-		const tokens = relayed[0].captureArgumentTokens;
-		if (!tokens.includes("--agent=pi") || !tokens.includes("--materialize=true")) {
-			throw new Error(`relay slot is missing the provider transport tokens: ${tokens.join(" ")}`);
-		}
-		if (relayed[0].submission?.operationToken !== "capture-result") {
-			throw new Error("relay slot carries no provider submission completing form");
-		}
-		const hostRelay = envelope.host_relay;
-		if (hostRelay?.transport !== "pi_host_relay" || hostRelay.captured_slots?.length !== 1) {
-			throw new Error(`controller envelope did not report one relayed slot: ${JSON.stringify(hostRelay)}`);
-		}
-		return `provider offered the materialize slot to the adapter and it reached the relay verbatim (agent=pi, materialize=true, submission=capture-result); the real materialize leg returned ${materializedBytes} prompt bytes. Residual gap: the locked-down pi subprocess and the provider submit leg are not executed here (model spend)`;
-	} finally {
-		__testing.setReviewHostRelayRunnerForTesting();
-		try {
-			registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);
-		} catch {
-			// No hydrated view to clean when the relay lane bound nothing.
-		}
-	}
-}
-
-async function modelReview(binary, cli, cwd) {
-	const raw = rawStatus(binary, cwd);
+async function modelReview(binary, cli, cwd, lineageId) {
+	const raw = rawStatus(binary, cwd, lineageId);
 	const input = raw.next_transition?.collect?.inputs?.[0];
 	if (input?.capture_operation !== "review.capture-result") {
 		throw new Error(`expected review.capture-result, got ${summarizeRaw(raw.next_transition)}`);
@@ -1067,45 +1036,72 @@ function removeScratchRoot(root) {
 	try {
 		rmSync(root, { recursive: true, force: true });
 	} catch (error) {
-		console.log(`note: scratch root ${root} could not be fully removed (${error.code ?? "unknown"}); results below are unaffected`);
+		return { removed: false, reason: error.code ?? "unknown" };
 	}
+	return { removed: !existsSync(root) };
 }
 
 // --- driver ---
 
 async function main() {
-	const binary = resolveBatteryBinary();
-	console.log(`cross-lane battery (Pi direct lane)`);
-	console.log(`binary: ${binary}`);
-	const root = mkdtempSync(join(tmpdir(), "gentle-pi-crosslane-"));
-	const cli = createNativeReviewCli(undefined, binary);
+	const originalEnvironment = snapshotProcessEnvironment();
+	let binary;
+	let root;
+	let sandbox;
+	let modeRepo;
+	let fakePi;
+	let cleanup = {
+		fakePiInvocations: 0,
+		initialRddMode: undefined,
+		enabledRddMode: undefined,
+		finalRddMode: undefined,
+		fakePiRestoreError: undefined,
+		rddModeError: undefined,
+		environmentRestored: false,
+		environmentRestoreError: undefined,
+		rootRemoved: false,
+		reason: undefined,
+	};
 	try {
+		// Resolution deliberately happens before HOME/XDG are replaced: a registered
+		// dev binary may live in the caller's Pi config, but every lifecycle state
+		// below belongs only to the battery-owned sandbox.
+		binary = resolveBatteryBinary();
+		console.log(`cross-lane battery (Pi direct lane)`);
+		console.log(`binary: ${binary}`);
+		root = mkdtempSync(join(tmpdir(), "gentle-pi-crosslane-"));
+		sandbox = configureSandboxEnvironment(root);
+		modeRepo = scratchRepo(root, "rdd-mode");
+		const initialRdd = sandboxReviewModeStatus(binary, modeRepo, "off", "default", "initial");
+		cleanup.initialRddMode = `${initialRdd.effective}/${initialRdd.source}`;
+		enableSandboxReviewMode(binary, modeRepo);
+		const enabledRdd = sandboxReviewModeStatus(binary, modeRepo, "on", "global", "after sandbox enable");
+		cleanup.enabledRddMode = `${enabledRdd.effective}/${enabledRdd.source}`;
+		fakePi = installFakePi(root);
+		const cli = piDirectCli(createNativeReviewCli(undefined, binary));
+
 		// Capture one live capabilities envelope for the freshness lane.
 		rawInvoke(binary, root, ["review", "capabilities", "--contract", CONTRACT]);
 
 		try {
-			pass("low lifecycle to gate allow", await lowLifecycle(binary, cli, root));
+			pass("low lifecycle terminal approval burn and unmanaged gate", await lowLifecycle(binary, cli, root));
 		} catch (error) {
-			fail("low lifecycle to gate allow", knownRedParity(describeError(error)));
+			fail("low lifecycle terminal approval burn and unmanaged gate", knownRedParity(describeError(error)));
 		}
 
 		let mediumRepo;
 		try {
 			const outcome = await mediumConsent(binary, cli, root);
-			mediumRepo = outcome.cwd;
+			mediumRepo = outcome;
 			pass("medium consent/v3 granted round-trip", outcome.note);
 		} catch (error) {
 			fail("medium consent/v3 granted round-trip", describeError(error));
 		}
 
 		try {
-			pass("sequencing lifecycle to approved receipt", await sequencingLifecycle(binary, cli, root));
+			pass("sequencing lifecycle through approval burn", await sequencingLifecycle(binary, cli, root, fakePi));
 		} catch (error) {
-			const message = describeError(error);
-			const name = message.startsWith(KNOWN_RED_SEQUENCING)
-				? "sequencing: evidence collected before targeted validation"
-				: "sequencing lifecycle to approved receipt";
-			fail(name, knownRedParity(message));
+			fail("sequencing lifecycle through approval burn", knownRedParity(describeError(error)));
 		}
 
 		try {
@@ -1115,32 +1111,20 @@ async function main() {
 		}
 
 		try {
-			pass("external native recover to captured successor lens", await recoveredSuccessorLifecycle(binary, cli, root));
+			pass("burned predecessor exposes only fresh scope", await burnedPredecessorScopeIsolation(binary, cli, root));
 		} catch (error) {
-			fail("external native recover to captured successor lens", knownRedParity(describeError(error)));
+			fail("burned predecessor exposes only fresh scope", knownRedParity(describeError(error)));
 		}
 
 		try {
-			pass("recovered field flow: linked dirty worktree, finalize-first dispatch", await recoveredSuccessorFieldFlow(binary, cli, root));
+			pass("corrected lifecycle through adapter terminal approval burn", await correctedLifecycleThroughAdapter(binary, root, fakePi));
 		} catch (error) {
-			fail("recovered field flow: linked dirty worktree, finalize-first dispatch", knownRedParity(describeError(error)));
-		}
-
-		try {
-			pass("relay materialize slot on an externally recovered lineage", await relayMaterializeSlotLifecycle(binary, cli, root));
-		} catch (error) {
-			fail("relay materialize slot on an externally recovered lineage", knownRedParity(describeError(error)));
-		}
-
-		try {
-			pass("corrected lifecycle through the adapter to an approved receipt", await correctedLifecycleThroughAdapter(binary, root));
-		} catch (error) {
-			fail("corrected lifecycle through the adapter to an approved receipt", knownRedParity(describeError(error)));
+			fail("corrected lifecycle through adapter terminal approval burn", knownRedParity(describeError(error)));
 		}
 
 		if (WITH_MODEL && mediumRepo !== undefined) {
 			try {
-				pass("medium reviewer model run (pi)", await modelReview(binary, cli, mediumRepo));
+				pass("medium reviewer model run (pi)", await modelReview(binary, cli, mediumRepo.cwd, mediumRepo.lineageId));
 			} catch (error) {
 				fail("medium reviewer model run (pi)", describeError(error));
 			}
@@ -1149,8 +1133,42 @@ async function main() {
 		}
 
 		decoderFreshness(binary);
+		const fakePiInvocations = fakePi.invocationCount();
+		if (fakePiInvocations !== 2) {
+			fail("fake Pi targeted-validator isolation", `expected two Go-owned validator invocations, observed ${fakePiInvocations}`);
+		} else {
+			pass("fake Pi targeted-validator isolation", "two Go-owned review.capture-validation --execute=true invocations consumed only per-call dynamic JSON; no --with-model");
+		}
 	} finally {
-		removeScratchRoot(root);
+		if (fakePi !== undefined) {
+			cleanup.fakePiInvocations = fakePi.invocationCount();
+			try {
+				fakePi.restore();
+			} catch (error) {
+				cleanup.fakePiRestoreError = describeError(error);
+			}
+		}
+		if (sandbox !== undefined && modeRepo !== undefined && binary !== undefined) {
+			try {
+				const finalRdd = sandboxReviewModeStatus(binary, modeRepo, "on", "global", "final sandbox status");
+				cleanup.finalRddMode = `${finalRdd.effective}/${finalRdd.source}`;
+			} catch (error) {
+				cleanup.rddModeError = describeError(error);
+			}
+		}
+		try {
+			restoreProcessEnvironment(originalEnvironment);
+			cleanup.environmentRestored = processEnvironmentMatches(originalEnvironment);
+			if (!cleanup.environmentRestored) cleanup.environmentRestoreError = "restored environment did not exactly match the original snapshot";
+		} catch (error) {
+			cleanup.environmentRestoreError = describeError(error);
+		} finally {
+			if (root !== undefined) {
+				const removed = removeScratchRoot(root);
+				cleanup.rootRemoved = removed.removed;
+				cleanup.reason = removed.reason;
+			}
+		}
 	}
 
 	const nameWidth = Math.max(...checks.map((check) => check.name.length), "check".length);
@@ -1163,6 +1181,23 @@ async function main() {
 	}
 	console.log("");
 	console.log(`total: ${checks.length} checks, ${failed} failed`);
+	console.log(`cleanup: fake Pi invocations=${cleanup.fakePiInvocations}; sandbox RDD initial=${cleanup.initialRddMode ?? "unverified"}; enabled=${cleanup.enabledRddMode ?? "unverified"}; final=${cleanup.finalRddMode ?? "unverified"}; process environment restored=${cleanup.environmentRestored}; scratch root removed=${cleanup.rootRemoved}; auto-spools unread=0 undeleted=0 (none are battery-owned)`);
+	if (cleanup.fakePiRestoreError !== undefined) {
+		console.log(`cleanup failure: fake Pi environment restore failed (${cleanup.fakePiRestoreError})`);
+		failed += 1;
+	}
+	if (cleanup.rddModeError !== undefined) {
+		console.log(`cleanup failure: sandbox RDD verification failed (${cleanup.rddModeError})`);
+		failed += 1;
+	}
+	if (!cleanup.environmentRestored) {
+		console.log(`cleanup failure: original process environment was not restored (${cleanup.environmentRestoreError ?? "unknown"})`);
+		failed += 1;
+	}
+	if (!cleanup.rootRemoved) {
+		console.log(`cleanup failure: owned scratch root remains (${cleanup.reason ?? "unknown"})`);
+		failed += 1;
+	}
 	if (failed > 0) process.exitCode = 1;
 }
 

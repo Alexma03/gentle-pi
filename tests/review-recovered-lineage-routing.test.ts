@@ -138,10 +138,7 @@ async function runController(
 	return await __testing.executeReviewControllerOperation(
 		parameters,
 		cwd,
-		new Map(),
 		native,
-		undefined,
-		undefined,
 		undefined,
 		candidateViews,
 	) as Record<string, unknown>;

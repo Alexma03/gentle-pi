@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
@@ -19,7 +18,7 @@ class NativeReviewCliV214 extends NativeReviewCliV214Production {
 	}
 }
 import { canonicalJsonV1, domainHashV1 } from "../lib/review-canonical.ts";
-import { CandidateViewRegistry, deriveChangedPathManifest } from "../lib/review-candidate-view.ts";
+import { CandidateViewError, CandidateViewRegistry, deriveChangedPathManifest } from "../lib/review-candidate-view.ts";
 import { inspectLegacyReviewAuthorityV1 } from "../lib/review-legacy-detector.ts";
 import { resolveRepositoryAuthorityV1 } from "../lib/review-repository.ts";
 import type { AuthorityRepairAssessmentV1, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
@@ -39,66 +38,57 @@ type ToolCallHandler = (
 	ctx: ExtensionContext,
 ) => Promise<unknown>;
 
-interface RegisteredCommandFixture {
-	handler: (args: string, ctx: ExtensionContext) => Promise<void>;
-}
+type SessionShutdownHandler = (
+	event: unknown,
+	ctx: ExtensionContext,
+) => Promise<unknown> | unknown;
 
 interface Runtime {
 	controller: RegisteredTool;
 	scopeReader: RegisteredTool;
 	toolCall: ToolCallHandler;
-	commands: Map<string, RegisteredCommandFixture>;
+	shutdownSession: (ctx: ExtensionContext) => Promise<unknown>;
 }
-
-interface PublicationProbeRequestFixture {
-	file: string;
-	arguments: readonly string[];
-	cwd: string;
-	timeoutMs: number;
-	maxBufferBytes: number;
-	shell: false;
-	signal?: AbortSignal;
-}
-
-interface PublicationProbeResultFixture {
-	stdout: string;
-	stderr: string;
-	exitCode: number;
-	signal: NodeJS.Signals | null;
-	timedOut: boolean;
-	outputLimitExceeded: boolean;
-}
-
-type PublicationProbeFixture = (request: PublicationProbeRequestFixture) => Promise<PublicationProbeResultFixture>;
 
 function runtime(
 	nativeReviewCli: NativeReviewCli | null,
-	publicationProbe?: PublicationProbeFixture,
-	publicationProbeTimeoutMs?: number,
 	bashTimeRevalidationTimeoutMs?: number,
 	candidateViews: CandidateViewRegistry | null = null,
 ): Runtime {
 	const tools = new Map<string, RegisteredTool>();
-	const commands = new Map<string, RegisteredCommandFixture>();
 	let toolCall: ToolCallHandler | undefined;
-	const dependencies = { nativeReviewCli, publicationProbe, publicationProbeTimeoutMs, bashTimeRevalidationTimeoutMs, candidateViews } as unknown as Parameters<typeof createGentleAiExtension>[0];
+	let sessionShutdown: SessionShutdownHandler | undefined;
+	const dependencies = { nativeReviewCli, bashTimeRevalidationTimeoutMs, candidateViews } as unknown as Parameters<typeof createGentleAiExtension>[0];
 	createGentleAiExtension(dependencies)({
-		on(name: string, handler: ToolCallHandler) {
-		if (name === "tool_call") toolCall = handler;
-	},
+		on(name: string, handler: ToolCallHandler | SessionShutdownHandler) {
+			if (name === "tool_call") toolCall = handler as ToolCallHandler;
+			if (name === "session_shutdown") sessionShutdown = handler as SessionShutdownHandler;
+		},
 		registerTool(definition: RegisteredTool & { name: string }) { tools.set(definition.name, definition); },
-		registerCommand(name: string, definition: RegisteredCommandFixture) { commands.set(name, definition); },
+		registerCommand() {},
 	} as unknown as ExtensionAPI);
 	const controller = tools.get("gentle_review");
 	const scopeReader = tools.get("gentle_review_scope");
 	assert.ok(controller);
 	assert.ok(scopeReader);
 	assert.ok(toolCall);
-	return { controller, scopeReader, toolCall, commands };
+	assert.ok(sessionShutdown);
+	return {
+		controller,
+		scopeReader,
+		toolCall,
+		shutdownSession: async (ctx) => await sessionShutdown!({}, ctx),
+	};
 }
 
-function context(cwd: string, signal?: AbortSignal): ExtensionContext {
-	return { cwd, hasUI: false, signal, ui: { confirm: async () => true } } as unknown as ExtensionContext;
+function context(cwd: string, signal?: AbortSignal, sessionId?: string): ExtensionContext {
+	return {
+		cwd,
+		hasUI: false,
+		signal,
+		ui: { confirm: async () => true },
+		...(sessionId === undefined ? {} : { sessionManager: { getSessionId: () => sessionId } }),
+	} as unknown as ExtensionContext;
 }
 
 function compactCandidateContextManifest(task: string): { encoded: string; sha256: string } {
@@ -143,7 +133,16 @@ function nativeBindingGateContext(lineageId = "native-lineage", storeRevision = 
 
 function repository(t: test.TestContext): string {
 	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-native-controller-"));
-	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	t.after(() => {
+		if (process.platform !== "win32") {
+			try {
+				execFileSync("chmod", ["-R", "u+w", cwd], { stdio: "ignore" });
+			} catch {
+				// The fixture may already have been removed by candidate-view cleanup.
+			}
+		}
+		rmSync(cwd, { recursive: true, force: true });
+	});
 	execFileSync("git", ["init", "-b", "main"], { cwd });
 	writeFileSync(join(cwd, "app.ts"), "export const value = 1;\n");
 	execFileSync("git", ["add", "."], { cwd });
@@ -155,83 +154,12 @@ function git(cwd: string, ...arguments_: string[]): string {
 	return execFileSync("git", arguments_, { cwd, encoding: "utf8" }).trim();
 }
 
-function addBareRemote(t: test.TestContext, cwd: string, name: string): string {
-	const parent = mkdtempSync(join(tmpdir(), "gentle-pi-native-remote-"));
-	t.after(() => rmSync(parent, { recursive: true, force: true }));
-	const remote = join(parent, `${name}.git`);
-	execFileSync("git", ["clone", "--bare", cwd, remote], { cwd: parent, stdio: "ignore" });
-	git(cwd, "remote", "add", name, remote);
-	git(cwd, "fetch", name);
-	return remote;
-}
-
 function commitFile(cwd: string, path: string, content: string, message: string): void {
 	writeFileSync(join(cwd, path), content);
 	git(cwd, "add", path);
 	git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "commit", "-m", message);
 }
 
-function remoteIdentity(location: string): string {
-	let normalized = location;
-	try {
-		const parsed = new URL(location);
-		normalized = `${parsed.host.toLowerCase()}/${parsed.pathname.replace(/^\/+|\/+$/g, "")}`;
-	} catch {
-		const colon = location.indexOf(":");
-		const slash = location.indexOf("/");
-		if (colon > 0 && (slash < 0 || colon < slash)) {
-			normalized = `${location.slice(0, colon).split("@").at(-1)!.toLowerCase()}/${location.slice(colon + 1)}`;
-		}
-	}
-	normalized = normalized.replace(/\/+$/, "").replace(/\.git$/, "");
-	return `sha256:${createHash("sha256").update(normalized).digest("hex")}`;
-}
-
-function queuedPublicationProbe(rows: Readonly<Record<string, string>>, calls: PublicationProbeRequestFixture[] = []): PublicationProbeFixture {
-	return async (request) => {
-		calls.push(request);
-		const ref = request.arguments.at(-1)!;
-		const location = request.arguments.at(-2)!;
-		const commit = rows[`${location} ${ref}`];
-		return {
-			stdout: commit === undefined ? "" : `${commit}\t${ref}\n`,
-			stderr: "",
-			exitCode: 0,
-			signal: null,
-			timedOut: false,
-			outputLimitExceeded: false,
-		};
-	};
-}
-
-interface PrePrBoundaryFixture {
-	selector: string;
-	remote: string;
-	remoteRef: string;
-	commit: string;
-	remoteIdentity: string;
-}
-
-function nativePrePrGateContext(boundary: PrePrBoundaryFixture): Awaited<ReturnType<NativeReviewCli["validate"]>>["gateContext"] {
-	const gateContext = nativeGateContext();
-	gateContext.raw.gate = "pre-pr";
-	gateContext.raw.pre_pr_boundary = {
-		source: "explicit",
-		selector: boundary.selector,
-		commit: boundary.commit,
-		remote: boundary.remote,
-		remote_ref: boundary.remoteRef,
-		remote_identity: boundary.remoteIdentity,
-	};
-	return gateContext;
-}
-
-/**
- * Writes the durable Pi reset-state journal exactly as an interrupted legacy
- * destructive reset left it, and returns the recovery request INSPECT must
- * surface for it. The writer module retired with the legacy reset; the durable
- * on-disk contract it produced is still read by INSPECT.
- */
 function craftDurableResetState(cwd: string): { repositoryId: string; commonDirHash: string; inventoryHash: string; confirmation: string } {
 	const authority = resolveRepositoryAuthorityV1(cwd);
 	const commonDirHash = domainHashV1("common-directory", authority.common_directory);
@@ -302,6 +230,7 @@ function targetStatusFixture(options: {
 	currentCandidateTree?: string;
 	paths?: readonly string[];
 	projection?: "workspace" | "staged";
+	intendedUntracked?: readonly string[];
 } = {}): ReviewStatusV3 {
 	const applicability = options.applicability ?? "current_target";
 	const action = options.action ?? (applicability === "current_target" ? "finalize" : applicability === "unrelated" ? "start" : applicability === "ambiguous" ? "select_lineage" : "repair_authority");
@@ -314,6 +243,7 @@ function targetStatusFixture(options: {
 	const tree = options.currentCandidateTree ?? "b".repeat(40);
 	const baseTree = options.baseTree ?? tree;
 	const paths = options.paths ?? ["app.ts"];
+	const intendedUntracked = options.intendedUntracked ?? [];
 	const projection = {
 		schema: "gentle-ai.review-integration.projection/v1" as const,
 		kind: "current-changes" as const,
@@ -323,7 +253,7 @@ function targetStatusFixture(options: {
 		currentCandidateTree: tree,
 		pathsDigest: sha,
 		paths,
-		intendedUntracked: [],
+		intendedUntracked,
 		intendedUntrackedProof: sha,
 		initialSnapshotIdentity: sha,
 		currentSnapshotIdentity: sha,
@@ -357,7 +287,7 @@ function targetStatusFixture(options: {
 			current_candidate_tree: tree,
 			paths_digest: sha,
 			paths,
-			intended_untracked: [],
+			intended_untracked: intendedUntracked,
 			intended_untracked_proof: sha,
 			initial_snapshot_identity: sha,
 			current_snapshot_identity: sha,
@@ -386,27 +316,51 @@ function targetStatusFixture(options: {
 	};
 }
 
-function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0]): ReviewStatusV3 {
+interface CandidateStatusFixtureOptions {
+	baseRef?: string;
+	status?: (
+		candidate: ReturnType<CandidateViewRegistry["create"]>,
+		request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0],
+	) => ReviewStatusV3;
+}
+
+function candidateStartTargetStatus(
+	request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0],
+	options: CandidateStatusFixtureOptions = {},
+): ReviewStatusV3 {
+	const fixtureCandidateViews = new CandidateViewRegistry();
+	const baseRef = request.baseRef ?? options.baseRef;
 	let candidate: ReturnType<CandidateViewRegistry["create"]> | undefined;
 	try {
-		candidate = new CandidateViewRegistry().create({
+		candidate = fixtureCandidateViews.create({
 			contributorRoot: request.cwd,
-			...(request.baseRef === undefined ? {} : { baseRef: request.baseRef, committedOnly: true }),
+			...(baseRef === undefined ? {} : { baseRef, committedOnly: true }),
+			...(request.intendedUntracked === undefined ? {} : { intendedUntracked: request.intendedUntracked }),
 		});
-		return targetStatusFixture({
+		return options.status?.(candidate, request) ?? targetStatusFixture({
 			applicability: "unrelated",
 			action: "start",
 			baseTree: candidate.baseTree,
 			currentCandidateTree: candidate.candidateTree,
 			paths: candidate.paths,
 			projection: request.projection ?? "workspace",
+			intendedUntracked: request.intendedUntracked,
 		});
-	} catch {
-		return targetStatusFixture({ applicability: "unrelated", action: "start" });
 	} finally {
 		candidate?.cleanup();
 	}
 }
+
+test("candidate START fixture preserves materialization class, code, and message", (t) => {
+	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-native-controller-invalid-"));
+	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	assert.throws(
+		() => candidateStartTargetStatus({ cwd }),
+		(error: unknown) => error instanceof CandidateViewError &&
+			error.reason === "candidate-view-git-failure" &&
+			error.message === "candidate-view Git command rev-parse failed; inspect the candidate state before any new START",
+	);
+});
 
 function candidateFinalizeTargetStatus(request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0], lineageId: string): ReviewStatusV3 {
 	let candidate: ReturnType<CandidateViewRegistry["create"]> | undefined;
@@ -565,8 +519,7 @@ function assertNoPublicDestructiveResetMaterial(value: unknown): void {
 }
 
 test("new ordinary START and native-lineage FINALIZE use exactly one native call and stable envelopes", async (t) => {
-	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-native-controller-"));
-	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	const cwd = repository(t);
 	let starts = 0;
 	let finalizes = 0;
 	const { controller } = runtime(fakeNative({
@@ -590,40 +543,76 @@ test("new ordinary START and native-lineage FINALIZE use exactly one native call
 test("native FINALIZE resolves STATUS and mutation against the verified frozen candidate root", async (t) => {
 	const cwd = repository(t);
 	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	const candidateViews = new CandidateViewRegistry();
+	writeFileSync(join(cwd, "selected.ts"), "export const selected = true;\n");
+	const selection = {
+		untrackedScope: "select" as const,
+		expectedUntrackedInventory: `sha256:${"9".repeat(64)}`,
+		intendedUntracked: ["selected.ts"],
+	};
+	class RecordingCandidateViews extends CandidateViewRegistry {
+		lastCandidate: ReturnType<CandidateViewRegistry["createOrReuse"]> | undefined;
+		override createOrReuse(request: Parameters<CandidateViewRegistry["createOrReuse"]>[0]): ReturnType<CandidateViewRegistry["createOrReuse"]> {
+			this.lastCandidate = super.createOrReuse(request);
+			return this.lastCandidate;
+		}
+	}
+	const candidateViews = new RecordingCandidateViews();
+	const startInput = JSON.stringify({ mode: "ordinary", ...selection });
+	const startReplayKey = JSON.stringify({ cwd, lineageId: null, input: startInput, inputPath: null });
+	const startCandidate = candidateViews.createOrReuse({ contributorRoot: cwd, replayKey: startReplayKey, intendedUntracked: selection.intendedUntracked });
+	const startStatus = targetStatusFixture({
+		applicability: "unrelated",
+		action: "start",
+		baseTree: startCandidate.baseTree,
+		currentCandidateTree: startCandidate.candidateTree,
+		paths: startCandidate.paths,
+		intendedUntracked: startCandidate.intendedUntracked,
+	});
 	const statusRoots: string[] = [];
+	const statusRequests: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
 	let finalizeRoot: string | undefined;
+	let starts = 0;
 	const native = fakeNative({
 		targetStatus: async (request) => {
-			if (request.lineageId === undefined) return candidateStartTargetStatus(request);
+			if (request.lineageId === undefined) return startStatus;
 			statusRoots.push(request.cwd);
-			if (request.cwd === cwd) return targetStatusFixture({ applicability: "unrelated", action: "start" });
+			statusRequests.push(request);
+			if (request.cwd === cwd || request.untrackedScope !== selection.untrackedScope) return targetStatusFixture({ applicability: "unrelated", action: "start" });
 			const candidate = candidateViews.resolveForFinalize(request.lineageId);
 			return targetStatusFixture({
 				lineageId: request.lineageId,
 				baseTree: candidate.baseTree,
 				currentCandidateTree: candidate.candidateTree,
 				paths: candidate.paths,
+				intendedUntracked: selection.intendedUntracked,
 			});
 		},
-		start: async () => ({
-			lineageId: "candidate-root-finalize",
-			state: "reviewing",
-			riskLevel: "medium",
-			selectedLenses: ["review-reliability"],
-			changedFiles: 1,
-			changedLines: 1,
-			correctionBudget: 1,
-			action: "created",
-			lensesRequired: true,
-		}),
+		start: async () => {
+			starts += 1;
+			return {
+				lineageId: "candidate-root-finalize",
+				state: "reviewing",
+				riskLevel: "medium",
+				selectedLenses: ["review-reliability"],
+				changedFiles: 1,
+				changedLines: 1,
+				correctionBudget: 1,
+				action: "created",
+				lensesRequired: true,
+			};
+		},
 		finalize: async (request) => {
 			finalizeRoot = request.cwd;
 			return { lineageId: "candidate-root-finalize", state: "approved", action: "approved", storeRevision: "r1" };
 		},
 	});
-	const { controller } = runtime(native, undefined, undefined, undefined, candidateViews);
-	await controller.execute("candidate-root-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	const { controller } = runtime(native, undefined, candidateViews);
+	const started = await controller.execute("candidate-root-start", { operation: "start", input: startInput }, undefined, undefined, context(cwd));
+	const startDetails = started.details as { result?: { lineage_id: string; state: string } };
+	assert.ok(startDetails.result, `START must succeed before FINALIZE: ${JSON.stringify(started.details)}; native START count: ${starts}; STATUS: ${JSON.stringify(startStatus)}; candidate: ${JSON.stringify(candidateViews.lastCandidate === undefined ? undefined : { baseTree: candidateViews.lastCandidate.baseTree, candidateTree: candidateViews.lastCandidate.candidateTree, paths: candidateViews.lastCandidate.paths, intendedUntracked: candidateViews.lastCandidate.intendedUntracked })}`);
+	assert.equal(starts, 1, `native START count: ${starts}; details: ${JSON.stringify(started.details)}`);
+	assert.equal(startDetails.result.lineage_id, "candidate-root-finalize");
+	assert.equal(startDetails.result.state, "reviewing");
 	const candidateRoot = candidateViews.resolveForFinalize("candidate-root-finalize").root;
 	const result = await controller.execute("candidate-root-finalize", {
 		operation: "finalize",
@@ -631,8 +620,101 @@ test("native FINALIZE resolves STATUS and mutation against the verified frozen c
 		input: JSON.stringify({}),
 	}, undefined, undefined, context(cwd));
 	assert.deepEqual(statusRoots, [candidateRoot]);
+	assert.deepEqual(statusRequests, [{ cwd: candidateRoot, lineageId: "candidate-root-finalize", agent: "pi", ...selection }]);
 	assert.equal(finalizeRoot, candidateRoot);
 	assert.equal((result.details as { result: { state: string } }).result.state, "approved");
+	try {
+		chmodSync(candidateRoot, 0o700);
+	} catch {
+		// FINALIZE may already have removed the terminal candidate view.
+	}
+});
+
+test("session-scoped START selection matrix retains only controller-owned bindings", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "selected.ts"), "export const selected = true;\n");
+	const selection = {
+		untrackedScope: "select" as const,
+		expectedUntrackedInventory: `sha256:${"e".repeat(64)}`,
+		intendedUntracked: ["selected.ts"],
+	};
+	class TrackingCandidateViews extends CandidateViewRegistry {
+		bindCurrentCalls = 0;
+		override bindCurrent(request: Parameters<CandidateViewRegistry["bindCurrent"]>[0]): void {
+			this.bindCurrentCalls += 1;
+			super.bindCurrent(request);
+		}
+	}
+	const candidateViews = new TrackingCandidateViews();
+	const statusRequests: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
+	let starts = 0;
+	let validationLineageId: string | undefined;
+	const targetStatus: NonNullable<NativeReviewCli["targetStatus"]> = async (request) => {
+		statusRequests.push(request);
+		if (request.lineageId === undefined) return candidateStartTargetStatus(request);
+		const selected = request.untrackedScope === selection.untrackedScope &&
+			request.expectedUntrackedInventory === selection.expectedUntrackedInventory &&
+			JSON.stringify(request.intendedUntracked) === JSON.stringify(selection.intendedUntracked);
+		if (!selected) return targetStatusFixture({ applicability: "unrelated", action: "start" });
+		return candidateStartTargetStatus(request, {
+			status: (candidate) => {
+				validationLineageId = request.lineageId;
+				return bindTargetedValidationSubmission(targetStatusFixture({
+					lineageId: validationLineageId,
+					authorityState: "correction_required",
+					baseTree: candidate.baseTree,
+					currentCandidateTree: candidate.candidateTree,
+					paths: candidate.paths,
+					intendedUntracked: selection.intendedUntracked,
+				}));
+			},
+		});
+	};
+	const native = fakeNative({
+		targetStatus,
+		start: async () => {
+			starts += 1;
+			return { lineageId: `matrix-lineage-${starts}`, state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+		finalizeSubmission: async () => ({ lineageId: validationLineageId!, state: "approved", action: "approved", storeRevision: "r1" }),
+	});
+	const registrationA = runtime(native, undefined, candidateViews);
+	const registrationB = runtime(native, undefined, candidateViews);
+	const sessionA = context(cwd, undefined, "matrix-session-a");
+	const sessionB = context(cwd, undefined, "matrix-session-b");
+	const validation = {
+		request_hash: "9".repeat(64), correction_ids: [],
+		original_criteria: { passed: true, evidence: ["acceptance passes"] },
+		correction_regression: { passed: true, evidence: ["regression passes"] },
+		fix_caused_findings: [], follow_ups: [],
+	};
+
+	await registrationA.controller.execute("matrix-status", { operation: "status", input: JSON.stringify(selection) }, undefined, undefined, sessionA);
+	assert.equal(candidateViews.bindCurrentCalls, 0, "read-only STATUS must never bind the injected controller registry");
+	assert.equal(candidateViews.hasCurrentBinding(cwd), false);
+
+	const started = await registrationA.controller.execute("matrix-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", ...selection }) }, undefined, undefined, sessionA);
+	const lineageId = (started.details as { result?: { lineage_id?: string } }).result?.lineage_id;
+	assert.equal(lineageId, "matrix-lineage-1");
+	assert.equal(candidateViews.bindCurrentCalls, 1, "only controller START may bind the candidate view");
+	assert.equal(starts, 1);
+
+	await registrationB.controller.execute("matrix-foreign", { operation: "status", lineageId }, undefined, undefined, sessionB);
+	assert.deepEqual(statusRequests.at(-1), { cwd, lineageId }, "a different session must not inherit START selection");
+
+	const finalized = await registrationB.controller.execute("matrix-finalize", { operation: "finalize", lineageId, input: JSON.stringify({ validation }) }, undefined, undefined, sessionA);
+	assert.equal(
+		(finalized.details as { result?: { state?: string } }).result?.state,
+		"approved",
+		`the same session retains START selection into validation-only FINALIZE: ${JSON.stringify(finalized.details)}`,
+	);
+
+	const shutdownStart = await registrationA.controller.execute("matrix-shutdown-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", ...selection }) }, undefined, undefined, sessionA);
+	const shutdownLineageId = (shutdownStart.details as { result?: { lineage_id?: string } }).result?.lineage_id;
+	await registrationA.shutdownSession(sessionA);
+	await registrationB.controller.execute("matrix-shutdown-status", { operation: "status", lineageId: shutdownLineageId }, undefined, undefined, sessionA);
+	assert.deepEqual(statusRequests.at(-1), { cwd, lineageId: shutdownLineageId }, "session shutdown must clear retained START selection");
+	candidateViews.cleanupTerminal(shutdownLineageId!, "approved");
 });
 
 test("parent subagent_run mutates single and parallel review actors with one verified controller-owned candidate view", async (t) => {
@@ -651,7 +733,7 @@ test("parent subagent_run mutates single and parallel review actors with one ver
 			action: "created",
 			lensesRequired: true,
 		}),
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	await controller.execute("c3-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const single = { agent: "review-risk", task: "Inspect the change", context: "ordinary review", mode: "task" };
 	assert.equal(await toolCall({ toolName: "subagent_run", input: single }, context(cwd)), undefined);
@@ -679,7 +761,7 @@ test("controller START binds the exact current lineage ahead of overlapping hist
 	writeFileSync(join(cwd, "app.ts"), "export const value = 9;\n");
 	const { controller, toolCall } = runtime(fakeNative({
 		start: async () => ({ lineageId: "current-lineage", state: "reviewing", riskLevel: "high", selectedLenses: lenses, changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true }),
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	await controller.execute("current-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const current = candidateViews.resolveForLens("current-lineage", "review-risk");
 	try {
@@ -711,7 +793,7 @@ test("fresh registry reload restores the native resumed lineage only while the l
 	native.targetStatus = async (request) => request.lineageId === undefined
 		? candidateStartTargetStatus(request)
 		: targetStatusFixture({ lineageId: request.lineageId });
-	const { controller, toolCall } = runtime(native, undefined, undefined, undefined, candidateViews);
+	const { controller, toolCall } = runtime(native, undefined, candidateViews);
 	await controller.execute("reload-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const dispatch = { agent: "review-reliability", task: "review", mode: "task" };
 	assert.equal(await toolCall({ toolName: "subagent_run", input: dispatch }, context(cwd)), undefined);
@@ -725,7 +807,7 @@ test("parent subagent_run fails closed before child execution for malformed, mix
 	const candidateViews = new CandidateViewRegistry();
 	const { controller, toolCall } = runtime(fakeNative({
 		start: async () => ({ lineageId: "c3-fail-closed", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true }),
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	await controller.execute("c3-start-fail-closed", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	for (const input of [
 		{ agent: "review-reliability", agents: ["review-reliability"], task: "review", mode: "task" },
@@ -766,7 +848,7 @@ test("controller routes the authoritative START action/lenses_required matrix wi
 		const lineageId = `native-lineage-${index}`;
 		const { controller } = runtime(fakeNative({
 			start: async () => ({ lineageId, state: scenario.action === "reuse-receipt" ? "approved" : "reviewing", riskLevel: scenario.riskLevel, selectedLenses: scenario.selectedLenses, changedFiles: 2, changedLines: 7, correctionBudget: 4, action: scenario.action, lensesRequired: scenario.lensesRequired }),
-		}), undefined, undefined, undefined, candidateViews);
+		}), undefined, candidateViews);
 		const started = await controller.execute(`start-${scenario.action}-${scenario.lensesRequired}`, { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 		const result = (started.details as { result: Record<string, unknown> }).result;
 		assert.equal(result.action, scenario.action);
@@ -794,7 +876,7 @@ test("low-risk native START retains its candidate view for the production zero-l
 			finalizeCwds.push(request.cwd);
 			return { lineageId: "low-risk-lineage", state: "approved", action: "approved", storeRevision: "r1" };
 		},
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	await controller.execute("low-risk-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const finalized = await controller.execute("low-risk-finalize", { operation: "finalize", lineageId: "low-risk-lineage", input: JSON.stringify({}) }, undefined, undefined, context(cwd));
 	assert.equal(finalizeCwds.length, 1);
@@ -820,7 +902,7 @@ test("fresh negotiated registries reconstruct the frozen candidate before FINALI
 			finalizedContent = readFileSync(join(request.cwd, "app.ts"), "utf8");
 			return { lineageId: "restarted-lineage", state: "approved", action: "approved", storeRevision: "r1" };
 		},
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, new CandidateViewRegistry());
 	const result = await controller.execute("restarted-finalize", {
 		operation: "finalize",
 		lineageId: "restarted-lineage",
@@ -854,7 +936,7 @@ test("forecast-only FINALIZE reconstructs the frozen candidate after a fresh pro
 			finalizedContent = readFileSync(join(request.cwd, "app.ts"), "utf8");
 			return { lineageId: "forecast-lineage", state: "fixing", action: "correction-forecast-recorded", storeRevision: "r1" };
 		},
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	const result = await controller.execute("forecast-only-finalize", {
 		operation: "finalize",
 		lineageId: "forecast-lineage",
@@ -887,7 +969,7 @@ test("ambiguous native START runs target status first and follows only its decla
 			requests.push(request);
 			throw Object.assign(new Error("lost output"), { mutationOutcome: "unknown", nextAction: "review.status" });
 		},
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	const request = { operation: "start", input: JSON.stringify({ mode: "ordinary" }) };
 	const ambiguous = await controller.execute("ambiguous-start", request, undefined, undefined, context(cwd));
 	assert.equal(requests.length, 1);
@@ -1159,11 +1241,12 @@ test("fresh registry reload ignores raw correction state and follows the native 
 	frozen.cleanup();
 	let finalizes = 0;
 	let statuses = 0;
+	const candidateViews = new CandidateViewRegistry();
 	const { controller } = runtime(fakeNative({
 		finalize: async () => { finalizes += 1; return { lineageId: "correction-lineage", state: "approved", action: "approved", storeRevision: "r2" }; },
 		targetStatus: async () => { statuses += 1; return statuses === 1 ? status : validationStatus; },
 		captureEvidence: async () => capturedCorrectionEvidence(status, "passed", "6"),
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, candidateViews);
 	const required = await controller.execute("correction-validation-request", { operation: "finalize", lineageId: "correction-lineage", input: JSON.stringify({ final_evidence: "focused tests passed", final_verification_passed: true }) }, undefined, undefined, context(cwd));
 	const request = required.details as { status: string; result: Record<string, unknown> };
 	assert.equal(request.status, "in-progress");
@@ -1172,6 +1255,7 @@ test("fresh registry reload ignores raw correction state and follows the native 
 	writeFileSync(join(cwd, "escape.ts"), "export const escape = true;\n");
 	assert.equal(((await controller.execute("correction-scope-escape", { operation: "finalize", lineageId: "correction-lineage", input: JSON.stringify({ final_evidence: "focused tests passed", final_verification_passed: true }) }, undefined, undefined, context(cwd))).details as { outcome: string }).outcome, "native-operation-failed");
 	assert.equal(finalizes, 0);
+	candidateViews.cleanupAll();
 });
 
 test("production correction routing captures evidence before validation and enforces all three outcomes", async (t) => {
@@ -1221,7 +1305,7 @@ test("production correction routing captures evidence before validation and enfo
 					finalizes += 1;
 					return { lineageId: beforeCapture.authority!.lineageId, state: "approved", action: "approved", storeRevision: "r-final" };
 				},
-			}), undefined, undefined, undefined, new CandidateViewRegistry());
+			}), undefined, new CandidateViewRegistry());
 			const validation = outcome === "passed" ? {
 				request_hash: "9".repeat(64), correction_ids: [],
 				original_criteria: { passed: true, evidence: ["acceptance passes"] },
@@ -1255,7 +1339,7 @@ test("production correction routing fails closed when targeted validation is off
 		targetStatus: async () => premature,
 		captureEvidence: async () => { captures += 1; return capturedCorrectionEvidence(premature, "passed", "4"); },
 		finalize: async () => { finalizes += 1; return { lineageId: "premature-validation", state: "approved", action: "approved", storeRevision: "r1" }; },
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, new CandidateViewRegistry());
 	const result = await controller.execute("premature-targeted-validation", {
 		operation: "finalize",
 		lineageId: "premature-validation",
@@ -1286,7 +1370,7 @@ test("production correction routing rejects a second capture that reuses failed 
 			return capturedCorrectionEvidence(status, "verification_failed", "5");
 		},
 		finalize: async () => { finalizes += 1; return { lineageId: "distinct-evidence", state: "approved", action: "approved", storeRevision: "r1" }; },
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	const request = {
 		operation: "finalize",
 		lineageId: "distinct-evidence",
@@ -1375,7 +1459,7 @@ test("production correction routing accepts the live emitters' early validation-
 					finalizes += 1;
 					return { lineageId: beforeCapture.authority!.lineageId, state: "approved", action: "approved", storeRevision: "r-final" };
 				},
-			}), undefined, undefined, undefined, new CandidateViewRegistry());
+			}), undefined, new CandidateViewRegistry());
 			const validation = outcome === "passed" ? {
 				request_hash: "9".repeat(64), correction_ids: [],
 				original_criteria: { passed: true, evidence: ["acceptance passes"] },
@@ -1474,7 +1558,7 @@ test("ordinary final verification at validating captures evidence then executes 
 					transitions.push(request.argumentTokens);
 					return { lineageId: "final-verification", state: terminalState, action: "terminal", storeRevision: "r2", receiptPath: "/opaque/receipt" };
 				},
-			}), undefined, undefined, undefined, new CandidateViewRegistry());
+			}), undefined, new CandidateViewRegistry());
 			const result = await controller.execute(`final-verification-${outcome}`, {
 				operation: "finalize",
 				lineageId: "final-verification",
@@ -1507,7 +1591,7 @@ test("ordinary final verification rejects a Pi-authored targeted validation docu
 		targetStatus: async () => status,
 		captureEvidence: async () => { captures += 1; return capturedCorrectionEvidence(status, "passed", "4"); },
 		finalize: async () => { finalizes += 1; return { lineageId: "final-verification", state: "approved", action: "approved", storeRevision: "r1" }; },
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, new CandidateViewRegistry());
 	const result = await controller.execute("final-verification-validation-doc", {
 		operation: "finalize",
 		lineageId: "final-verification",
@@ -1557,7 +1641,7 @@ test("ordinary final verification fails closed without substituting a step when 
 		finalize: async () => { finalizes += 1; return { lineageId: "final-verification", state: "approved", action: "approved", storeRevision: "r1" }; },
 		finalizeTransition: async () => { transitions += 1; return { lineageId: "final-verification", state: "approved", action: "approved", storeRevision: "r1" }; },
 		validate: async () => { validates += 1; return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() }; },
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, new CandidateViewRegistry());
 	const result = await controller.execute("final-verification-no-transition", {
 		operation: "finalize",
 		lineageId: "final-verification",
@@ -1624,7 +1708,7 @@ test("provider refuter vector executes exactly as rendered, then STATUS is re-qu
 	let finalizes = 0;
 	let statusCalls = 0;
 	const roleStatus = bindProviderRoleVector(targetStatusFixture({ lineageId: "native-lineage" }), "refuter");
-	const settledStatus = targetStatusFixture({ lineageId: "native-lineage" });
+	const settledStatus = targetStatusFixture({ lineageId: "native-lineage", authorityState: "approved", action: "stop" });
 	const { controller } = runtime(fakeNative({
 		targetStatus: async () => {
 			statusCalls += 1;
@@ -1657,6 +1741,7 @@ test("provider refuter vector executes exactly as rendered, then STATUS is re-qu
 	const details = result.details as { provider_roles?: { transport?: string; executed_slots?: Array<Record<string, unknown>> } };
 	assert.equal(details.provider_roles?.transport, "go_owned_pi_process");
 	assert.deepEqual(details.provider_roles?.executed_slots?.map((slot) => slot.role), ["refuter"]);
+	assert.equal((result.details as { result?: { authority?: { state?: string } } }).result?.authority?.state, "approved");
 });
 
 test("provider targeted-validator vector keeps the frozen request hash token verbatim", async (t) => {
@@ -1678,6 +1763,71 @@ test("provider targeted-validator vector keeps the frozen request hash token ver
 	assert.equal(executed.length, 1);
 	assert.ok(executed[0]!.includes(`--request-hash=sha256:${"9".repeat(64)}`), "the frozen request hash token must pass through verbatim");
 	assert.ok(executed[0]!.includes("--execute=true"));
+});
+
+test("document-free FINALIZE queries fresh STATUS after provider validation capture and executes only its transition", async (t) => {
+	const cwd = repository(t);
+	const lineageId = "fresh-provider-status";
+	const roleStatus = bindProviderRoleVector(targetStatusFixture({ lineageId, authorityState: "validating" }), "targeted-validator");
+	const providerFinalizeStatus = (repositoryContext: string): ReviewStatusV3 => {
+		const status = targetStatusFixture({ lineageId, authorityState: "validating" });
+		(status.raw as Record<string, unknown>).schema = "gentle-ai.review-integration.status/v5";
+		status.nextTransition = {
+			kind: "execute",
+			reasonCode: "captured_evidence_ready",
+			execute: {
+				operation: "review.finalize",
+				arguments: [
+					{ name: "lineage", value: lineageId, token: `--lineage=${lineageId}` },
+					{ name: "expected-revision", value: status.authority!.revision, token: `--expected-revision=${status.authority!.revision}` },
+					{ name: "target", value: status.targetIdentity, token: `--target=${status.targetIdentity}` },
+					{ name: "repository-context", value: repositoryContext, token: `--repository-context=${repositoryContext}` },
+					{ name: "captured-evidence", value: "true", token: "--captured-evidence=true" },
+				],
+				preconditions: [],
+				binding: { targetIdentity: status.targetIdentity, lineageId },
+			},
+		};
+		return status;
+	};
+	const capturedStatus = providerFinalizeStatus(`rctx1_${"a".repeat(64)}`);
+	const freshStatus = providerFinalizeStatus(`rctx1_${"b".repeat(64)}`);
+	const transitions: Array<readonly string[]> = [];
+	let statusCalls = 0;
+	let captures = 0;
+	let rawFinalizes = 0;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => {
+			statusCalls += 1;
+			return [roleStatus, capturedStatus, freshStatus][statusCalls - 1]!;
+		},
+		captureProviderRole: async () => {
+			captures += 1;
+			return { schema: "gentle-ai.review-provider-role-capture/v1", lineageId, targetIdentity: roleStatus.targetIdentity, role: "targeted-validator", captured: true };
+		},
+		finalizeTransition: async (request) => {
+			transitions.push(request.argumentTokens);
+			return { lineageId, state: "approved", action: "approved", storeRevision: "r-final" };
+		},
+		finalize: async () => {
+			rawFinalizes += 1;
+			return { lineageId, state: "approved", action: "approved", storeRevision: "r-raw" };
+		},
+	}));
+	await controller.execute("capture-provider-validation", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
+	assert.equal(captures, 1);
+	assert.equal(statusCalls, 2, "provider validation capture must return its fresh mapped STATUS without retaining it");
+	const finalized = await controller.execute("finalize-after-provider-validation", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
+	assert.equal(statusCalls, 3, "document-free FINALIZE must query negotiated STATUS again after provider validation capture");
+	assert.deepEqual(transitions, [[
+		`--lineage=${lineageId}`,
+		`--expected-revision=${freshStatus.authority!.revision}`,
+		`--target=${freshStatus.targetIdentity}`,
+		`--repository-context=rctx1_${"b".repeat(64)}`,
+		"--captured-evidence=true",
+	]], "only the fresh STATUS transition may reach finalizeTransition");
+	assert.equal(rawFinalizes, 0, "the fresh provider execute transition must win over raw captured-results fallback");
+	assert.equal((finalized.details as { result?: { state?: string } }).result?.state, "approved");
 });
 
 test("a failed provider role vector surfaces the typed error and never auto-relaunches", async (t) => {
@@ -1742,6 +1892,43 @@ test("negotiated FINALIZE executes the provider-rendered captured-results transi
 	assert.deepEqual(result.details, { operation: "finalize", result: { lineage_id: "native-lineage", state: "approved", action: "approved", store_revision: "r1", receipt_path: "/opaque/receipt" } });
 });
 
+test("status/v5 FINALIZE refuses a provider transition without exact tokens before adapter invocation", async (t) => {
+	const cwd = repository(t);
+	let transitions = 0;
+	let finalizes = 0;
+	const status = targetStatusFixture({ lineageId: "native-lineage" });
+	(status.raw as Record<string, unknown>).schema = "gentle-ai.review-integration.status/v5";
+	status.nextTransition = {
+		kind: "execute",
+		reasonCode: "captured_results_ready",
+		execute: {
+			operation: "review.finalize",
+			arguments: [
+				{ name: "lineage", value: "native-lineage", token: "--lineage=native-lineage" },
+				{ name: "captured_results", value: "true" },
+			],
+			preconditions: [],
+			binding: { targetIdentity: status.targetIdentity, lineageId: "native-lineage" },
+		},
+	};
+	const { controller } = runtime(fakeNative({
+		targetStatus: async () => status,
+		finalize: async () => {
+			finalizes += 1;
+			return { lineageId: "native-lineage", state: "approved", action: "approved", storeRevision: "r1" };
+		},
+		finalizeTransition: async () => {
+			transitions += 1;
+			return { lineageId: "native-lineage", state: "approved", action: "approved", storeRevision: "r1" };
+		},
+	}));
+	const result = await controller.execute("v5-missing-finalize-token", { operation: "finalize", lineageId: "native-lineage", input: JSON.stringify({}) }, undefined, undefined, context(cwd));
+	assert.equal((result.details as { outcome?: string }).outcome, "native-operation-failed");
+	assert.match(JSON.stringify(result.details), /non-empty exact token/);
+	assert.equal(transitions, 0, "a v5 transition missing an exact token must fail before finalizeTransition");
+	assert.equal(finalizes, 0, "a v5 transition missing an exact token must not fall back to raw finalize");
+});
+
 test("negotiated FINALIZE refuses a finalize transition bound to a different lineage", async (t) => {
 	const cwd = repository(t);
 	let transitions = 0;
@@ -1795,7 +1982,7 @@ test("controller preserves final evidence bytes through native staging", async (
 		const index = request.arguments.indexOf("--evidence");
 		assert.ok(index >= 0);
 		staged = readFileSync(request.arguments[index + 1]!, "utf8");
-		return { stdout: JSON.stringify({ operation: "review/finalize", lineage_id: "native-lineage", state: "approved", action: "validate delivery", store_revision: "sha256:" + "a".repeat(64) }), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
+		return { stdout: JSON.stringify({ operation: "review/finalize", lineage_id: "native-lineage", state: "approved", action: "approved", store_revision: "sha256:" + "a".repeat(64) }), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
 	});
 	native.targetStatus = async () => targetStatusFixture({ lineageId: "native-lineage" });
 	const { controller } = runtime(native);
@@ -1864,13 +2051,13 @@ test("native START preserves a candidate-view diagnostic before native invocatio
 			starts += 1;
 			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, new CandidateViewRegistry());
 	const result = await controller.execute("unsafe-symlink-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const details = result.details as Record<string, unknown>;
 	assert.equal(details.outcome, "native-operation-failed");
 	assert.equal(details.mutation_outcome, "none");
 	assert.equal(details.next_action, "resolve-native-operation-failure");
-	assert.deepEqual(details.diagnostics, { code: "candidate-view-invalid", message: "candidate view rejected before native START" });
+	assert.deepEqual(details.diagnostics, { code: "candidate-view-invalid", message: "candidate view symlink target escapes its frozen root or enters metadata" });
 	assert.equal(starts, 0);
 });
 
@@ -1885,7 +2072,7 @@ test("native START returns a structured pre-native candidate-view output-limit d
 			starts += 1;
 			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	const result = await controller.execute("candidate-view-output-limit", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const details = result.details as Record<string, unknown>;
 	assert.equal(details.outcome, "native-operation-failed");
@@ -2050,6 +2237,7 @@ test("native ordinary START rejects malformed input before resolving the review-
 	const cwd = repository(t);
 	let reviewModeCalls = 0;
 	let starts = 0;
+	let statuses = 0;
 	const { controller } = runtime(fakeNative({
 		reviewMode: async () => {
 			reviewModeCalls += 1;
@@ -2058,6 +2246,10 @@ test("native ordinary START rejects malformed input before resolving the review-
 		start: async () => {
 			starts += 1;
 			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+		targetStatus: async () => {
+			statuses += 1;
+			throw new Error("target status must not run for malformed untracked selection");
 		},
 	}));
 	for (const [input, reason] of [
@@ -2069,12 +2261,88 @@ test("native ordinary START rejects malformed input before resolving the review-
 		[{ mode: "ordinary", baseRef: "origin/main" }, "committed-only-required"],
 		[{ mode: "ordinary", committedOnly: true }, "committed-only-invalid"],
 		[{ mode: "ordinary", baseRef: "refs/heads/missing", committedOnly: true }, "base-ref-unresolvable"],
+		[{ mode: "ordinary", untrackedScope: "exclude" }, "untracked-selection-invalid"],
+		[{ mode: "ordinary", expectedUntrackedInventory: `sha256:${"a".repeat(64)}` }, "untracked-selection-invalid"],
+		[{ mode: "ordinary", untrackedScope: "exclude", expectedUntrackedInventory: `sha256:${"a".repeat(64)}`, intendedUntracked: ["selected.ts"] }, "untracked-selection-invalid"],
+		[{ mode: "ordinary", untrackedScope: "select", expectedUntrackedInventory: `sha256:${"a".repeat(64)}`, intendedUntracked: [] }, "untracked-selection-invalid"],
+		[{ mode: "ordinary", untrackedScope: "select", expectedUntrackedInventory: `sha256:${"a".repeat(64)}`, intendedUntracked: ["../selected.ts"] }, "untracked-selection-invalid"],
 	] as const) {
 		const rejected = await controller.execute("malformed-start", { operation: "start", input: JSON.stringify(input) }, undefined, undefined, context(cwd));
 		assert.equal((rejected.details as { reason?: unknown }).reason, reason);
 	}
 	assert.equal(reviewModeCalls, 0);
+	assert.equal(statuses, 0);
 	assert.equal(starts, 0);
+});
+
+test("ordinary START relays untracked selection without materializing a selectorless collect target", async (t) => {
+	const cwd = repository(t);
+	writeFileSync(join(cwd, "app.ts"), "export const value = 200;\n");
+	writeFileSync(join(cwd, "selected.ts"), "export const selected = true;\n");
+	writeFileSync(join(cwd, "extra.ts"), "export const extra = true;\n");
+	assert.equal(
+		git(cwd, "status", "--porcelain=v1", "--untracked-files=all"),
+		"M app.ts\n?? extra.ts\n?? selected.ts",
+		"the fixture must expose the tracked modification and both untracked paths before START",
+	);
+	class TrackingCandidateViews extends CandidateViewRegistry {
+		creates = 0;
+		override createOrReuse(request: Parameters<CandidateViewRegistry["createOrReuse"]>[0]): ReturnType<CandidateViewRegistry["createOrReuse"]> {
+			this.creates += 1;
+			return super.createOrReuse(request);
+		}
+	}
+	const candidateViews = new TrackingCandidateViews();
+	let starts = 0;
+	const selectionRequired = targetStatusFixture({ applicability: "unrelated", action: "start" });
+	selectionRequired.nextTransition = {
+		kind: "collect",
+		reasonCode: "intended_untracked_selection_required",
+		collect: { inputs: [{ name: "intended_untracked_selection", schema: "gentle-ai.review-intended-untracked-selection/v1", captureOperation: "external.select_intended_untracked", arguments: [] }] },
+	};
+	let selectedTarget: ReviewStatusV3 | undefined;
+	const { controller } = runtime(fakeNative({
+		targetStatus: async (request) => {
+			if (request.untrackedScope === undefined) return selectionRequired;
+			if (selectedTarget === undefined) throw new Error("selected target must be bound to the exact controller candidate");
+			return selectedTarget;
+		},
+		start: async () => {
+			starts += 1;
+			return { lineageId: "selected-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true };
+		},
+	}), undefined, candidateViews);
+
+	const blocked = await controller.execute("selection-required", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
+	assert.equal((blocked.details as { status?: string }).status, "blocked");
+	assert.equal((blocked.details as { result?: unknown }).result, selectionRequired.raw);
+	assert.equal(starts, 0);
+	assert.equal(candidateViews.creates, 0);
+
+	const digest = `sha256:${"b".repeat(64)}`;
+	const selectedInput = JSON.stringify({ mode: "ordinary", untrackedScope: "select", expectedUntrackedInventory: digest, intendedUntracked: ["selected.ts"] });
+	const selectedReplayKey = JSON.stringify({ cwd, lineageId: null, input: selectedInput, inputPath: null });
+	const selectedCandidate = candidateViews.createOrReuse({ contributorRoot: cwd, replayKey: selectedReplayKey, intendedUntracked: ["selected.ts"] });
+	selectedTarget = targetStatusFixture({
+		applicability: "unrelated",
+		action: "start",
+		baseTree: selectedCandidate.baseTree,
+		currentCandidateTree: selectedCandidate.candidateTree,
+		paths: selectedCandidate.paths,
+		intendedUntracked: selectedCandidate.intendedUntracked,
+	});
+	const started = await controller.execute("selected-start", { operation: "start", input: selectedInput }, undefined, undefined, context(cwd));
+	const startedDetails = started.details as { result?: { lineage_id: string } };
+	assert.ok(startedDetails.result, `selected START must succeed: ${JSON.stringify(started.details)}`);
+	assert.equal(startedDetails.result.lineage_id, "selected-lineage");
+	assert.equal(starts, 1);
+	const view = candidateViews.resolveForLens("selected-lineage", "review-reliability");
+	try {
+		assert.deepEqual(view.paths, ["app.ts", "selected.ts"]);
+		assert.equal(lstatSync(join(view.root, "extra.ts"), { throwIfNoEntry: false }), undefined);
+	} finally {
+		view.cleanup();
+	}
 });
 
 test("native START preserves the default dirty-inclusive candidate without base flags", async (t) => {
@@ -2088,7 +2356,7 @@ test("native START preserves the default dirty-inclusive candidate without base 
 			requests.push(request);
 			return { lineageId: "default-dirty-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	const started = await controller.execute("default-dirty", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const view = candidateViews.resolveForLens("default-dirty-lineage", "review-reliability");
 	try {
@@ -2119,7 +2387,7 @@ test("native START binds an acknowledged committed range and native identity to 
 			requests.push(request);
 			return { lineageId: "explicit-base-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	await controller.execute("explicit-base", { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef: baseCommit, committedOnly: true }) }, undefined, undefined, context(cwd));
 	const view = candidateViews.resolveForLens("explicit-base-lineage", "review-reliability");
 	try {
@@ -2151,7 +2419,7 @@ test("native START binds a default dirty-inclusive candidate on an unborn reposi
 			requests.push(request);
 			return { lineageId: "unborn-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	const started = await controller.execute("unborn-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const view = candidateViews.resolveForLens("unborn-lineage", "review-reliability");
 	try {
@@ -2189,7 +2457,7 @@ test("native START fails closed before mutation when the workspace target and im
 			starts += 1;
 			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, new CandidateViewRegistry());
 	const result = await controller.execute("target-view-drift", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	assert.equal((result.details as { outcome: string }).outcome, "native-operation-failed");
 	assert.deepEqual((result.details as { diagnostics: unknown }).diagnostics, {
@@ -2219,7 +2487,7 @@ test("native START re-verifies candidate-view integrity before granting workspac
 			starts += 1;
 			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, new DriftingCandidateViewRegistry());
+	}), undefined, new DriftingCandidateViewRegistry());
 	const result = await controller.execute("candidate-view-drift", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	assert.equal((result.details as { outcome: string }).outcome, "native-operation-failed");
 	assert.deepEqual((result.details as { diagnostics: unknown }).diagnostics, {
@@ -2257,7 +2525,7 @@ test("native START preserves an explicit base-resolution timeout diagnostic with
 			starts += 1;
 			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, new CandidateViewRegistry());
 	const result = await controller.execute("base-resolution-timeout", { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef: "refs/heads/main", committedOnly: true }) }, undefined, undefined, context(cwd));
 	const details = result.details as Record<string, unknown>;
 	assert.equal(details.outcome, "native-operation-failed");
@@ -2283,7 +2551,7 @@ test("native START rejects an unresolvable explicit base before native mutation"
 			starts += 1;
 			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, new CandidateViewRegistry());
 	const rejected = await controller.execute("missing-explicit-base", { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef: "refs/heads/missing-base", committedOnly: true }) }, undefined, undefined, context(cwd));
 	assert.deepEqual(rejected.details, {
 		operation: "start",
@@ -2314,7 +2582,7 @@ test("native START rejects same-name branch and tag base refs before native muta
 			starts += 1;
 			return { lineageId: "must-not-start", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}), undefined, new CandidateViewRegistry());
 	for (const baseRef of ["same-commit", "different-commit"]) {
 		const rejected = await controller.execute(`ambiguous-${baseRef}`, { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef, committedOnly: true }) }, undefined, undefined, context(cwd));
 		assert.deepEqual(rejected.details, {
@@ -2791,346 +3059,30 @@ test("legacy graph-v1 FINALIZE is a typed read-only rejection without native fal
 	assert.equal(ReviewTransactionStore.forRepository(cwd).read(lineageId).revision, 0);
 });
 
-test("native allow registers one authorization and bash-time revalidation consumes it", async (t) => {
+test("explicit controller VALIDATE is informational and cannot decide later Bash delivery", async (t) => {
 	const cwd = repository(t);
-	let validates = 0;
+	let validations = 0;
 	const { controller, toolCall } = runtime(fakeNative({
 		validate: async () => {
-			validates += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext("native-lineage", "r1", git(cwd, "write-tree")) };
+			validations += 1;
+			throw new Error("informational VALIDATE must not invoke native validation");
 		},
-		targetStatus: async () => targetStatusFixture({ lineageId: "native-lineage", baseTree: git(cwd, "rev-parse", "HEAD^{tree}"), currentCandidateTree: git(cwd, "write-tree"), paths: [] }),
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
+	}));
 	const command = "git commit -m native";
-	const validated = await controller.execute("validate", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "key", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((validated.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal(await toolCall({ toolName: "bash", input: { command } }, interactiveContext(cwd)), undefined);
-	const replay = await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean };
-	assert.equal(replay.block, true);
-	assert.equal(validates, 3, "the replay discovers but cannot remint the consumed binding");
-});
-
-test("fresh pre-commit consumes an exact approved native receipt without START or projection restoration", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	git(cwd, "add", "--", "app.ts");
-	const tree = git(cwd, "write-tree");
-	let starts = 0;
-	const requests: Parameters<NativeReviewCli["validate"]>[0][] = [];
-	const { toolCall } = runtime(fakeNative({
-		start: async () => {
-			starts += 1;
-			throw new Error("an approved exact candidate must not start another review");
-		},
-		validate: async (request) => {
-			requests.push(request);
-			return { allowed: true, result: "allow", action: "continue", reason: "approved receipt binds the index", gateContext: nativeGateContext("approved-lineage", "r1", tree) };
-		},
-		targetStatus: async () => { throw new Error("approved receipt consumption must not reconstruct an unrelated projection"); },
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
-	const command = "git commit -m approved";
-	const input = { command };
-
-	assert.equal(await toolCall({ toolName: "bash", input }, context(cwd)), undefined);
-	assert.equal(starts, 0);
-	assert.equal(requests.length, 2, "authorization and bash-time TOCTOU validation must both run");
-	assert.equal(requests[0]?.lineageId, undefined, "fresh receipt discovery is candidate-bound, not caller-selected");
-	assert.equal(requests[1]?.lineageId, "approved-lineage");
-	assert.notEqual(input.command, command, "the approved pre-commit must use the durable commit transaction");
-});
-
-test("a consumed native receipt binding cannot remint authorization for the same exact command", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	git(cwd, "add", "--", "app.ts");
-	const tree = git(cwd, "write-tree");
-	let validations = 0;
-	const { toolCall } = runtime(fakeNative({
-		validate: async () => {
-			validations += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "same approved receipt", gateContext: nativeGateContext("same-lineage", "same-revision", tree) };
-		},
-	}));
-	const command = "git commit -m same-binding";
-
-	assert.equal(await toolCall({ toolName: "bash", input: { command } }, context(cwd)), undefined);
-	const replayInput = { command };
-	const replay = await toolCall({ toolName: "bash", input: replayInput }, context(cwd)) as { block: boolean };
-	assert.equal(replay.block, true);
-	assert.equal(replayInput.command, command);
-	assert.equal(validations, 3, "the replay may discover the binding once but must not revalidate or authorize it");
-});
-
-test("a new approved candidate binding may authorize the same command and cwd later in the session", async (t) => {
-	const cwd = repository(t);
-	const command = "git commit -m reusable-command";
-	const requests: Parameters<NativeReviewCli["validate"]>[0][] = [];
-	const { toolCall } = runtime(fakeNative({
-		validate: async (request) => {
-			requests.push(request);
-			const tree = git(cwd, "write-tree");
-			const suffix = tree.slice(0, 8);
-			return { allowed: true, result: "allow", action: "continue", reason: "candidate-bound receipt", gateContext: nativeGateContext(`lineage-${suffix}`, `revision-${suffix}`, tree) };
-		},
-	}));
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	git(cwd, "add", "--", "app.ts");
-	const firstInput = { command };
-	assert.equal(await toolCall({ toolName: "bash", input: firstInput }, context(cwd)), undefined);
-	assert.notEqual(firstInput.command, command);
-
-	writeFileSync(join(cwd, "app.ts"), "export const value = 3;\n");
-	git(cwd, "add", "--", "app.ts");
-	const secondInput = { command };
-	assert.equal(await toolCall({ toolName: "bash", input: secondInput }, context(cwd)), undefined);
-	assert.notEqual(secondInput.command, command);
-	assert.equal(requests.length, 4);
-	assert.equal(requests[0]?.lineageId, undefined);
-	assert.equal(requests[1]?.lineageId?.startsWith("lineage-"), true);
-	assert.equal(requests[2]?.lineageId, undefined);
-	assert.equal(requests[3]?.lineageId?.startsWith("lineage-"), true);
-});
-
-test("a denied native discovery does not prevent a later valid receipt for the same command", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	git(cwd, "add", "--", "app.ts");
-	const tree = git(cwd, "write-tree");
-	let validations = 0;
-	const { toolCall } = runtime(fakeNative({
-		validate: async () => {
-			validations += 1;
-			return validations === 1
-				? { allowed: false, result: "scope-changed", action: "create-new-lineage", reason: "not approved yet", gateContext: nativeGateContext("", "denied", tree) }
-				: { allowed: true, result: "allow", action: "continue", reason: "now approved", gateContext: nativeGateContext("later-lineage", "later-revision", tree) };
-		},
-	}));
-	const command = "git commit -m later-approved";
-
-	assert.equal((await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-	const approvedInput = { command };
-	assert.equal(await toolCall({ toolName: "bash", input: approvedInput }, context(cwd)), undefined);
-	assert.notEqual(approvedInput.command, command);
-	assert.equal(validations, 3);
-});
-
-test("a blocked bash-time native gate does not consume its receipt binding", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	git(cwd, "add", "--", "app.ts");
-	const tree = git(cwd, "write-tree");
-	let validations = 0;
-	const { toolCall } = runtime(fakeNative({
-		validate: async () => {
-			validations += 1;
-			if (validations === 2) return { allowed: false, result: "invalidated", action: "explicit-maintainer-action", reason: "transient authority block", gateContext: nativeGateContext("retry-lineage", "retry-revision", tree) };
-			return { allowed: true, result: "allow", action: "continue", reason: "approved", gateContext: nativeGateContext("retry-lineage", "retry-revision", tree) };
-		},
-	}));
-	const command = "git commit -m retry-binding";
-
-	assert.equal((await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-	const retryInput = { command };
-	assert.equal(await toolCall({ toolName: "bash", input: retryInput }, context(cwd)), undefined);
-	assert.notEqual(retryInput.command, command);
-	assert.equal(validations, 4);
-});
-
-test("fresh pre-commit rejects an approved receipt for a different index tree", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	git(cwd, "add", "--", "app.ts");
-	let validations = 0;
-	const { toolCall } = runtime(fakeNative({
-		validate: async () => {
-			validations += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "stale receipt", gateContext: nativeGateContext("stale-lineage", "r1", "f".repeat(40)) };
-		},
-	}));
-	const command = "git commit -m stale";
-	const input = { command };
-
-	const result = await toolCall({ toolName: "bash", input }, context(cwd)) as { block: boolean; reason: string };
-	assert.equal(result.block, true);
-	assert.match(result.reason, /does not bind the exact current pre-commit tree/);
-	assert.equal(validations, 1);
-	assert.equal(input.command, command);
-});
-
-test("fresh pre-commit honors native disabled/unmanaged delivery without restoring stale authority", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	git(cwd, "add", "--", "app.ts");
-	let validations = 0;
-	const { toolCall } = runtime(fakeNative({
-		validate: async () => {
-			validations += 1;
-			return {
-				allowed: false,
-				result: "invalidated",
-				action: "repository-policy",
-				reason: "receipt-driven development is disabled",
-				gateContext: nativeGateContext("", "r1", git(cwd, "write-tree")),
-				delivery: "disabled/unmanaged",
-			};
-		},
-		targetStatus: async () => { throw new Error("disabled delivery must not restore stale authority"); },
-	}));
-	const command = "git commit -m unmanaged";
-	const input = { command };
-
-	assert.equal(await toolCall({ toolName: "bash", input }, context(cwd)), undefined);
-	assert.equal(validations, 1);
-	assert.equal(input.command, command, "unmanaged delivery must remain an ordinary repository command");
-});
-
-test("native VALIDATE delivery disabled/unmanaged renders as a successful skipped envelope before the maintainer-exception check, minting no authorization", async (t) => {
-	const cwd = repository(t);
-	let validations = 0;
-	const { controller } = runtime(fakeNative({
-		validate: async () => {
-			validations += 1;
-			return {
-				allowed: false,
-				result: "invalidated",
-				action: "repository-policy",
-				reason: "review-driven development is disabled and no receipt governs this candidate, so delivery follows ordinary repository policy",
-				gateContext: nativeGateContext("native-lineage", "r1", git(cwd, "write-tree")),
-				delivery: "disabled/unmanaged",
-			};
-		},
-		targetStatus: async () => targetStatusFixture({ lineageId: "native-lineage", baseTree: git(cwd, "rev-parse", "HEAD^{tree}"), currentCandidateTree: git(cwd, "write-tree"), paths: [] }),
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
-	const command = "git commit -m native";
-	const validated = await controller.execute("disabled-delivery", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "disabled-delivery", command, input: "{}" }, undefined, undefined, context(cwd));
+	const validated = await controller.execute("informational-validate", {
+		operation: "validate",
+		lineageId: "native-lineage",
+		idempotencyKey: "informational-validate",
+		command,
+		input: "{}",
+	}, undefined, undefined, context(cwd));
 	const details = validated.details as Record<string, unknown>;
-	assert.equal(validations, 1);
-	assert.equal(details.status, "skipped");
-	assert.equal(details.outcome, "review-disabled-unmanaged-delivery");
-	assert.equal((details.result as Record<string, unknown>).delivery, "disabled/unmanaged");
-	assert.equal((details.result as Record<string, unknown>).allowed, false);
-	assert.equal(details.maintainer_exception_request, undefined, "a repository-policy delivery skip must never mint a maintainer-exception request");
-	assert.equal(details.authorization, undefined, "a repository-policy delivery skip must never mint an authorization");
-});
-
-test("fresh candidate registry binds a resumed zero-lens native START through FINALIZE and pre-commit", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	const candidateViews = new CandidateViewRegistry();
-	let finalizedCwd = "";
-	let validations = 0;
-	const lineageId = "resumed-after-reload";
-	const { controller } = runtime(fakeNative({
-		start: async () => ({ lineageId, state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "resumed", lensesRequired: false }),
-		finalize: async (request) => {
-			finalizedCwd = request.cwd;
-			return { lineageId, state: "approved", action: "approved", storeRevision: "r1" };
-		},
-		validate: async () => {
-			validations += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "native receipt matches", gateContext: nativeGateContext(lineageId, "r1", git(cwd, "write-tree")) };
-		},
-	}), undefined, undefined, undefined, candidateViews);
-	await controller.execute("resume-after-reload", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
-	await controller.execute("resume-finalize", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
-	assert.notEqual(finalizedCwd, cwd);
-	git(cwd, "add", "--", "app.ts");
-	const validated = await controller.execute("resume-pre-commit", { operation: "validate", lineageId, idempotencyKey: "resume", command: "git commit -m resumed", input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal(validations, 1);
-	assert.notEqual((validated.details as { authorization?: unknown }).authorization, undefined);
-});
-
-test("native pre-commit after reload delegates exact-tree validation when no local projection exists", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	git(cwd, "add", "--", "app.ts");
-	let validations = 0;
-	const { controller } = runtime(fakeNative({
-		validate: async () => {
-			validations += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "native receipt matches", gateContext: nativeGateContext("reloaded-lineage", "r1", git(cwd, "write-tree")) };
-		},
-		targetStatus: async () => targetStatusFixture({ lineageId: "reloaded-lineage", baseTree: git(cwd, "rev-parse", "HEAD^{tree}"), currentCandidateTree: git(cwd, "write-tree"), paths: ["app.ts"], projection: "staged" }),
-	}), undefined, undefined, undefined, new CandidateViewRegistry());
-	const validated = await controller.execute("reload-pre-commit", { operation: "validate", lineageId: "reloaded-lineage", idempotencyKey: "reload", command: "git commit -m reload", input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal(validations, 1);
-	assert.notEqual((validated.details as { authorization?: unknown }).authorization, undefined);
-});
-
-test("native pre-commit rejects an unproven staged projection before native authorization", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	writeFileSync(join(cwd, "initially-untracked.ts"), "export const untracked = true;\n");
-	const candidateViews = new CandidateViewRegistry();
-	let validations = 0;
-	const { controller } = runtime(fakeNative({
-		validate: async () => {
-			validations += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "native allow must not bypass Pi projection checks", gateContext: nativeGateContext() };
-		},
-	}), undefined, undefined, undefined, candidateViews);
-	const started = await controller.execute("start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
-	const lineageId = (started.details as { result: { lineage_id: string } }).result.lineage_id;
-	await controller.execute("finalize", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
-	writeFileSync(join(cwd, "app.ts"), "export const value = 3;\n");
-	git(cwd, "add", "--", "app.ts", "initially-untracked.ts");
-	const result = await controller.execute("validate", { operation: "validate", lineageId, idempotencyKey: "projection-drift", command: "git commit -m native", input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((result.details as { status?: string }).status, "blocked");
+	assert.equal(details.status, "informational");
+	assert.equal(details.outcome, "delivery-validation-retired");
+	assert.equal(details.authorization, undefined);
 	assert.equal(validations, 0);
-});
-
-test("native pre-commit binds the exact tracked and initially-untracked projection through bash-time revalidation", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	writeFileSync(join(cwd, "initially-untracked.ts"), "export const untracked = true;\n");
-	const candidateViews = new CandidateViewRegistry();
-	let validations = 0;
-	const native = fakeNative({
-		validate: async () => {
-			validations += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext("native-lineage", "r1", git(cwd, "write-tree")) };
-		},
-	});
-	const { controller, toolCall } = runtime(native, undefined, undefined, undefined, candidateViews);
-	const started = await controller.execute("start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
-	const lineageId = (started.details as { result: { lineage_id: string } }).result.lineage_id;
-	await controller.execute("finalize", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
-	git(cwd, "add", "--", "app.ts", "initially-untracked.ts");
-	const command = "git commit -m exact-projection";
-	const allowed = await controller.execute("validate", { operation: "validate", lineageId, idempotencyKey: "exact-projection", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((allowed.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal(await toolCall({ toolName: "bash", input: { command } }, interactiveContext(cwd)), undefined);
-	assert.equal(validations, 2);
-
-	for (const unsupported of ["git commit -a -m broad", "git commit app.ts -m pathspec", "git commit --pathspec-from-file=paths -m wrapper"]) {
-		const rejected = await toolCall({ toolName: "bash", input: { command: unsupported } }, context(cwd)) as { block: boolean };
-		assert.equal(rejected.block, true);
-	}
-	writeFileSync(join(cwd, "harness-artifact.txt"), "must not be staged\n");
-	git(cwd, "add", "--", "harness-artifact.txt");
-	const drifted = await controller.execute("validate", { operation: "validate", lineageId, idempotencyKey: "extra-path", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((drifted.details as { status?: string }).status, "blocked");
-	assert.equal(validations, 2);
-});
-
-test("native gate context mismatches create zero controller authorizations", async (t) => {
-	for (const returnedGate of ["", "pre-push"]) {
-		await t.test(returnedGate || "empty", async (t) => {
-			const cwd = repository(t);
-			const command = "git commit -m native";
-			const { controller, toolCall } = runtime(fakeNative({
-				validate: async () => {
-					const gateContext = nativeGateContext();
-					gateContext.raw.gate = returnedGate;
-					return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext };
-				},
-			}));
-			const result = await controller.execute("wrong-gate", { operation: "validate", lineageId: "native-lineage", idempotencyKey: returnedGate || "empty", command, input: "{}" }, undefined, undefined, context(cwd));
-			assert.equal((result.details as { authorization?: unknown }).authorization, undefined);
-			assert.equal((result.details as { status?: string }).status, "blocked");
-			assert.equal((await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-		});
-	}
+	assert.equal(await toolCall({ toolName: "bash", input: { command } }, context(cwd)), undefined);
+	assert.equal(validations, 0, "later Bash delivery remains outside controller VALIDATE");
 });
 
 test("native bind validates only request-known inputs and maps native-owned binding evidence", async (t) => {
@@ -3403,772 +3355,6 @@ test("native ordinary START leaves a matching raw compact claimant untouched", a
 });
 
 
-test("native pre-PR validation uses and binds the exact advertised ordinary base on both validations", async (t) => {
-	const cwd = repository(t);
-	const origin = addBareRemote(t, cwd, "origin");
-	const baseCommit = git(cwd, "rev-parse", "main");
-	execFileSync("git", ["checkout", "-b", "feature"], { cwd });
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "push", "origin", "feature:refs/heads/feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const requests: Array<{ flags?: readonly string[] }> = [];
-	let validates = 0;
-	const boundary = { selector: "origin/main", remote: "origin", remoteRef: "refs/heads/main", commit: baseCommit, remoteIdentity: remoteIdentity(origin) };
-	const { controller, toolCall } = runtime(fakeNative({
-		validate: async (request) => {
-			requests.push(request);
-			validates += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(boundary) };
-		},
-	}));
-	const command = "gh pr create --base main --head feature";
-	const validated = await controller.execute("validate", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "key", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((validated.details as { authorization?: unknown }).authorization, undefined);
-	assert.deepEqual(requests[0]?.flags, ["--base-ref", "origin/main"]);
-	assert.equal((await toolCall({ toolName: "bash", input: { command: "gh pr create --base feature --head main" } }, context(cwd)) as { block: boolean }).block, true);
-	assert.equal(await toolCall({ toolName: "bash", input: { command } }, context(cwd)), undefined);
-	assert.deepEqual(requests[1]?.flags, ["--base-ref", "origin/main"]);
-	assert.equal(validates, 2);
-});
-
-test("native pre-PR derives fork and chained bases from the gh repository context", async (t) => {
-	await t.test("fork", async (t) => {
-		const cwd = repository(t);
-		addBareRemote(t, cwd, "upstream");
-		const upstream = "git@github.com:base-owner/project.git";
-		git(cwd, "remote", "set-url", "upstream", upstream);
-		const baseCommit = git(cwd, "rev-parse", "main");
-		git(cwd, "remote", "add", "origin", "git@github.com:fork-owner/project.git");
-		git(cwd, "config", "remote.upstream.gh-resolved", "base");
-		git(cwd, "checkout", "-b", "feature");
-		commitFile(cwd, "fork.ts", "export const fork = true;\n", "fork feature");
-		git(cwd, "config", "branch.feature.pushRemote", "origin");
-		const headCommit = git(cwd, "rev-parse", "HEAD");
-		const requests: Array<{ flags?: readonly string[] }> = [];
-		const boundary = { selector: "upstream/main", remote: "upstream", remoteRef: "refs/heads/main", commit: baseCommit, remoteIdentity: remoteIdentity(upstream) };
-		const origin = "git@github.com:fork-owner/project.git";
-		const probe = queuedPublicationProbe({
-			[`${upstream} refs/heads/main`]: baseCommit,
-			[`${origin} refs/heads/feature`]: headCommit,
-		});
-		const { controller } = runtime(fakeNative({ validate: async (request) => {
-			requests.push(request);
-			return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(boundary) };
-		} }), probe);
-		const command = "gh pr create --base main --head fork-owner:feature";
-		const result = await controller.execute("fork-pr", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "fork", command, input: "{}" }, undefined, undefined, context(cwd));
-		assert.notEqual((result.details as { authorization?: unknown }).authorization, undefined);
-		assert.deepEqual(requests[0]?.flags, ["--base-ref", "upstream/main"]);
-	});
-
-	await t.test("chain", async (t) => {
-		const cwd = repository(t);
-		const upstream = addBareRemote(t, cwd, "upstream");
-		git(cwd, "config", "remote.upstream.gh-resolved", "base");
-		git(cwd, "checkout", "-b", "parent");
-		commitFile(cwd, "parent.ts", "export const parent = true;\n", "parent");
-		const parentCommit = git(cwd, "rev-parse", "HEAD");
-		git(cwd, "push", "upstream", "parent:refs/heads/parent");
-		git(cwd, "fetch", "upstream", "parent");
-		git(cwd, "checkout", "-b", "child");
-		commitFile(cwd, "child.ts", "export const child = true;\n", "child");
-		git(cwd, "push", "upstream", "child:refs/heads/child");
-		git(cwd, "config", "branch.child.pushRemote", "upstream");
-		const requests: Array<{ flags?: readonly string[] }> = [];
-		const boundary = { selector: "upstream/parent", remote: "upstream", remoteRef: "refs/heads/parent", commit: parentCommit, remoteIdentity: remoteIdentity(upstream) };
-		const { controller } = runtime(fakeNative({ validate: async (request) => {
-			requests.push(request);
-			return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(boundary) };
-		} }));
-		const command = "gh pr create --base parent --head child";
-		const result = await controller.execute("chain-pr", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "chain", command, input: "{}" }, undefined, undefined, context(cwd));
-		assert.notEqual((result.details as { authorization?: unknown }).authorization, undefined);
-		assert.deepEqual(requests[0]?.flags, ["--base-ref", "upstream/parent"]);
-	});
-});
-
-test("native pre-PR rejects non-branch and ambiguous bases before invocation", async (t) => {
-	const cwd = repository(t);
-	addBareRemote(t, cwd, "origin");
-	addBareRemote(t, cwd, "upstream");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "push", "origin", "feature:refs/heads/feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	let calls = 0;
-	const { controller } = runtime(fakeNative({ validate: async () => {
-		calls += 1;
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() };
-	} }));
-	for (const base of ["refs/heads/main", git(cwd, "rev-parse", "main"), "main"]) {
-		try {
-			const result = await controller.execute(`invalid-${base}`, { operation: "validate", lineageId: "native-lineage", idempotencyKey: base, command: `gh pr create --base ${base} --head feature`, input: "{}" }, undefined, undefined, context(cwd));
-			assert.equal((result.details as { authorization?: unknown }).authorization, undefined);
-		} catch (error) {
-			assert.match(error instanceof Error ? error.message : String(error), /base|advertised/i);
-		}
-	}
-	assert.equal(calls, 0);
-});
-
-test("native pre-PR rejects non-branch heads and owner-qualified heads without a proven repository mapping", async (t) => {
-	const cwd = repository(t);
-	addBareRemote(t, cwd, "origin");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "push", "origin", "feature:refs/heads/feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	let calls = 0;
-	const { controller } = runtime(fakeNative({ validate: async () => {
-		calls += 1;
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() };
-	} }));
-	for (const head of ["refs/heads/feature", git(cwd, "rev-parse", "HEAD"), "fork-owner:feature"]) {
-		try {
-			const result = await controller.execute(`invalid-head-${head}`, { operation: "validate", lineageId: "native-lineage", idempotencyKey: head, command: `gh pr create --base main --head ${head}`, input: "{}" }, undefined, undefined, context(cwd));
-			assert.equal((result.details as { authorization?: unknown }).authorization, undefined);
-		} catch (error) {
-			assert.match(error instanceof Error ? error.message : String(error), /head|repository/i);
-		}
-	}
-	assert.equal(calls, 0);
-});
-
-test("native pre-PR refuses a returned publication boundary that differs from the command target", async (t) => {
-	const cwd = repository(t);
-	const origin = addBareRemote(t, cwd, "origin");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const wrong = { selector: "origin/main", remote: "origin", remoteRef: "refs/heads/main", commit: git(cwd, "rev-parse", "feature"), remoteIdentity: remoteIdentity(origin) };
-	const { controller } = runtime(fakeNative({ validate: async () => ({ allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(wrong) }) }));
-	const result = await controller.execute("wrong-boundary", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "wrong", command: "gh pr create --base main --head feature", input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((result.details as { authorization?: unknown }).authorization, undefined);
-});
-
-test("native pre-push binds the exact existing destination as its advertised base", async (t) => {
-	const cwd = repository(t);
-	addBareRemote(t, cwd, "origin");
-	git(cwd, "push", "origin", "main:refs/heads/feature");
-	git(cwd, "fetch", "origin", "feature");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	git(cwd, "config", "branch.feature.remote", "origin");
-	git(cwd, "config", "branch.feature.merge", "refs/heads/main");
-	const requests: Array<{ flags?: readonly string[] }> = [];
-	const { controller, toolCall } = runtime(fakeNative({ validate: async (request) => {
-		requests.push(request);
-		const gateContext = nativeGateContext();
-		gateContext.raw.gate = "pre-push";
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext };
-	} }));
-	const command = "git push origin feature:refs/heads/feature";
-	const validated = await controller.execute("pre-push", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "push", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((validated.details as { authorization?: unknown }).authorization, undefined);
-	assert.deepEqual(requests[0]?.flags, ["--base-ref", "origin/feature"]);
-	assert.equal(await toolCall({ toolName: "bash", input: { command } }, interactiveContext(cwd)), undefined);
-	assert.deepEqual(requests[1]?.flags, ["--base-ref", "origin/feature"]);
-});
-
-test("native pre-push rejects split fetch/push endpoints before native validation", async (t) => {
-	for (const [shape, command] of [
-		["ordinary", "git push origin feature:refs/heads/main"],
-		["force", "git push --force origin feature:refs/heads/main"],
-	] as const) {
-		await t.test(shape, async (t) => {
-			const cwd = repository(t);
-			addBareRemote(t, cwd, "origin");
-			const pushEndpoint = addBareRemote(t, cwd, "publication");
-			git(cwd, "checkout", "-b", "feature");
-			commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-			git(cwd, "config", "remote.origin.pushurl", pushEndpoint);
-			git(cwd, "config", "branch.feature.pushRemote", "origin");
-			const probes: PublicationProbeRequestFixture[] = [];
-			let validations = 0;
-			const { controller } = runtime(fakeNative({ validate: async () => {
-				validations += 1;
-				const gateContext = nativeGateContext();
-				gateContext.raw.gate = "pre-push";
-				return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext };
-			} }), queuedPublicationProbe({}, probes));
-			const response = await controller.execute(`split-${shape}`, { operation: "validate", lineageId: "native-lineage", idempotencyKey: `split-${shape}`, command, input: "{}" }, undefined, undefined, context(cwd));
-			const details = response.details as Record<string, unknown>;
-			assert.equal(details.outcome, "native-split-fetch-push-unsupported");
-			assert.equal(details.next_action, "native-split-fetch-push-unsupported-until-upstream-supports-explicit-push-base");
-			assert.match(String(details.reason), /upstream.*base-ref.*fetch-side/i);
-			assert.equal(details.authorization, undefined);
-			assert.equal(validations, 0);
-			assert.equal(probes.length, 0);
-		});
-	}
-});
-
-test("native pre-PR keeps fetch-side probes when the push URL diverges", async (t) => {
-	const cwd = repository(t);
-	const fetchEndpoint = addBareRemote(t, cwd, "origin");
-	const pushEndpoint = addBareRemote(t, cwd, "publication");
-	const baseCommit = git(cwd, "rev-parse", "main");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	const headCommit = git(cwd, "rev-parse", "HEAD");
-	git(cwd, "push", fetchEndpoint, "feature:refs/heads/feature");
-	git(cwd, "config", "remote.origin.pushurl", pushEndpoint);
-	git(cwd, "config", "remote.origin.gh-resolved", "base");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const probes: PublicationProbeRequestFixture[] = [];
-	const probe = queuedPublicationProbe({
-		[`${fetchEndpoint} refs/heads/main`]: baseCommit,
-		[`${fetchEndpoint} refs/heads/feature`]: headCommit,
-	}, probes);
-	const boundary = { selector: "origin/main", remote: "origin", remoteRef: "refs/heads/main", commit: baseCommit, remoteIdentity: remoteIdentity(fetchEndpoint) };
-	const { controller } = runtime(fakeNative({ validate: async () => ({ allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(boundary) }) }), probe);
-	const result = await controller.execute("pre-pr-fetch-side", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "pre-pr-fetch-side", command: "gh pr create --base main --head feature", input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((result.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal(probes.length > 0, true);
-	assert.equal(probes.every((request) => request.arguments.includes(fetchEndpoint)), true);
-	assert.equal(probes.some((request) => request.arguments.includes(pushEndpoint)), false);
-});
-
-test("native pre-push rejects an older existing destination instead of validating from a reviewed parent", async (t) => {
-	const cwd = repository(t);
-	addBareRemote(t, cwd, "origin");
-	git(cwd, "checkout", "-b", "parent");
-	commitFile(cwd, "parent.ts", "export const parent = true;\n", "parent");
-	git(cwd, "push", "origin", "parent:refs/heads/parent");
-	git(cwd, "fetch", "origin", "parent");
-	git(cwd, "checkout", "-b", "child");
-	commitFile(cwd, "child.ts", "export const child = true;\n", "child");
-	git(cwd, "config", "branch.child.pushRemote", "origin");
-	git(cwd, "config", "branch.child.remote", "origin");
-	git(cwd, "config", "branch.child.merge", "refs/heads/parent");
-	const requests: Array<{ flags?: readonly string[] }> = [];
-	const { controller } = runtime(fakeNative({ validate: async (request) => {
-		requests.push(request);
-		const gateContext = nativeGateContext();
-		gateContext.raw.gate = "pre-push";
-		const exactDestination = request.flags?.[1] === "origin/main";
-		return exactDestination
-			? { allowed: false, result: "scope-changed", action: "create-new-lineage", reason: "destination range predates reviewed parent", gateContext }
-			: { allowed: true, result: "allow", action: "continue", reason: "wrong parent range", gateContext };
-	} }));
-	const command = "git push origin child:refs/heads/main";
-	const result = await controller.execute("older-destination", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "older-destination", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((result.details as { authorization?: unknown }).authorization, undefined);
-	assert.deepEqual(requests.map((request) => request.flags), [["--base-ref", "origin/main"]]);
-});
-
-test("native pre-push rederives the bound destination range at bash time", async (t) => {
-	const cwd = repository(t);
-	const origin = addBareRemote(t, cwd, "origin");
-	git(cwd, "push", "origin", "main:refs/heads/feature");
-	git(cwd, "fetch", "origin", "feature");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	const featureCommit = git(cwd, "rev-parse", "HEAD");
-	git(cwd, "push", "origin", "feature:refs/heads/moved");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	let validates = 0;
-	const { controller, toolCall } = runtime(fakeNative({ validate: async () => {
-		validates += 1;
-		const gateContext = nativeGateContext();
-		gateContext.raw.gate = "pre-push";
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext };
-	} }));
-	const command = "git push origin feature:refs/heads/feature";
-	const authorized = await controller.execute("bind-range", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "bind-range", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((authorized.details as { authorization?: unknown }).authorization, undefined);
-	git(cwd, "--git-dir", origin, "update-ref", "refs/heads/feature", featureCommit);
-	assert.equal((await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-	assert.equal(validates, 1);
-});
-
-test("native first pushes fail closed without a persisted explicit advertised base", async (t) => {
-	await t.test("first push", async (t) => {
-		const cwd = repository(t);
-		const origin = addBareRemote(t, cwd, "origin");
-		git(cwd, "update-ref", "-d", "refs/remotes/origin/main");
-		git(cwd, "checkout", "-b", "feature");
-		commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-		git(cwd, "config", "branch.feature.pushRemote", "origin");
-		mkdirSync(join(cwd, ".gentle-ai", "reviews"), { recursive: true });
-		writeFileSync(join(cwd, ".gentle-ai", "reviews", "operational.tmp"), "ignored\n");
-		writeFileSync(join(cwd, ".git", "info", "exclude"), ".gentle-ai/\n");
-		let validates = 0;
-		const probes: PublicationProbeRequestFixture[] = [];
-		const { controller } = runtime(fakeNative({ validate: async (request) => {
-			void request;
-			validates += 1;
-			return { allowed: false, result: "scope-changed", action: "create-new-lineage", reason: "native owns ignored-state parsing", gateContext: nativeGateContext() };
-		} }), queuedPublicationProbe({ [`${origin} refs/heads/main`]: git(cwd, "rev-parse", "main") }, probes));
-		const result = await controller.execute("first-push", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "first", command: "git push origin feature:refs/heads/feature", input: "{}" }, undefined, undefined, context(cwd));
-		const details = result.details as Record<string, unknown>;
-		assert.equal(details.outcome, "native-publication-base-required");
-		assert.equal(details.next_action, "native-first-push-unsupported-until-persisted-advertised-base-exists");
-		assert.match(String(details.reason), /unsupported until Pi has a persisted explicit advertised-base source/i);
-		assert.equal(validates, 0);
-		assert.equal(probes.length, 0);
-	});
-
-	await t.test("chained first push", async (t) => {
-		const cwd = repository(t);
-		const origin = addBareRemote(t, cwd, "origin");
-		git(cwd, "checkout", "-b", "parent");
-		commitFile(cwd, "parent.ts", "export const parent = true;\n", "parent");
-		const parentCommit = git(cwd, "rev-parse", "HEAD");
-		git(cwd, "push", "origin", "parent:refs/heads/parent");
-		git(cwd, "fetch", "origin", "parent");
-		git(cwd, "checkout", "-b", "child");
-		commitFile(cwd, "child.ts", "export const child = true;\n", "child");
-		git(cwd, "config", "branch.child.pushRemote", "origin");
-		let validates = 0;
-		const probes: PublicationProbeRequestFixture[] = [];
-		const { controller } = runtime(fakeNative({ validate: async (request) => {
-			void request;
-			validates += 1;
-			return { allowed: false, result: "scope-changed", action: "create-new-lineage", reason: "test", gateContext: nativeGateContext() };
-		} }), queuedPublicationProbe({ [`${origin} refs/heads/parent`]: parentCommit }, probes));
-		const result = await controller.execute("chain-push", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "chain", command: "git push origin child:refs/heads/child", input: "{}" }, undefined, undefined, context(cwd));
-		const details = result.details as Record<string, unknown>;
-		assert.equal(details.outcome, "native-publication-base-required");
-		assert.equal(details.next_action, "native-first-push-unsupported-until-persisted-advertised-base-exists");
-		assert.match(String(details.reason), /unsupported until Pi has a persisted explicit advertised-base source/i);
-		assert.equal(validates, 0);
-		assert.equal(probes.length, 0);
-	});
-});
-
-function nativeReleaseEvidence(): Record<string, string> {
-	return {
-		release_configuration: "/evidence/release configuration.json",
-		release_generated: "/evidence/release generated.json",
-		release_provenance: "/evidence/release provenance.json",
-		release_publication_boundary: "/evidence/release publication-boundary.json",
-		release_evidence_freshness: "/evidence/release evidence-freshness.json",
-	};
-}
-
-test("native release validation forwards complete release evidence in contract order", async (t) => {
-	const cwd = repository(t);
-	addBareRemote(t, cwd, "origin");
-	const head = git(cwd, "rev-parse", "HEAD");
-	git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "tag", "-a", "v2.1.5", "-m", "release", head);
-	const requests: Array<{ gate: string; flags?: readonly string[] }> = [];
-	const { controller } = runtime(fakeNative({ validate: async (request) => {
-		requests.push(request);
-		const gateContext = nativeGateContext();
-		gateContext.raw.gate = "release";
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext };
-	} }));
-	const result = await controller.execute("release-artifacts", {
-		operation: "validate",
-		lineageId: "native-lineage",
-		idempotencyKey: "release-artifacts",
-		command: "gh release create v2.1.5",
-		input: JSON.stringify({ nativeRelease: nativeReleaseEvidence() }),
-	}, undefined, undefined, context(cwd));
-	assert.notEqual((result.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal(requests[0]?.gate, "release");
-	assert.deepEqual(requests[0]?.flags, [
-			"--release-configuration", "/evidence/release configuration.json",
-			"--release-generated", "/evidence/release generated.json",
-			"--release-provenance", "/evidence/release provenance.json",
-			"--release-publication-boundary", "/evidence/release publication-boundary.json",
-			"--release-evidence-freshness", "/evidence/release evidence-freshness.json",
-		],
-	);
-});
-
-test("native tag-only first publication uses the release gate with complete evidence", async (t) => {
-	const cwd = repository(t);
-	const origin = addBareRemote(t, cwd, "origin");
-	const head = git(cwd, "rev-parse", "HEAD");
-	git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "tag", "-a", "v2.1.5", "-m", "release", head);
-	git(cwd, "config", "branch.main.pushRemote", "origin");
-	const requests: Array<{ gate: string; flags?: readonly string[] }> = [];
-	const { controller, toolCall } = runtime(fakeNative({ validate: async (request) => {
-		requests.push(request);
-		const gateContext = nativeGateContext();
-		gateContext.raw.gate = "release";
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext };
-	} }), queuedPublicationProbe({ [`${origin} refs/heads/main`]: head }));
-	const command = "git push origin v2.1.5";
-	const result = await controller.execute("tag-first-publication", {
-		operation: "validate",
-		lineageId: "native-lineage",
-		idempotencyKey: "tag-first-publication",
-		command,
-		input: JSON.stringify({ nativeRelease: nativeReleaseEvidence() }),
-	}, undefined, undefined, context(cwd));
-	assert.notEqual((result.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal(await toolCall({ toolName: "bash", input: { command } }, interactiveContext(cwd)), undefined);
-	assert.equal(requests.length, 2);
-	assert.equal(requests.every((request) => request.gate === "release"), true);
-});
-
-test("native pre-PR command binding detects push destination movement before bash-time revalidation", async (t) => {
-	for (const movement of ["pushurl", "pushRemote"] as const) {
-		await t.test(movement, async (t) => {
-			const cwd = repository(t);
-			const origin = addBareRemote(t, cwd, "origin");
-			const replacement = addBareRemote(t, cwd, "replacement");
-			git(cwd, "config", "remote.origin.gh-resolved", "base");
-			git(cwd, "checkout", "-b", "feature");
-			commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-			git(cwd, "push", "origin", "feature:refs/heads/feature");
-			git(cwd, "config", "branch.feature.pushRemote", "origin");
-			const boundary = { selector: "origin/main", remote: "origin", remoteRef: "refs/heads/main", commit: git(cwd, "rev-parse", "main"), remoteIdentity: remoteIdentity(origin) };
-			let calls = 0;
-			const { controller, toolCall } = runtime(fakeNative({ validate: async () => {
-				calls += 1;
-				if (calls === 1) {
-					if (movement === "pushurl") git(cwd, "config", "remote.origin.pushurl", replacement);
-					else git(cwd, "config", "branch.feature.pushRemote", "replacement");
-				}
-				return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(boundary) };
-			} }));
-			const command = "gh pr create --base main --head feature";
-			await controller.execute(movement, { operation: "validate", lineageId: "native-lineage", idempotencyKey: movement, command, input: "{}" }, undefined, undefined, context(cwd));
-			const result = await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean };
-			assert.equal(result.block, true);
-			assert.equal(calls, 1);
-		});
-	}
-});
-
-test("repository publication identity matches v2.1.3 URL host and scp vectors", () => {
-	const vectors = [
-		["https://user:secret@example.com:8443/Owner/Repo.git", "sha256:3e219f5a846e2947fe5d3d92ec5e30197b3d25b9f303c2cc42cdb7d7783297bc"],
-		["ssh://git@example.com:2222/Owner/Repo.git", "sha256:6ff118a31fd1ce7bd58c6709495b63bbdcf9bd2e0a2b1976e56acd356e76ad93"],
-		["git@example.com:Owner/Repo.git", "sha256:2bceb05941bfaf7b288b5844de9cbccb96a1adcd0e31f4fe5995edd019727a73"],
-	] as const;
-	for (const [location, expected] of vectors) {
-		assert.equal((__testing as unknown as { repositoryLocationIdentity: (cwd: string, location: string) => string }).repositoryLocationIdentity("/repo", location), expected);
-	}
-});
-
-test("native pre-PR binds GH_REPO precedence and rejects environment drift", async (t) => {
-	const cwd = repository(t);
-	const originPath = addBareRemote(t, cwd, "origin");
-	const upstreamPath = addBareRemote(t, cwd, "upstream");
-	const origin = "git@github.com:wrong-owner/project.git";
-	const upstream = "ssh://git@github.example.com:2222/target-owner/project.git";
-	git(cwd, "remote", "set-url", "origin", origin);
-	git(cwd, "remote", "set-url", "upstream", upstream);
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const baseCommit = git(cwd, "rev-parse", "main");
-	const headCommit = git(cwd, "rev-parse", "HEAD");
-	const calls: PublicationProbeRequestFixture[] = [];
-	const probe = queuedPublicationProbe({
-		[`${origin} refs/heads/main`]: baseCommit,
-		[`${origin} refs/heads/feature`]: headCommit,
-		[`${upstream} refs/heads/main`]: baseCommit,
-		[`${upstream} refs/heads/feature`]: headCommit,
-	}, calls);
-	const boundary = { selector: "upstream/main", remote: "upstream", remoteRef: "refs/heads/main", commit: baseCommit, remoteIdentity: remoteIdentity(upstream) };
-	let validates = 0;
-	const { controller, toolCall } = runtime(fakeNative({ validate: async () => {
-		validates += 1;
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(boundary) };
-	} }), probe);
-	const previous = process.env.GH_REPO;
-	t.after(() => {
-		if (previous === undefined) delete process.env.GH_REPO;
-		else process.env.GH_REPO = previous;
-		void originPath;
-		void upstreamPath;
-	});
-	process.env.GH_REPO = "github.example.com:2222/target-owner/project";
-	const command = "gh pr create --base main --head feature";
-	const authorized = await controller.execute("gh-repo", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "gh-repo", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((authorized.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal(calls.some((call) => call.arguments.includes(upstream)), true);
-	process.env.GH_REPO = "wrong-owner/project";
-	assert.equal((await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-	assert.equal(validates, 1);
-});
-
-test("explicit --repo overrides GH_REPO while malformed, duplicate, and unmapped targets fail before native validation", async (t) => {
-	const cwd = repository(t);
-	addBareRemote(t, cwd, "origin");
-	const upstreamPath = addBareRemote(t, cwd, "upstream");
-	const upstream = "ssh://git@github.example.com:2222/target-owner/project.git";
-	git(cwd, "remote", "set-url", "upstream", upstream);
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const baseCommit = git(cwd, "rev-parse", "main");
-	const headCommit = git(cwd, "rev-parse", "HEAD");
-	const probe = queuedPublicationProbe({
-		[`${upstream} refs/heads/main`]: baseCommit,
-		[`${upstream} refs/heads/feature`]: headCommit,
-	});
-	const boundary = { selector: "upstream/main", remote: "upstream", remoteRef: "refs/heads/main", commit: baseCommit, remoteIdentity: remoteIdentity(upstream) };
-	let validates = 0;
-	const { controller } = runtime(fakeNative({ validate: async () => {
-		validates += 1;
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(boundary) };
-	} }), probe);
-	const previous = process.env.GH_REPO;
-	t.after(() => {
-		if (previous === undefined) delete process.env.GH_REPO;
-		else process.env.GH_REPO = previous;
-		void upstreamPath;
-	});
-	process.env.GH_REPO = "https://malformed.example/owner/repo";
-	const malformed = await controller.execute("malformed-env", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "malformed-env", command: "gh pr create --base main --head feature", input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((malformed.details as { authorization?: unknown }).authorization, undefined);
-	const explicit = "gh pr create --repo github.example.com:2222/target-owner/project --base main --head feature";
-	const explicitResult = await controller.execute("explicit", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "explicit", command: explicit, input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((explicitResult.details as { authorization?: unknown }).authorization, undefined);
-	for (const [id, command] of [
-		["duplicate", "gh pr create --repo target-owner/project --repo wrong-owner/project --base main --head feature"],
-		["unmapped", "gh pr create --repo missing-owner/project --base main --head feature"],
-	] as const) {
-		const result = await controller.execute(id, { operation: "validate", lineageId: "native-lineage", idempotencyKey: id, command, input: "{}" }, undefined, undefined, context(cwd));
-		assert.equal((result.details as { authorization?: unknown }).authorization, undefined);
-	}
-	assert.equal(validates, 1);
-});
-
-test("native pre-PR rejects missing, stale, and divergent advertised remote heads before native validation", async (t) => {
-	for (const shape of ["missing", "stale", "divergent"] as const) {
-		await t.test(shape, async (t) => {
-			const cwd = repository(t);
-			const origin = addBareRemote(t, cwd, "origin");
-			const baseCommit = git(cwd, "rev-parse", "main");
-			git(cwd, "checkout", "-b", "feature");
-			commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-			git(cwd, "config", "branch.feature.pushRemote", "origin");
-			if (shape === "stale") git(cwd, "--git-dir", origin, "update-ref", "refs/heads/feature", baseCommit);
-			if (shape === "divergent") {
-				git(cwd, "checkout", "-b", "divergent", "main");
-				commitFile(cwd, "divergent.ts", "export const divergent = true;\n", "divergent");
-				git(cwd, "push", "origin", "+divergent:refs/heads/feature");
-				git(cwd, "checkout", "feature");
-			}
-			let validates = 0;
-			const { controller } = runtime(fakeNative({ validate: async () => {
-				validates += 1;
-				return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() };
-			} }));
-			const result = await controller.execute(shape, { operation: "validate", lineageId: "native-lineage", idempotencyKey: shape, command: "gh pr create --base main --head feature", input: "{}" }, undefined, undefined, context(cwd));
-			assert.equal((result.details as { authorization?: unknown }).authorization, undefined);
-			assert.equal(validates, 0);
-		});
-	}
-});
-
-test("native pre-PR re-probes the advertised head and denies a bash-time race", async (t) => {
-	const cwd = repository(t);
-	const origin = addBareRemote(t, cwd, "origin");
-	const baseCommit = git(cwd, "rev-parse", "main");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "push", "origin", "feature:refs/heads/feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const boundary = { selector: "origin/main", remote: "origin", remoteRef: "refs/heads/main", commit: baseCommit, remoteIdentity: remoteIdentity(origin) };
-	let validates = 0;
-	const { controller, toolCall } = runtime(fakeNative({ validate: async () => {
-		validates += 1;
-		if (validates === 1) git(cwd, "--git-dir", origin, "update-ref", "refs/heads/feature", baseCommit);
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(boundary) };
-	} }));
-	const command = "gh pr create --base main --head feature";
-	const result = await controller.execute("head-race", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "head-race", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((result.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal((await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-	assert.equal(validates, 1);
-});
-
-test("native pre-PR denies remote-head movement during the second native validation", async (t) => {
-	const cwd = repository(t);
-	const origin = addBareRemote(t, cwd, "origin");
-	const baseCommit = git(cwd, "rev-parse", "main");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "push", "origin", "feature:refs/heads/feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const boundary = { selector: "origin/main", remote: "origin", remoteRef: "refs/heads/main", commit: baseCommit, remoteIdentity: remoteIdentity(origin) };
-	let validates = 0;
-	const { controller, toolCall } = runtime(fakeNative({ validate: async () => {
-		validates += 1;
-		if (validates === 2) git(cwd, "--git-dir", origin, "update-ref", "refs/heads/feature", baseCommit);
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativePrePrGateContext(boundary) };
-	} }));
-	const command = "gh pr create --base main --head feature";
-	const authorized = await controller.execute("head-during-native", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "head-during-native", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((authorized.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal((await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-	assert.equal((await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-	assert.equal(validates, 2);
-});
-
-test("publication probes are fixed-argv, shell-free, bounded, and controller-cancellable", async (t) => {
-	for (const mode of ["timeout", "cancel"] as const) {
-		await t.test(mode, async (t) => {
-			const cwd = repository(t);
-			addBareRemote(t, cwd, "origin");
-			git(cwd, "checkout", "-b", "feature");
-			commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-			git(cwd, "config", "branch.feature.pushRemote", "origin");
-			const abort = new AbortController();
-			const requests: PublicationProbeRequestFixture[] = [];
-			const stalled: PublicationProbeFixture = (request) => {
-				requests.push(request);
-				if (mode === "cancel") abort.abort();
-				return new Promise((_resolve, reject) => {
-					const cancel = () => {
-						const error = new Error("aborted publication probe");
-						error.name = "AbortError";
-						reject(error);
-					};
-					if (request.signal?.aborted) cancel();
-					else request.signal?.addEventListener("abort", cancel, { once: true });
-				});
-			};
-			let validates = 0;
-			const { controller } = runtime(fakeNative({ validate: async () => {
-				validates += 1;
-				return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() };
-			} }), stalled, 5);
-			const result = await controller.execute(mode, { operation: "validate", lineageId: "native-lineage", idempotencyKey: mode, command: "gh pr create --base main --head feature", input: "{}" }, mode === "cancel" ? abort.signal : undefined, undefined, context(cwd));
-			assert.equal((result.details as { authorization?: unknown }).authorization, undefined);
-			assert.equal(validates, 0);
-			assert.equal(requests.length, 1);
-			assert.deepEqual(requests[0]?.arguments.slice(0, 2), ["ls-remote", "--heads"]);
-			assert.equal(requests[0]?.file, "git");
-			assert.equal(requests[0]?.shell, false);
-			assert.equal(requests[0]?.timeoutMs, 5);
-		});
-	}
-});
-
-test("publication probe timeout and cancellation preserve typed fail-closed errors", async () => {
-	const testing = __testing as unknown as {
-		runPublicationProbeGit: (
-			cwd: string,
-			arguments_: readonly string[],
-			probe: PublicationProbeFixture,
-			timeoutMs: number,
-			signal?: AbortSignal,
-		) => Promise<string>;
-		publicationProbeErrorCode: { TIMEOUT: string; CANCELLED: string };
-	};
-	for (const mode of ["timeout", "cancel"] as const) {
-		const abort = new AbortController();
-		const stalled: PublicationProbeFixture = (request) => {
-			if (mode === "cancel") abort.abort();
-			return new Promise((_resolve, reject) => {
-				const cancel = () => {
-					const error = new Error("aborted publication probe");
-					error.name = "AbortError";
-					reject(error);
-				};
-				if (request.signal?.aborted) cancel();
-				else request.signal?.addEventListener("abort", cancel, { once: true });
-			});
-		};
-		await assert.rejects(
-			() => testing.runPublicationProbeGit("/repo", ["ls-remote", "--heads", "remote", "refs/heads/main"], stalled, 5, mode === "cancel" ? abort.signal : undefined),
-			(error: unknown) => error instanceof Error &&
-				error.name === "PublicationProbeError" &&
-				"code" in error &&
-				error.code === (mode === "cancel" ? testing.publicationProbeErrorCode.CANCELLED : testing.publicationProbeErrorCode.TIMEOUT),
-		);
-	}
-});
-
-test("native pre-push fails closed on remote disagreement and absent destinations", async (t) => {
-	const cwd = repository(t);
-	addBareRemote(t, cwd, "origin");
-	addBareRemote(t, cwd, "upstream");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	let calls = 0;
-	const { controller } = runtime(fakeNative({ validate: async () => {
-		calls += 1;
-		return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() };
-	} }));
-	git(cwd, "config", "branch.feature.pushRemote", "upstream");
-	const remoteMismatch = await controller.execute("remote-mismatch", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "remote", command: "git push origin feature:refs/heads/feature", input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((remoteMismatch.details as { authorization?: unknown }).authorization, undefined);
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const absent = await controller.execute("absent-destination", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "base", command: "git push origin feature:refs/heads/feature", input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((absent.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal((absent.details as { outcome?: string }).outcome, "native-publication-base-required");
-	assert.equal(calls, 0);
-});
-
-test("native lifecycle authorization detects pushurl, remote, HEAD, and advertised-base movement", async (t) => {
-	for (const movement of ["pushurl", "remote", "head", "advertised-base"] as const) {
-		await t.test(movement, async (t) => {
-			const cwd = repository(t);
-			const origin = addBareRemote(t, cwd, "origin");
-			const replacement = addBareRemote(t, cwd, "replacement");
-			git(cwd, "push", "origin", "main:refs/heads/feature");
-			git(cwd, "fetch", "origin", "feature");
-			git(cwd, "checkout", "-b", "feature");
-			commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-			git(cwd, "config", "branch.feature.pushRemote", "origin");
-			git(cwd, "config", "branch.feature.remote", "origin");
-			git(cwd, "config", "branch.feature.merge", "refs/heads/main");
-			if (movement === "advertised-base") git(cwd, "push", "origin", "feature:refs/heads/moved");
-			let calls = 0;
-			const { controller, toolCall } = runtime(fakeNative({ validate: async () => {
-				calls += 1;
-				if (calls === 1) {
-					if (movement === "pushurl") git(cwd, "config", "remote.origin.pushurl", replacement);
-					if (movement === "remote") git(cwd, "config", "branch.feature.pushRemote", "replacement");
-					if (movement === "head") git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "commit", "--allow-empty", "-m", "move head");
-					if (movement === "advertised-base") git(cwd, "--git-dir", origin, "update-ref", "refs/heads/feature", git(cwd, "rev-parse", "feature"));
-				}
-				const gateContext = nativeGateContext();
-				gateContext.raw.gate = "pre-push";
-				return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext };
-			} }));
-			const command = "git push origin feature:refs/heads/feature";
-			await controller.execute(`authorize-${movement}`, { operation: "validate", lineageId: "native-lineage", idempotencyKey: movement, command, input: "{}" }, undefined, undefined, context(cwd));
-			const result = await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean };
-			assert.equal(result.block, true);
-			assert.equal(calls, 1);
-		});
-	}
-});
-
-test("native adapter preserves ancestry-sensitive hidden, reverted, and empty delivery requests", async (t) => {
-	for (const shape of ["hidden", "reverted", "empty"] as const) {
-		await t.test(shape, async (t) => {
-			const cwd = repository(t);
-			addBareRemote(t, cwd, "origin");
-			git(cwd, "push", "origin", "main:refs/heads/feature");
-			git(cwd, "fetch", "origin", "feature");
-			git(cwd, "checkout", "-b", "feature");
-			if (shape === "empty") {
-				git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "commit", "--allow-empty", "-m", "empty delivery");
-			} else {
-				commitFile(cwd, "shape.ts", "export const shape = true;\n", `${shape} candidate`);
-				if (shape === "reverted") git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "revert", "--no-edit", "HEAD");
-				if (shape === "hidden") {
-					rmSync(join(cwd, "shape.ts"));
-					git(cwd, "add", "-A");
-					git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "commit", "-m", "hide prior tree delta");
-				}
-			}
-			git(cwd, "config", "branch.feature.pushRemote", "origin");
-			const requests: Array<{ flags?: readonly string[] }> = [];
-			const { controller } = runtime(fakeNative({ validate: async (request) => {
-				requests.push(request);
-				return { allowed: false, result: "scope-changed", action: "create-new-lineage", reason: "native checks the complete commit range", gateContext: nativeGateContext() };
-			} }));
-			await controller.execute(shape, { operation: "validate", lineageId: "native-lineage", idempotencyKey: shape, command: "git push origin feature:refs/heads/feature", input: "{}" }, undefined, undefined, context(cwd));
-			assert.deepEqual(requests[0]?.flags, ["--base-ref", "origin/feature"]);
-		});
-	}
-});
-
 test("controller forwards its AbortSignal to mutating native requests", async (t) => {
 	const cwd = repository(t);
 	const abort = new AbortController();
@@ -4181,328 +3367,6 @@ test("controller forwards its AbortSignal to mutating native requests", async (t
 	}));
 	await controller.execute("start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, abort.signal, undefined, context(cwd));
 	assert.equal(received, abort.signal);
-});
-
-test("production tool_call forwards Pi cancellation and enforces one bash-time deadline", async (t) => {
-	for (const mode of ["external-cancellation", "aggregate-deadline"] as const) {
-		await t.test(mode, async (t) => {
-			const cwd = repository(t);
-			const external = new AbortController();
-			let validations = 0;
-			let receivedSignal: AbortSignal | undefined;
-			const native = fakeNative({ validate: async (request) => {
-				validations += 1;
-				if (validations === 1) {
-					return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() };
-				}
-				receivedSignal = request.signal;
-				return await new Promise((_resolve, reject) => {
-					const cancel = () => {
-						const error = new Error("cancelled bash-time native validation");
-						error.name = "AbortError";
-						reject(error);
-					};
-					if (request.signal?.aborted) cancel();
-					else request.signal?.addEventListener("abort", cancel, { once: true });
-				});
-			} });
-			const { controller, toolCall } = runtime(native, undefined, undefined, 10);
-			const command = "git commit -m native";
-			const authorized = await controller.execute(mode, { operation: "validate", lineageId: "native-lineage", idempotencyKey: mode, command, input: "{}" }, undefined, undefined, context(cwd));
-			assert.notEqual((authorized.details as { authorization?: unknown }).authorization, undefined);
-			const pending = toolCall(
-				{ toolName: "bash", input: { command } },
-				context(cwd, mode === "external-cancellation" ? external.signal : undefined),
-			);
-			if (mode === "external-cancellation") external.abort();
-			// Hang guard only (issue #178): cancellation itself is deterministic —
-			// the fake native validation resolves solely when its signal aborts —
-			// so this race merely catches a cancellation that never propagates.
-			// 10s keeps that guarantee without racing loaded CI runners the way a
-			// 500ms wall-clock bound did.
-			const result = await Promise.race([
-				pending,
-				new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("production tool_call did not cancel within its aggregate deadline")), 10_000)),
-			]) as { block: boolean };
-			assert.equal(result.block, true);
-			assert.equal(receivedSignal?.aborted, true);
-			assert.equal(validations, 2);
-		});
-	}
-});
-
-test("production post-allow pre-push remote probes obey Pi cancellation and the bash-time deadline", async (t) => {
-	for (const mode of ["external-cancellation", "aggregate-deadline"] as const) {
-		await t.test(mode, async (t) => {
-			const cwd = repository(t);
-			const remote = addBareRemote(t, cwd, "origin");
-			git(cwd, "push", "origin", "main:refs/heads/feature");
-			git(cwd, "fetch", "origin", "feature");
-			git(cwd, "checkout", "-b", "feature");
-			commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-			git(cwd, "config", "branch.feature.pushRemote", "origin");
-
-			const countPath = join(cwd, ".git", "probe-count");
-			const stallPath = join(cwd, ".git", "stall-probe");
-			const uploadPack = join(cwd, ".git", "stall-upload-pack.sh");
-			writeFileSync(uploadPack, [
-				"#!/bin/sh",
-				`count_file=${JSON.stringify(countPath)}`,
-				`stall_file=${JSON.stringify(stallPath)}`,
-				"count=0",
-				'if [ -f "$count_file" ]; then read -r count < "$count_file"; fi',
-				'count=$((count + 1))',
-				'printf "%s\\n" "$count" > "$count_file"',
-				'if [ -f "$stall_file" ] && [ "$count" -eq 3 ]; then exec sleep 20; fi',
-				`exec git upload-pack ${JSON.stringify(remote)}`,
-				"",
-			].join("\n"), { mode: 0o755 });
-			git(cwd, "config", "protocol.ext.allow", "always");
-			git(cwd, "remote", "set-url", "origin", `ext::${uploadPack}`);
-
-			// Deadline layout (issue #178): a shared 150ms aggregate deadline raced
-			// the real probe/validate process spawns on loaded CI runners and could
-			// fire before the second native validation, so cancellation triggered at
-			// the wrong point and the test flaked.
-			// - external-cancellation: cancellation is driven deterministically by
-			//   external.abort() inside the second native validation; the aggregate
-			//   deadline (30s) and per-probe timeout (30s) are far above the elapsed
-			//   bound so neither can fire first.
-			// - aggregate-deadline: the 2s aggregate deadline is the only bound able
-			//   to end the stalled post-allow probe — the stall (20s) and per-probe
-			//   timeout (30s) are far larger — while still leaving generous headroom
-			//   over pre-deadline spawn overhead on slow runners.
-			const aggregateDeadlineMs = mode === "aggregate-deadline" ? 2_000 : 30_000;
-			const external = new AbortController();
-			let validations = 0;
-			const { controller, toolCall } = runtime(fakeNative({ validate: async () => {
-				validations += 1;
-				if (mode === "external-cancellation" && validations === 2) external.abort();
-				const gateContext = nativeGateContext();
-				gateContext.raw.gate = "pre-push";
-				return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext };
-			} }), undefined, 30_000, aggregateDeadlineMs);
-			const command = "git push origin feature:refs/heads/feature";
-			const authorized = await controller.execute(mode, { operation: "validate", lineageId: "native-lineage", idempotencyKey: mode, command, input: "{}" }, undefined, undefined, context(cwd));
-			assert.notEqual((authorized.details as { authorization?: unknown }).authorization, undefined);
-			writeFileSync(countPath, "0\n");
-			writeFileSync(stallPath, "stall\n");
-
-			const started = Date.now();
-			const result = await toolCall({ toolName: "bash", input: { command } }, interactiveContext(cwd, external.signal)) as { block: boolean; reason: string };
-			assert.equal(result.block, true);
-			// 10s sits far below the 20s stall and the 30s per-probe timeout, so
-			// finishing under it proves cancellation — external abort or the 2s
-			// aggregate deadline — ended the stalled probe, without racing
-			// CI-runner process-spawn variance the way the old 300ms bound did.
-			assert.ok(Date.now() - started < 10_000, "post-allow remote probe exceeded its cancellation deadline");
-			assert.equal(validations, 2, result.reason);
-		});
-	}
-});
-
-test("native deny, target drift, and bash-time errors never restore an authorization", async (t) => {
-	const cwd = repository(t);
-	const command = "git commit -m native";
-	const denied = runtime(fakeNative({
-		validate: async () => ({ allowed: false, result: "scope-changed", action: "create-new-lineage", reason: "denied", gateContext: nativeGateContext() }),
-	}));
-	const deniedResult = await denied.controller.execute("deny", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "key", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((deniedResult.details as { authorization?: unknown }).authorization, undefined);
-	assert.equal((await denied.toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-
-	let calls = 0;
-	const drifting = runtime(fakeNative({
-		validate: async () => {
-			calls += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext("native-lineage", "r1", calls === 1 ? "target" : "changed-target") };
-		},
-	}));
-	await drifting.controller.execute("allow", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "key", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((await drifting.toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-	assert.equal((await drifting.toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean }).block, true);
-	assert.equal(calls, 3, "a blocked gate is not consumed, so the retry performs one fresh fail-closed discovery");
-
-	const failing = runtime(fakeNative({
-		validate: async () => { throw new Error("native connection lost"); },
-	}));
-	const failure = await failing.controller.execute("error", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "key", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.equal((failure.details as { authorization?: unknown }).authorization, undefined);
-});
-
-test("maintainer release exception is native-first, exact, interactive, and one-shot", async (t) => {
-	const cwd = repository(t);
-	const origin = addBareRemote(t, cwd, "origin");
-	const head = git(cwd, "rev-parse", "HEAD");
-	git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "tag", "-a", "v2.1.5", "-m", "release", head);
-	const command = "git push origin v2.1.5";
-	const denied = (result: "invalidated" | "scope-changed" | "escalated" = "invalidated", action = "explicit-maintainer-action") => fakeNative({ validate: async () => {
-		const gateContext = nativeGateContext();
-		gateContext.raw.gate = "release";
-		return { allowed: false, result, action, reason: "release provenance predicate failed", gateContext };
-	} });
-	const evidence = nativeReleaseEvidence();
-	const { controller, toolCall } = runtime(denied(), queuedPublicationProbe({ [`${origin} refs/heads/main`]: head }));
-	const first = await controller.execute("exception-first", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "exception", command, input: JSON.stringify({ nativeRelease: evidence }) }, undefined, undefined, context(cwd));
-	const firstDetails = first.details as Record<string, unknown>;
-	const request = firstDetails.maintainer_exception_request as Record<string, unknown>;
-	assert.equal((firstDetails.result as Record<string, unknown>).result, "invalidated");
-	assert.equal(typeof request.request_hash, "string");
-	assert.match(String(request.challenge), /^AUTHORIZE RELEASE EXCEPTION /);
-	assert.equal((firstDetails as { authorization?: unknown }).authorization, undefined);
-
-	const accepted = { ...request, reason: "v2.1.5 incident acknowledged", accepted_predicates: request.failed_predicates };
-	for (const [name, exception] of [
-		["headless", accepted],
-		["wrong-hash", { ...accepted, request_hash: "wrong" }],
-		["wrong-challenge", { ...accepted, challenge: "wrong" }],
-	] as const) {
-		const rejected = await controller.execute(name, { operation: "validate", lineageId: "native-lineage", idempotencyKey: name, command, input: JSON.stringify({ nativeRelease: evidence, maintainer_exception: exception }) }, undefined, undefined, context(cwd));
-		assert.equal((rejected.details as Record<string, unknown>).exception_authorized, false, name);
-		assert.equal(((rejected.details as Record<string, unknown>).result as Record<string, unknown>).result, "invalidated", name);
-	}
-	const uiDenied = await controller.execute("exception-ui-denied", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "ui-denied", command, input: JSON.stringify({ nativeRelease: evidence, maintainer_exception: accepted }) }, undefined, undefined, { ...interactiveContext(cwd), ui: { confirm: async () => false } } as ExtensionContext);
-	assert.equal((uiDenied.details as Record<string, unknown>).exception_authorized, false);
-	const authorized = await controller.execute("exception-accepted", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "accepted", command, input: JSON.stringify({ nativeRelease: evidence, maintainer_exception: accepted }) }, undefined, undefined, interactiveContext(cwd));
-	assert.equal((authorized.details as Record<string, unknown>).exception_authorized, false);
-	assert.equal((await toolCall({ toolName: "bash", input: { command } }, interactiveContext(cwd)) as { block: boolean }).block, true);
-
-	for (const [result, action] of [["scope-changed", "create-new-lineage"], ["escalated", "stop"]] as const) {
-		const ineligible = runtime(denied(result, action), queuedPublicationProbe({ [`${origin} refs/heads/main`]: head }));
-		const response = await ineligible.controller.execute(result, { operation: "validate", lineageId: "native-lineage", idempotencyKey: result, command, input: JSON.stringify({ nativeRelease: evidence }) }, undefined, undefined, interactiveContext(cwd));
-		assert.equal((response.details as Record<string, unknown>).maintainer_exception_request, undefined);
-	}
-});
-
-test("release exception stale bindings and audit evidence fail closed", async (t) => {
-	const setup = (t: test.TestContext) => {
-		const cwd = repository(t);
-		const origin = addBareRemote(t, cwd, "origin");
-		const head = git(cwd, "rev-parse", "HEAD");
-		git(cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "tag", "-a", "v2.1.5", "-m", "release", head);
-		const rows: Record<string, string> = { [`${origin} refs/heads/main`]: head };
-		const { controller, toolCall } = runtime(fakeNative({ validate: async () => {
-			const gateContext = nativeGateContext();
-			gateContext.raw.gate = "release";
-			return { allowed: false, result: "invalidated", action: "explicit-maintainer-action", reason: "release provenance predicate failed", gateContext };
-		} }), queuedPublicationProbe(rows));
-		const command = "git push origin v2.1.5";
-		const request = async () => {
-			const response = await controller.execute("request", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "request", command, input: JSON.stringify({ nativeRelease: nativeReleaseEvidence() }) }, undefined, undefined, context(cwd));
-			return (response.details as Record<string, unknown>).maintainer_exception_request as Record<string, unknown>;
-		};
-		const accept = (request: Record<string, unknown>) => ({ ...request, reason: "incident acknowledged", accepted_predicates: request.failed_predicates });
-		const authorize = async (request: Record<string, unknown>, evidence = nativeReleaseEvidence()) => await controller.execute("authorize", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "authorize", command, input: JSON.stringify({ nativeRelease: evidence, maintainer_exception: accept(request) }) }, undefined, undefined, interactiveContext(cwd));
-		return { cwd, origin, head, rows, controller, toolCall, command, request, authorize };
-	};
-
-	await t.test("response audit is explicitly non-durable and complete", async (t) => {
-		const fixture = setup(t);
-		const request = await fixture.request();
-		const audit = (request as { audit?: Record<string, unknown> }).audit!;
-		assert.equal(audit.durable_audit, false);
-		assert.equal(audit.command, fixture.command);
-		assert.deepEqual(audit.target, request.target);
-		assert.deepEqual(audit.native_denial, request.native_denial);
-		assert.equal(audit.request_hash, request.request_hash);
-		assert.deepEqual(audit.accepted_predicates, request.accepted_predicates);
-	});
-
-	await t.test("origin/main, tag object, and peeled target movement deny stale authorization", async (t) => {
-		for (const movement of ["remote", "tag-object", "peeled-target"] as const) await t.test(movement, async (t) => {
-			const fixture = setup(t);
-			const request = await fixture.request();
-			await fixture.authorize(request);
-			if (movement === "remote") {
-				const next = git(fixture.cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "--git-dir", fixture.origin, "commit-tree", `${fixture.head}^{tree}`, "-m", "advance");
-				git(fixture.cwd, "--git-dir", fixture.origin, "update-ref", "refs/heads/main", next);
-				fixture.rows[`${fixture.origin} refs/heads/main`] = next;
-			} else if (movement === "tag-object") {
-				git(fixture.cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "tag", "-fa", "v2.1.5", "-m", "moved object", fixture.head);
-			} else {
-				const next = git(fixture.cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "commit-tree", `${fixture.head}^{tree}`, "-m", "moved target");
-				git(fixture.cwd, "-c", "user.name=Native Test", "-c", "user.email=native@example.invalid", "tag", "-fa", "v2.1.5", "-m", "moved target", next);
-			}
-			assert.equal((await fixture.toolCall({ toolName: "bash", input: { command: fixture.command } }, interactiveContext(fixture.cwd)) as { block: boolean }).block, true);
-		});
-	});
-
-	await t.test("changed evidence and ordinary branch create cannot request an exception", async (t) => {
-		const fixture = setup(t);
-		const request = await fixture.request();
-		const changed = { ...nativeReleaseEvidence(), release_generated: "/evidence/changed.json" };
-		const stale = await fixture.authorize(request, changed);
-		assert.equal((stale.details as Record<string, unknown>).exception_authorized, false);
-		const branch = await fixture.controller.execute("branch", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "branch", command: "git push origin main:refs/heads/release", input: "{}" }, undefined, undefined, interactiveContext(fixture.cwd));
-		assert.equal((branch.details as Record<string, unknown>).maintainer_exception_request, undefined);
-	});
-});
-
-test("controller exposes every structured native denial recovery action from exit code 1", async (t) => {
-	const cwd = repository(t);
-	const published = JSON.parse(readFileSync(join(import.meta.dirname, "fixtures", "native-review-cli", "v2.1.3", "validate-deny.json"), "utf8")) as Record<string, unknown>;
-	for (const [gateResult, action] of [
-		["scope-changed", "create-new-lineage"],
-		["invalidated", "explicit-maintainer-action"],
-		["escalated", "stop"],
-	] as const) {
-		const native = new NativeReviewCliV214(async (request) => ({
-			stdout: request.arguments[0] === "version" ? "gentle-ai 2.1.4\n" : JSON.stringify({ ...published, result: gateResult, action, context: { ...(published.context as Record<string, unknown>), gate: "pre-commit" } }),
-			stderr: request.arguments[0] === "version" ? "" : `Error: review gate denied: ${gateResult}\n`,
-			exitCode: request.arguments[0] === "version" ? 0 : 1,
-			signal: null,
-			timedOut: false,
-			outputLimitExceeded: false,
-		}));
-		const { controller } = runtime(native);
-		const response = await controller.execute(`deny-${gateResult}`, { operation: "validate", lineageId: "issue136-contract-runtime", idempotencyKey: gateResult, command: "git commit -m denied", input: "{}" }, undefined, undefined, context(cwd));
-		assert.deepEqual((response.details as { result: { result: string; allowed: boolean; action: string } }).result, {
-			allowed: false,
-			result: gateResult,
-			action,
-			reason: published.reason,
-			context: { ...(published.context as Record<string, unknown>), gate: "pre-commit" },
-		});
-		assert.equal((response.details as { authorization?: unknown }).authorization, undefined);
-	}
-});
-
-test("controller preserves every historical response-schema empty-context pre-PR denial without authorization", async (t) => {
-	const cwd = repository(t);
-	addBareRemote(t, cwd, "origin");
-	git(cwd, "checkout", "-b", "feature");
-	commitFile(cwd, "feature.ts", "export const feature = true;\n", "feature");
-	git(cwd, "push", "origin", "feature:refs/heads/feature");
-	git(cwd, "config", "branch.feature.pushRemote", "origin");
-	const publishedText = readFileSync(join(import.meta.dirname, "fixtures", "native-review-cli", "v2.1.3", "validate-deny-empty-context.json"), "utf8");
-	const published = JSON.parse(publishedText) as Record<string, unknown>;
-	for (const [gateResult, action] of [
-		["scope-changed", "create-new-lineage"],
-		["invalidated", "explicit-maintainer-action"],
-		["escalated", "stop"],
-	] as const) {
-		const body = { ...published, result: gateResult, action };
-		const native = new NativeReviewCliV214(async (request) => ({
-			stdout: request.arguments[0] === "version"
-				? "gentle-ai 2.1.4\n"
-				: gateResult === "invalidated" ? publishedText : JSON.stringify(body),
-			stderr: request.arguments[0] === "version" ? "" : `Error: review gate denied: ${gateResult}\n`,
-			exitCode: request.arguments[0] === "version" ? 0 : 1,
-			signal: null,
-			timedOut: false,
-			outputLimitExceeded: false,
-		}));
-		const { controller } = runtime(native);
-		const response = await controller.execute(`empty-context-${gateResult}`, { operation: "validate", lineageId: "native-lineage", idempotencyKey: `empty-context-${gateResult}`, command: "gh pr create --base main --head feature", input: "{}" }, undefined, undefined, context(cwd));
-		assert.deepEqual((response.details as { result: unknown }).result, {
-			allowed: false,
-			result: gateResult,
-			action,
-			reason: published.reason,
-			context: published.context,
-		});
-		assert.equal((response.details as { authorization?: unknown }).authorization, undefined);
-	}
 });
 
 test("parallel 4R dispatch receives readable and compact changed scopes before any actor", async (t) => {
@@ -4520,7 +3384,7 @@ test("parallel 4R dispatch receives readable and compact changed scopes before a
 	const lenses = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
 	const { controller, toolCall } = runtime(fakeNative({
 		start: async () => ({ lineageId: "c4-compact", state: "reviewing", riskLevel: "high", selectedLenses: lenses, changedFiles: 45, changedLines: 45, correctionBudget: 23, action: "created", lensesRequired: true }),
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 	await controller.execute("c4-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const dispatch = { agents: [...lenses], task: "Review compact scope", mode: "task" };
 	assert.equal(await toolCall({ toolName: "subagent_run", input: dispatch }, context(cwd)), undefined, "compact scope would launch the 4R actors");
@@ -4540,7 +3404,7 @@ test("parallel 4R dispatch receives readable and compact changed scopes before a
 	const oversizedViews = new CandidateViewRegistry();
 	const oversized = runtime(fakeNative({
 		start: async () => ({ lineageId: "c4-oversized", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 80, changedLines: 80, correctionBudget: 40, action: "created", lensesRequired: true }),
-	}), undefined, undefined, undefined, oversizedViews);
+	}), undefined, oversizedViews);
 	await oversized.controller.execute("c4-oversized-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(cwd));
 	const oversizedDispatch = { agent: "review-reliability", task: "Review oversized scope", mode: "task" };
 	assert.equal(await oversized.toolCall({ toolName: "subagent_run", input: oversizedDispatch }, context(cwd)), undefined, "a compressible oversized scope reaches the actor through its compact manifest");
@@ -4940,7 +3804,7 @@ test("RECOVER rechecks a committed range against its frozen base instead of the 
 			recovers.push(request as Record<string, unknown>);
 			return { record: { schema: "gentle-ai.review-recovery/v1" } };
 		},
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 
 	await controller.execute("committed-range-start", {
 		operation: "start",
@@ -4958,16 +3822,10 @@ test("RECOVER rechecks a committed range against its frozen base instead of the 
 	candidateViews.cleanupTerminal("native-lineage", "approved");
 });
 
-test("dangerous push confirmation precedes mode reconsult outside a repository", async (t) => {
+test("dangerous push confirmation stops before repository inspection outside a repository", async (t) => {
 	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-non-repository-push-"));
 	t.after(() => rmSync(cwd, { recursive: true, force: true }));
-	let modeCalls = 0;
-	const { toolCall } = runtime(fakeNative({
-		reviewMode: async () => {
-			modeCalls += 1;
-			throw new Error("mode lookup must not precede dangerous-command confirmation");
-		},
-	}));
+	const { toolCall } = runtime(fakeNative({}));
 	const interactive = interactiveContext(cwd);
 	const deniedContext = { ...interactive, ui: { ...interactive.ui, confirm: async () => false } };
 	const result = await toolCall(
@@ -4976,125 +3834,13 @@ test("dangerous push confirmation precedes mode reconsult outside a repository",
 	) as { block: boolean; reason: string };
 	assert.equal(result.block, true);
 	assert.match(result.reason, /not confirmed/);
-	assert.equal(modeCalls, 0);
-});
-
-test("out-of-band review-mode disable discards stale lifecycle authorization and proceeds organically", async (t) => {
-	const cwd = repository(t);
-	let effective: "on" | "off" = "on";
-	let validations = 0;
-	const command = "git commit -m native";
-	const { controller, toolCall } = runtime(fakeNative({
-		reviewMode: async () => ({ operation: "status", scope: "both", status: { global: effective, cloneLocal: "", effective, source: effective === "off" ? "global" : "default" } }),
-		validate: async () => { validations += 1; return { allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() }; },
-		targetStatus: async () => targetStatusFixture({ lineageId: "native-lineage", baseTree: git(cwd, "rev-parse", "HEAD^{tree}"), currentCandidateTree: git(cwd, "write-tree"), paths: [] }),
-	}));
-	const authorized = await controller.execute("authorize-before-disable", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "disable-race", command, input: "{}" }, undefined, undefined, context(cwd));
-	assert.notEqual((authorized.details as Record<string, unknown>).authorization, undefined);
-	effective = "off";
-	assert.equal(await toolCall({ toolName: "bash", input: { command } }, context(cwd)), undefined);
-	assert.equal(validations, 1, "disabled organic delivery must not reuse or revalidate stale review authority");
-});
-
-test("RDD-off commit and push canonicalize a git -C linked-worktree target before native mode reconsult", async (t) => {
-	const sessionCwd = repository(t);
-	const worktreeParent = mkdtempSync(join(tmpdir(), "gentle-pi-lifecycle-worktrees-"));
-	const worktree = join(worktreeParent, "worktree B");
-	const worktreeAlias = join(worktreeParent, "worktree B alias");
-	git(sessionCwd, "worktree", "add", "-b", "issue-246-worktree", worktree);
-	const windowsDrive = /^([A-Za-z]):[\\/](.*)$/.exec(worktree);
-	const worktreeSpelling = process.platform === "win32"
-		? `/${windowsDrive?.[1]?.toLowerCase()}/${windowsDrive?.[2]?.replaceAll("\\", "/")}`
-		: worktreeAlias;
-	if (process.platform === "win32") assert.ok(windowsDrive, "Windows worktree must have a drive-qualified path");
-	else symlinkSync(worktree, worktreeAlias, "dir");
-	t.after(() => {
-		try { git(sessionCwd, "worktree", "remove", "--force", worktree); } catch {}
-		rmSync(worktreeParent, { recursive: true, force: true });
-	});
-	const canonicalWorktree = realpathSync(worktree);
-	const commonDirectory = (cwd: string): string => realpathSync(resolve(cwd, git(cwd, "rev-parse", "--git-common-dir")));
-	assert.equal(commonDirectory(sessionCwd), commonDirectory(canonicalWorktree));
-	const parsed = __testing.resolveReviewLifecycleCommand(`git -C "${worktreeSpelling}" commit -m "issue 246"`, sessionCwd);
-	assert.deepEqual(parsed?.gitGlobalArgs, ["-C", worktreeSpelling], "cwd canonicalization must preserve the exact typed Git selector");
-
-	const nativeCalls: Array<{ arguments: readonly string[]; cwd: string }> = [];
-	const native = new NativeReviewCliV214(async (request) => {
-		nativeCalls.push({ arguments: request.arguments, cwd: request.cwd });
-		if (request.cwd !== canonicalWorktree) throw new Error(`native process cwd was not canonical: ${request.cwd}`);
-		if (request.arguments[0] === "version") {
-			return { stdout: "gentle-ai 2.2.2\n", stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
-		}
-		if (request.arguments[0] === "review" && request.arguments[1] === "mode") {
-			return {
-				stdout: JSON.stringify({
-					schema: "gentle-ai.review-mode/v1",
-					operation: "status",
-					scope: "both",
-					status: { schema: "gentle-ai.rdd-mode-status/v1", global: "off", clone_local: "off", effective: "off", source: "clone_local" },
-				}),
-				stderr: "",
-				exitCode: 0,
-				signal: null,
-				timedOut: false,
-				outputLimitExceeded: false,
-			};
-		}
-		throw new Error(`unexpected native review operation: ${request.arguments.join(" ")}`);
-	});
-	const { toolCall } = runtime(native);
-	for (const command of [
-		`git -C "${worktreeSpelling}" commit -m "issue 246"`,
-		`git -C "${worktreeSpelling}" push origin issue-246-worktree`,
-	]) {
-		assert.equal(await toolCall({ toolName: "bash", input: { command } }, interactiveContext(sessionCwd)), undefined);
-	}
-	assert.equal(nativeCalls.length, 4);
-	assert.equal(nativeCalls.every((call) => call.cwd === canonicalWorktree), true);
-	assert.deepEqual(nativeCalls.filter((call) => call.arguments[0] === "review").map((call) => call.arguments), [
-		["review", "mode", "status", "--cwd", canonicalWorktree, "--json"],
-		["review", "mode", "status", "--cwd", canonicalWorktree, "--json"],
-	]);
-	assert.equal(nativeCalls.some((call) => call.arguments.includes("validate")), false);
-});
-
-test("git -C linked-worktree lifecycle commands remain fail-closed when mode reconsult genuinely fails", async (t) => {
-	const sessionCwd = repository(t);
-	const { toolCall } = runtime(fakeNative({ reviewMode: async () => { throw new Error("mode unavailable"); } }));
-	for (const command of ["git -C . commit -m failure", "git -C . push origin main"]) {
-		const result = await toolCall({ toolName: "bash", input: { command } }, interactiveContext(sessionCwd)) as { block: boolean; reason: string };
-		assert.equal(result.block, true);
-		assert.match(result.reason, /could not reconsult review mode and failed closed/);
-	}
-});
-
-test("successful /gentle:review-mode disable clears pending authorizations even after mode is re-enabled", async (t) => {
-	const cwd = repository(t);
-	let effective: "on" | "off" = "on";
-	const command = "git commit -m native";
-	const { controller, toolCall, commands } = runtime(fakeNative({
-		reviewMode: async (request) => {
-			if (request.operation === "disable") effective = "off";
-			if (request.operation === "enable") effective = "on";
-			return { operation: request.operation, scope: "clone", status: { global: "", cloneLocal: effective === "off" ? "off" : "", effective, source: effective === "off" ? "clone_local" : "default" } };
-		},
-		validate: async () => ({ allowed: true, result: "allow", action: "continue", reason: "ok", gateContext: nativeGateContext() }),
-		targetStatus: async () => targetStatusFixture({ lineageId: "native-lineage", baseTree: git(cwd, "rev-parse", "HEAD^{tree}"), currentCandidateTree: git(cwd, "write-tree"), paths: [] }),
-	}));
-	await controller.execute("authorize-before-command-disable", { operation: "validate", lineageId: "native-lineage", idempotencyKey: "command-disable", command, input: "{}" }, undefined, undefined, context(cwd));
-	const commandContext = { ...interactiveContext(cwd), ui: { confirm: async () => true, notify: () => {} } } as unknown as ExtensionContext;
-	await commands.get("gentle:review-mode")!.handler("disable", commandContext);
-	await commands.get("gentle:review-mode")!.handler("enable", commandContext);
-	const result = await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean; reason: string };
-	assert.equal(result.block, true);
-	assert.match(result.reason, /receipt consumption failed closed/, "re-enabled delivery must perform fresh receipt discovery rather than reuse the pre-disable authorization");
 });
 
 function gitStdin(cwd: string, arguments_: readonly string[], input: string): string {
 	return execFileSync("git", [...arguments_], { cwd, encoding: "utf8", input }).trim();
 }
 
-test("large repository end-to-end: tiny candidate diff reaches START, reviewer dispatch, FINALIZE, and the validation delivery gate", async (t) => {
+test("large repository end-to-end: tiny candidate diff reaches START, reviewer dispatch, and FINALIZE", async (t) => {
 	// Build a genuinely large synthetic repository (5000 unchanged entries) from a single
 	// blob via `git mktree`, avoiding thousands of per-file filesystem writes/subprocesses.
 	// The candidate diff is exactly one modified entry — the smallest review scope — so the
@@ -5126,7 +3872,6 @@ test("large repository end-to-end: tiny candidate diff reaches START, reviewer d
 	const lineageId = "large-repo-e2e";
 	let starts = 0;
 	let finalizes = 0;
-	let validates = 0;
 	let finalizeRoot: string | undefined;
 	const { controller, toolCall } = runtime(fakeNative({
 		start: async () => {
@@ -5138,25 +3883,28 @@ test("large repository end-to-end: tiny candidate diff reaches START, reviewer d
 			finalizeRoot = request.cwd;
 			return { lineageId, state: "approved", action: "approved", storeRevision: "r1" };
 		},
-		validate: async () => {
-			validates += 1;
-			return { allowed: true, result: "allow", action: "continue", reason: "native receipt matches the frozen large-repo candidate", gateContext: nativeGateContext(lineageId, "r1", candidateTree) };
-		},
 		targetStatus: async (request) => {
 			if (request.lineageId === undefined) return candidateStartTargetStatus(request);
-			const statusCandidate = new CandidateViewRegistry().create({ contributorRoot: request.cwd, baseRef: baseCommit });
-			try {
-				return targetStatusFixture({ lineageId, baseTree: statusCandidate.baseTree, currentCandidateTree: statusCandidate.candidateTree, paths: statusCandidate.paths });
-			} finally {
-				statusCandidate.cleanup();
-			}
+			return candidateStartTargetStatus(request, {
+				baseRef: baseCommit,
+				status: (candidate) => targetStatusFixture({
+					lineageId,
+					baseTree: candidate.baseTree,
+					currentCandidateTree: candidate.candidateTree,
+					paths: candidate.paths,
+					projection: request.projection ?? "workspace",
+					intendedUntracked: request.intendedUntracked,
+				}),
+			});
 		},
-	}), undefined, undefined, undefined, candidateViews);
+	}), undefined, candidateViews);
 
 	// START binds the frozen candidate view for the large repository.
 	const start = await controller.execute("large-repo-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef: baseCommit, committedOnly: true }) }, undefined, undefined, context(cwd));
-	assert.equal(starts, 1);
-	assert.equal((start.details as { result: { lineage_id: string } }).result.lineage_id, lineageId);
+	const startDetails = start.details as { result?: { lineage_id: string } };
+	assert.ok(startDetails.result, `START must succeed before dispatch and FINALIZE: ${JSON.stringify(start.details)}`);
+	assert.equal(starts, 1, `native START count: ${starts}; details: ${JSON.stringify(start.details)}`);
+	assert.equal(startDetails.result.lineage_id, lineageId);
 	const frozen = candidateViews.resolveForLens(lineageId, "review-risk");
 	try {
 		// Immutable candidate identity: the frozen view binds the exact synthetic trees.
@@ -5188,22 +3936,13 @@ test("large repository end-to-end: tiny candidate diff reaches START, reviewer d
 
 		// FINALIZE mutates against the frozen candidate root, not the contributor working directory.
 		const finalize = await controller.execute("large-repo-finalize", { operation: "finalize", lineageId, input: JSON.stringify({}) }, undefined, undefined, context(cwd));
-		assert.equal((finalize.details as { result: { state: string } }).result.state, "approved");
+		const finalizeDetails = finalize.details as { result?: { state: string } };
+		assert.ok(finalizeDetails.result, `FINALIZE must succeed after START: ${JSON.stringify({ started: start.details, starts, finalized: finalize.details })}`);
+		assert.equal(finalizeDetails.result.state, "approved");
 		assert.equal(finalizes, 1);
 		assert.notEqual(finalizeRoot, cwd);
 		assert.equal(finalizeRoot, frozen.root);
 
-		// Validation delivery gate: stage the frozen candidate tree and authorize delivery.
-		git(cwd, "read-tree", candidateTree);
-		const command = "git commit -m large-repo-delivery";
-		const validated = await controller.execute("large-repo-validate", { operation: "validate", lineageId, idempotencyKey: "large-repo-delivery", command, input: "{}" }, undefined, undefined, context(cwd));
-		assert.ok(validates >= 1);
-		assert.notEqual((validated.details as { authorization?: unknown }).authorization, undefined);
-		assert.equal((validated.details as { result?: { allowed?: boolean } }).result?.allowed, true);
-		// The delivery gate allows the authorized command exactly once; replay is blocked.
-		assert.equal(await toolCall({ toolName: "bash", input: { command } }, interactiveContext(cwd)), undefined);
-		const replay = await toolCall({ toolName: "bash", input: { command } }, context(cwd)) as { block: boolean };
-		assert.equal(replay.block, true);
 	} finally {
 		frozen.cleanup();
 	}
@@ -5320,7 +4059,7 @@ test("correction evidence capture executes the collect slot's rendered submissio
 					finalizes += 1;
 					return { lineageId: beforeCapture.authority!.lineageId, state: "approved", action: "approved", storeRevision: "r-final" };
 				},
-			} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+			} as unknown as Partial<NativeReviewCli>), undefined, new CandidateViewRegistry());
 			const validation = outcome === "passed" ? {
 				request_hash: "9".repeat(64), correction_ids: [],
 				original_criteria: { passed: true, evidence: ["acceptance passes"] },
@@ -5389,7 +4128,7 @@ test("ordinary final verification at validating captures evidence through the sl
 			transitions.push(request.argumentTokens);
 			return { lineageId: "final-verification-slot", state: "approved", action: "terminal", storeRevision: "r2", receiptPath: "/opaque/receipt" };
 		},
-	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	} as unknown as Partial<NativeReviewCli>), undefined, new CandidateViewRegistry());
 	const result = await controller.execute("final-verification-slot", {
 		operation: "finalize",
 		lineageId: "final-verification-slot",
@@ -5521,7 +4260,7 @@ test("correction plan forecast executes the collect slot's rendered finalize sub
 			submissions.push(request);
 			return { lineageId: "plan-submission", state: "correction_required", action: "continue the current review state", storeRevision: "r-plan" };
 		},
-	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	} as unknown as Partial<NativeReviewCli>), undefined, new CandidateViewRegistry());
 	const planned = await controller.execute("plan-submission", {
 		operation: "finalize",
 		lineageId: "plan-submission",
@@ -5563,41 +4302,42 @@ function bindTargetedValidationSubmission(status: ReviewStatusV3): ReviewStatusV
 			`--request-hash=${status.validationRequest!.requestHash}`,
 			`--repository-context=${EVIDENCE_SLOT_REPOSITORY_CONTEXT}`,
 			"--validation={{value}}",
+			"--captured-evidence=true",
 		],
 		value: { slot: "validation", domain: "artifact_path_or_stdin", substitutionLocation: 6 },
 	};
 	return status;
 }
 
-test("targeted validation executes the collect slot's rendered finalize submission tokens verbatim", async (t) => {
+test("validation-only targeted validation executes the collect slot's rendered finalize submission tokens verbatim", async (t) => {
 	const cwd = repository(t);
+	commitFile(cwd, "unrelated.ts", "export const unrelated = false;\n", "add unrelated");
 	writeFileSync(join(cwd, "app.ts"), "export const validated = true;\n");
+	writeFileSync(join(cwd, "unrelated.ts"), "export const unrelated = true;\n");
 	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd });
-	const beforeCapture = bindEvidenceSubmissionCollection(targetStatusFixture({
+	const targeted = bindTargetedValidationSubmission(targetStatusFixture({
 		lineageId: "validation-submission",
 		authorityState: "correction_required",
 		baseTree: frozen.baseTree,
 		currentCandidateTree: frozen.candidateTree,
 		paths: frozen.paths,
 	}));
-	const afterCapture = bindTargetedValidationSubmission(targetStatusFixture({
-		lineageId: "validation-submission",
-		authorityState: "validating",
-		baseTree: frozen.baseTree,
-		currentCandidateTree: frozen.candidateTree,
-		paths: frozen.paths,
-	}));
-	const expectedTokens = (afterCapture.nextTransition!.collect!.inputs[0]! as { submissionDescriptor: { argumentTokens: readonly string[] } }).submissionDescriptor.argumentTokens;
+	(targeted.raw as Record<string, unknown>).schema = "gentle-ai.review-integration.status/v5";
+	targeted.validationRequest!.correctionPaths = ["app.ts"];
+	targeted.validationRequest!.correctionPathsDigest = `sha256:${"f".repeat(64)}`;
+	const expectedTokens = (targeted.nextTransition!.collect!.inputs[0]! as { submissionDescriptor: { argumentTokens: readonly string[] } }).submissionDescriptor.argumentTokens;
+	const selection = { untrackedScope: "select" as const, expectedUntrackedInventory: `sha256:${"e".repeat(64)}`, intendedUntracked: ["selected-a.ts"] };
 	frozen.cleanup();
+	const statusRequests: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
 	const legacyFinalizes: Array<Record<string, unknown>> = [];
 	const submissions: Array<Record<string, unknown>> = [];
-	let statuses = 0;
+	let captures = 0;
 	const { controller } = runtime(fakeNative({
-		targetStatus: async () => {
-			statuses += 1;
-			return statuses === 1 ? beforeCapture : afterCapture;
+		targetStatus: async (request) => {
+			statusRequests.push(request);
+			return targeted;
 		},
-		captureEvidenceSubmission: async () => capturedSlotEvidence(beforeCapture, "passed", "7"),
+		captureEvidence: async () => { captures += 1; throw new Error("targeted validation must not capture evidence"); },
 		finalize: async (request) => {
 			legacyFinalizes.push(request as unknown as Record<string, unknown>);
 			throw new Error("misbound validation: the collect slot's rendered finalize submission tokens were bypassed");
@@ -5606,31 +4346,44 @@ test("targeted validation executes the collect slot's rendered finalize submissi
 			submissions.push(request);
 			return { lineageId: "validation-submission", state: "approved", action: "approved", storeRevision: "r-approved" };
 		},
-	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	} as unknown as Partial<NativeReviewCli>), undefined, new CandidateViewRegistry());
+	await controller.execute("validation-submission-selection", { operation: "status", lineageId: "validation-submission", input: JSON.stringify(selection) }, undefined, undefined, context(cwd));
+	const validation = {
+		request_hash: "9".repeat(64), correction_ids: [],
+		original_criteria: { passed: true, evidence: ["acceptance passes"] },
+		correction_regression: { passed: true, evidence: ["regression passes"] },
+		fix_caused_findings: [], follow_ups: [],
+	};
 	const completed = await controller.execute("validation-submission", {
-		operation: "finalize",
-		lineageId: "validation-submission",
-		input: JSON.stringify({
-			final_evidence: "evidence: passed",
-			final_verification_outcome: "passed",
-			validation: {
-				request_hash: "9".repeat(64), correction_ids: [],
-				original_criteria: { passed: true, evidence: ["acceptance passes"] },
-				correction_regression: { passed: true, evidence: ["regression passes"] },
-				fix_caused_findings: [], follow_ups: [],
-			},
-		}),
+		operation: "finalize", lineageId: "validation-submission", input: JSON.stringify({ validation }),
 	}, undefined, undefined, context(cwd));
 	const details = completed.details as Record<string, unknown>;
-	assert.deepEqual(legacyFinalizes, [], "the legacy reconstructed --validation argv must never run when the slot renders submission tokens");
+	assert.deepEqual(legacyFinalizes, [], "the direct native finalize fallback must not bypass the rendered validation submission");
+	assert.equal(captures, 0, "validation-only finalize must not capture evidence");
 	assert.equal(submissions.length, 1);
 	assert.deepEqual(submissions[0]!.argumentTokens, expectedTokens, "the provider-rendered submission tokens must be passed verbatim, in provider order");
+	assert.equal(submissions[0]!.cwd, cwd, "the rendered validation submission runs from the canonical workspace root");
 	assert.equal(submissions[0]!.valueSubstitutionLocation, 6);
 	const staged = JSON.parse(String(submissions[0]!.valueDocument)) as Record<string, unknown>;
-	assert.equal(staged.targeted_validation_request_hash, afterCapture.validationRequest!.requestHash);
-	assert.equal(staged.correction_target_identity, afterCapture.validationRequest!.correctionTargetIdentity);
+	assert.equal(staged.targeted_validation_request_hash, targeted.validationRequest!.requestHash);
+	assert.equal(staged.correction_target_identity, targeted.validationRequest!.correctionTargetIdentity);
 	assert.deepEqual(staged.original_criteria, { passed: true, evidence: ["acceptance passes"] });
+	assert.deepEqual(statusRequests.map(({ untrackedScope, expectedUntrackedInventory, intendedUntracked }) => ({ untrackedScope, expectedUntrackedInventory, intendedUntracked })), [selection, selection, selection]);
+	assert.equal(statusRequests[0]!.cwd, cwd);
+	assert.equal(statusRequests[2]!.cwd, cwd);
 	assert.equal((details.result as { state?: string } | undefined)?.state, "approved");
+	for (const correctionPaths of [[], ["outside.ts"]] as const) {
+		targeted.validationRequest!.correctionPaths = correctionPaths;
+		const rejected = await controller.execute(`validation-submission-${correctionPaths.length}`, {
+			operation: "finalize", lineageId: "validation-submission", input: JSON.stringify({ validation }),
+		}, undefined, undefined, context(cwd));
+		assert.equal((rejected.details as { outcome?: string }).outcome, "native-operation-failed");
+	}
+	assert.equal(submissions.length, 1, "invalid correction paths fail before native mutation");
+	assert.deepEqual(legacyFinalizes, []);
+	assert.equal(captures, 0);
+	await controller.execute("validation-submission-terminal-clear", { operation: "status", lineageId: "validation-submission" }, undefined, undefined, context(cwd));
+	assert.deepEqual(statusRequests.at(-1), { cwd, lineageId: "validation-submission" });
 });
 
 // Live smoke root cause (2026-08-16, dev binary 2.4.0-main): status/v5 mints
@@ -5677,16 +4430,28 @@ test("status/v5 finalize lane rebinds negotiated status to the workspace root be
 	const expectedEvidenceTokens = workspaceBefore.nextTransition!.collect!.inputs[0]!.submissionDescriptor!.argumentTokens;
 	const expectedValidationTokens = (workspaceAfter.nextTransition!.collect!.inputs[0]! as { submissionDescriptor: { argumentTokens: readonly string[] } }).submissionDescriptor.argumentTokens;
 	frozen.cleanup();
+	const selection = {
+		untrackedScope: "select" as const,
+		expectedUntrackedInventory: `sha256:${"e".repeat(64)}`,
+		intendedUntracked: ["selected-b.ts", "selected-a.ts"],
+	};
 	const statusRoots: string[] = [];
+	const statusRequests: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
 	const evidenceSubmissions: Array<Record<string, unknown>> = [];
 	const finalizeSubmissions: Array<Record<string, unknown>> = [];
 	let workspaceStatuses = 0;
+	let terminal = false;
 	const { controller } = runtime(fakeNative({
 		targetStatus: async (request) => {
 			statusRoots.push(request.cwd);
+			statusRequests.push(request);
+			const selected = request.untrackedScope === selection.untrackedScope &&
+				request.expectedUntrackedInventory === selection.expectedUntrackedInventory &&
+				JSON.stringify(request.intendedUntracked) === JSON.stringify(selection.intendedUntracked);
+			if (!terminal && request.lineageId === "v5-rebind" && !selected) return targetStatusFixture({ applicability: "unrelated", action: "start" });
 			if (request.cwd !== cwd) return viewBefore;
 			workspaceStatuses += 1;
-			return workspaceStatuses === 1 ? workspaceBefore : workspaceAfter;
+			return workspaceStatuses <= 2 ? workspaceBefore : workspaceAfter;
 		},
 		captureEvidenceSubmission: async (request: Record<string, unknown>) => {
 			evidenceSubmissions.push(request);
@@ -5694,9 +4459,21 @@ test("status/v5 finalize lane rebinds negotiated status to the workspace root be
 		},
 		finalizeSubmission: async (request: Record<string, unknown>) => {
 			finalizeSubmissions.push(request);
+			terminal = true;
 			return { lineageId: "v5-rebind", state: "approved", action: "approved", storeRevision: "r-approved" };
 		},
-	} as unknown as Partial<NativeReviewCli>), undefined, undefined, undefined, new CandidateViewRegistry());
+	} as unknown as Partial<NativeReviewCli>), undefined, new CandidateViewRegistry());
+	await controller.execute("v5-rebind-selection", {
+		operation: "status",
+		lineageId: "v5-rebind",
+		input: JSON.stringify(selection),
+	}, undefined, undefined, context(cwd));
+	const staleSelection = { ...selection, expectedUntrackedInventory: `sha256:${"f".repeat(64)}` };
+	await controller.execute("v5-rebind-stale-selection", {
+		operation: "status",
+		lineageId: "v5-rebind",
+		input: JSON.stringify(staleSelection),
+	}, undefined, undefined, context(cwd));
 	const completed = await controller.execute("v5-rebind", {
 		operation: "finalize",
 		lineageId: "v5-rebind",
@@ -5712,12 +4489,22 @@ test("status/v5 finalize lane rebinds negotiated status to the workspace root be
 		}),
 	}, undefined, undefined, context(cwd));
 	const details = completed.details as Record<string, unknown>;
-	assert.notEqual(statusRoots[0], cwd, "the first status query still freezes through the candidate view root");
-	assert.equal(statusRoots[1], cwd, "a v5 status must be rebound to the workspace root before any rendered payload executes");
+	assert.notEqual(statusRoots[2], cwd, "the initial FINALIZE status query still freezes through the candidate view root");
+	assert.equal(statusRoots[3], cwd, "a v5 status must be rebound to the workspace root before any rendered payload executes");
 	assert.equal(evidenceSubmissions.length, 1);
 	assert.deepEqual(evidenceSubmissions[0]!.argumentTokens, expectedEvidenceTokens, "the evidence submission must carry the workspace-root-minted tokens");
 	assert.equal(finalizeSubmissions.length, 1);
 	assert.deepEqual(finalizeSubmissions[0]!.argumentTokens, expectedValidationTokens, "the validation submission must carry the workspace-root-minted tokens");
-	assert.equal(statusRoots.filter((root) => root === cwd).length, 2, "post-evidence status must also be workspace-bound");
+	assert.equal(statusRoots.filter((root) => root === cwd).length, 4, "the public, stale, rebound, and post-evidence statuses must use the workspace root");
+	assert.deepEqual(
+		statusRequests.map((request) => ({
+			untrackedScope: request.untrackedScope,
+			expectedUntrackedInventory: request.expectedUntrackedInventory,
+			intendedUntracked: request.intendedUntracked,
+		})),
+		[selection, staleSelection, selection, selection, selection],
+	);
 	assert.equal((details.result as { state?: string } | undefined)?.state, "approved");
+	await controller.execute("v5-rebind-terminal-clear", { operation: "status", lineageId: "v5-rebind" }, undefined, undefined, context(cwd));
+	assert.deepEqual(statusRequests.at(-1), { cwd, lineageId: "v5-rebind" });
 });

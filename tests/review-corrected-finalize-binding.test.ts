@@ -143,7 +143,7 @@ test("FINALIZE follows the provider transition after a correction instead of dri
 	const result = await __testing.executeReviewControllerOperation(
 		// Exactly the reporter's call: follow the provider transition, no documents.
 		{ operation: "finalize", lineageId, input: JSON.stringify({}) },
-		cwd, new Map(), harness.native, undefined, undefined, undefined, registry,
+		cwd, harness.native, undefined, registry,
 	) as Record<string, unknown>;
 
 	assert.notEqual(
@@ -166,7 +166,7 @@ test("FINALIZE still fails closed when the live candidate does not match the pro
 	const harness = approvingNative(correctedStatus(lineageId, { ...identity, candidateTree: identity.baseTree }));
 	const result = await __testing.executeReviewControllerOperation(
 		{ operation: "finalize", lineageId, input: JSON.stringify({}) },
-		cwd, new Map(), harness.native, undefined, undefined, undefined, registry,
+		cwd, harness.native, undefined, registry,
 	) as Record<string, unknown>;
 
 	assert.equal(result.status, "blocked", "an unverifiable candidate must never mint a receipt");

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -9,7 +10,12 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
-import { GENTLE_AI_VERSION, resolveGentleAiBinary } from "../lib/gentle-ai-binary.ts";
+import {
+	GENTLE_AI_DEV_BINARY_ENV,
+	GENTLE_AI_VERSION,
+	resolveGentleAiBinary,
+	type GentleAiDevBinaryEnvironment,
+} from "../lib/gentle-ai-binary.ts";
 import { NativeReviewCliV216 } from "../lib/native-review-cli.ts";
 import { NativeReviewCliV216 as RuntimeNativeReviewCliV216 } from "../runtime/native-review-cli.mjs";
 import { CandidateViewRegistry } from "../lib/review-candidate-view.ts";
@@ -18,12 +24,22 @@ import { requireNativeBinary } from "./support/native-binary-gate.ts";
 
 const execFileAsync = promisify(execFile);
 const packageRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const pinnedBinaryHome = mkdtempSync(join(tmpdir(), "gentle-pi-pinned-runtime-home-"));
+const pinnedBinaryEnvironment: GentleAiDevBinaryEnvironment = {
+	env: { ...process.env },
+	home: pinnedBinaryHome,
+};
+delete pinnedBinaryEnvironment.env[GENTLE_AI_DEV_BINARY_ENV];
+delete pinnedBinaryEnvironment.env.GENTLE_PI_CONFIG_HOME;
+baseTest.after(() => rmSync(pinnedBinaryHome, { recursive: true, force: true }));
 // The parity suite exercises the published official binary; it skips while a
 // re-pinned release's archives and digest table are still pending, because the
 // pinned package-local binary cannot be installed or integrity-verified yet.
+// Dev-binary override state is intentionally excluded: these assertions verify
+// the package pin, while explicit dev-binary behavior belongs to its own suite.
 const resolvedBinary = (() => {
 	try {
-		return resolveGentleAiBinary(packageRoot, process.platform);
+		return resolveGentleAiBinary(packageRoot, process.platform, undefined, pinnedBinaryEnvironment);
 	} catch {
 		return undefined;
 	}
@@ -103,19 +119,46 @@ interface ReviewGateResult {
 //
 // So each test owns a sandbox HOME and opts in the same way a user does,
 // exactly as gentle-ai did for its own lifecycle fixtures in the commit that
-// flipped the default. The process-wide HOME is what the extension-registered
-// controller path needs, because it spawns the CLI with the inherited
-// environment rather than an explicit one; it is restored afterwards.
+// flipped the default. The extension-registered controller path inherits this
+// process environment, so HOME and XDG state are restored afterwards. The
+// global enable runs from a disposable repository: this package worktree may
+// intentionally have clone-local mode off, which must never participate in the
+// fixture's lifecycle.
 async function reviewEnabledHome(t: baseTest.TestContext): Promise<string> {
 	const home = await mkdtemp(join(tmpdir(), "gentle-pi-review-home-"));
+	const lifecycleCwd = await mkdtemp(join(tmpdir(), "gentle-pi-review-lifecycle-"));
+	const xdgConfigHome = join(home, ".config");
+	const xdgDataHome = join(home, ".local", "share");
+	const xdgCacheHome = join(home, ".cache");
 	const previousHome = process.env.HOME;
+	const previousXdgConfigHome = process.env.XDG_CONFIG_HOME;
+	const previousXdgDataHome = process.env.XDG_DATA_HOME;
+	const previousXdgCacheHome = process.env.XDG_CACHE_HOME;
 	process.env.HOME = home;
+	process.env.XDG_CONFIG_HOME = xdgConfigHome;
+	process.env.XDG_DATA_HOME = xdgDataHome;
+	process.env.XDG_CACHE_HOME = xdgCacheHome;
+	const environment = {
+		...process.env,
+		HOME: home,
+		XDG_CONFIG_HOME: xdgConfigHome,
+		XDG_DATA_HOME: xdgDataHome,
+		XDG_CACHE_HOME: xdgCacheHome,
+	};
 	t.after(async () => {
 		if (previousHome === undefined) delete process.env.HOME;
 		else process.env.HOME = previousHome;
+		if (previousXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+		else process.env.XDG_CONFIG_HOME = previousXdgConfigHome;
+		if (previousXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
+		else process.env.XDG_DATA_HOME = previousXdgDataHome;
+		if (previousXdgCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+		else process.env.XDG_CACHE_HOME = previousXdgCacheHome;
 		await rm(home, { recursive: true, force: true });
+		await rm(lifecycleCwd, { recursive: true, force: true });
 	});
-	const enabled = await run(binary, ["review", "mode", "enable", "--scope", "global", "--json"], packageRoot, false, { ...process.env, HOME: home });
+	await run("git", ["init", "--quiet"], lifecycleCwd, false, environment);
+	const enabled = await run(binary, ["review", "mode", "enable", "--scope", "global", "--cwd", lifecycleCwd, "--json"], lifecycleCwd, false, environment);
 	// Assert the opt-in landed rather than assuming it. A silently ineffective
 	// enable would put these tests straight back to depending on ambient state,
 	// which is the exact failure this helper exists to remove.
@@ -414,11 +457,16 @@ test("official pinned package runtime keeps frozen candidate lineages and receip
 	t.diagnostic("pre-push, pre-pr, and release require remote/publication evidence; their network-aware gate contracts remain covered by dedicated gate integration tests rather than this hermetic binary E2E.");
 });
 
-test("registered gentle_review START materializes a safe internal skill symlink and cleans pending consent on session shutdown", async (t) => {
+test("registered gentle_review surfaces the package-pinned Pi transport refusal before native START for a safe internal symlink candidate", async (t) => {
 	await reviewEnabledHome(t);
 	const workspace = await mkdtemp(join(tmpdir(), "gentle-pi-v215-symlink-candidate-"));
 	const repository = join(workspace, "repository");
-	t.after(async () => rm(workspace, { recursive: true, force: true }));
+	t.after(async () => {
+		// Candidate views are intentionally read-only. Restore test-workspace write
+		// permissions before cleanup when transport refusal stops before START.
+		await run("chmod", ["-R", "u+w", workspace], workspace, true);
+		await rm(workspace, { recursive: true, force: true });
+	});
 
 	await mkdir(join(repository, ".agents", "skills", "example"), { recursive: true });
 	await mkdir(join(repository, ".agent", "skills"), { recursive: true });
@@ -440,18 +488,17 @@ test("registered gentle_review START materializes a safe internal skill symlink 
 
 	const candidateViews = new CandidateViewRegistry();
 	let nativeStartReached = false;
-	// The production controller pairs with the negotiated client; v2.1.9's ordinary
-	// (non-negotiated) START output carries additional facade fields that the
-	// pinned legacy decoder intentionally rejects.
+	// Materialization and lexical symlink escape rejection have dedicated
+	// candidate-view coverage. This safe shape proves negotiated Pi transport
+	// refusal happens before native START, regardless of candidate materialization.
 	const native = new NativeReviewCliV216(async (request) => {
 		if (request.arguments[0] === "review" && request.arguments[1] === "start") nativeStartReached = true;
 		const command = await run(binary, request.arguments, request.cwd, true);
 		return { ...command, signal: null, timedOut: false, outputLimitExceeded: false };
 	});
 	const tools = new Map<string, RegisteredController>();
-	let sessionShutdown: ((event: unknown, context: ExtensionContext) => Promise<void> | void) | undefined;
 	createGentleAiExtension({ nativeReviewCli: native, candidateViews } as Parameters<typeof createGentleAiExtension>[0])({
-		on(name: string, handler: (event: unknown, context: ExtensionContext) => Promise<void> | void) { if (name === "session_shutdown") sessionShutdown = handler; },
+		on() {},
 		registerTool(definition: RegisteredController & { name: string }) { tools.set(definition.name, definition); },
 		registerCommand() {},
 	} as unknown as ExtensionAPI);
@@ -461,27 +508,20 @@ test("registered gentle_review START materializes a safe internal skill symlink 
 	let returned: { details?: unknown } | undefined;
 	let thrown: unknown;
 	try {
-		// A headless context still receives notices, so the stub carries notify.
-		// Without it the consent path throws on a real ExtensionContext member,
-		// and the failure reads as a START problem rather than a stub gap.
-		returned = await controller.execute("issue-146-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, { cwd: repository, hasUI: false, ui: { confirm: async () => true, notify: () => {} } } as unknown as ExtensionContext);
+		returned = await controller.execute("issue-146-start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, { cwd: repository, hasUI: false, ui: { notify: () => {} } } as unknown as ExtensionContext);
 	} catch (caught) {
 		thrown = caught;
 	}
 	const error = thrown instanceof Error ? { name: thrown.name, message: thrown.message } : thrown === undefined ? undefined : String(thrown);
 	t.diagnostic(JSON.stringify({ returned: returned?.details, error, nativeStartReached }));
-	assert.equal(thrown, undefined, "safe internal symlink materialization must not throw before START");
-	assert.equal(nativeStartReached, true, "safe internal symlink materialization must reach native START");
+	assert.equal(thrown, undefined, "the Pi transport refusal must be returned, not thrown");
 	const result = returned?.details as Record<string, unknown> | undefined;
+	const nativeFailure = result?.native_failure as Record<string, unknown> | undefined;
 	assert.equal(result?.status, "blocked");
-	assert.equal(result?.outcome, "native-review-consent-required");
-	assert.equal(typeof result?.consent_binding, "string");
-	assert.equal(result?.lineage_created, false);
-	assert.ok(sessionShutdown, "extension must register session_shutdown cleanup");
-	const context = { cwd: repository, hasUI: false, ui: { notify: () => {} } } as unknown as ExtensionContext;
-	await sessionShutdown({}, context);
-	await assert.rejects(
-		controller.execute("answer-after-shutdown", { operation: "answer-consent", input: JSON.stringify({ consentBinding: result!.consent_binding, answer: "granted" }) }, undefined, undefined, context),
-		/unknown, expired, or already consumed/,
-	);
+	assert.equal(result?.outcome, "native-mutation-status-reconciled");
+	assert.equal(nativeFailure?.code, "immutable_review_transport_unsupported");
+	assert.equal(result?.mutation_performed, false);
+	assert.equal(result?.mutation_outcome, "none");
+	if (result !== undefined && "lineage_created" in result) assert.equal(result.lineage_created, false);
+	assert.equal(nativeStartReached, false, "negotiated Pi transport refusal must preclude native START and any agent-less fallback");
 });
