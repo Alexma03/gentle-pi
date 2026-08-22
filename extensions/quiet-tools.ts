@@ -109,6 +109,7 @@ const SHELL_COMMAND_PREFIX = String.raw`(?:env\s+\S+=\S+\s+|command\s+|\w+=\S+\s
 const GENTLE_AI_EXECUTABLE = String.raw`(?:gentle-ai|(?:\.{1,2}[\\/]|(?:[A-Za-z]:)?(?:[\\/][^\\/\s]+)*[\\/])\.gentle-ai[\\/]v\d+\.\d+\.\d+[\\/]gentle-ai(?:\.exe)?)`;
 const GENTLE_AI_ROUTINE_COMMAND = new RegExp(String.raw`^${SHELL_COMMAND_PREFIX}${GENTLE_AI_EXECUTABLE}\s+(sdd-status|sdd-continue|sdd-attempt|review)(?:\s|$)`);
 const GENTLE_AI_SDD_ATTEMPT = new RegExp(String.raw`^${SHELL_COMMAND_PREFIX}${GENTLE_AI_EXECUTABLE}\s+sdd-attempt\s+(?:acquire|settle)(?:\s|$)`);
+const SHELL_EXPANSION_OR_COMPOSITION = /[;&|`<>\r\n]|\$\(/;
 
 /**
  * Matches only supported routine Gentle AI CLI calls, including bounded
@@ -117,6 +118,7 @@ const GENTLE_AI_SDD_ATTEMPT = new RegExp(String.raw`^${SHELL_COMMAND_PREFIX}${GE
  */
 export function gentleAiRoutineCommand(args: Record<string, unknown> | undefined): GentleAiRoutineCommand | undefined {
 	const command = typeof args?.command === "string" ? args.command.trim() : "";
+	if (SHELL_EXPANSION_OR_COMPOSITION.test(command)) return undefined;
 	const match = GENTLE_AI_ROUTINE_COMMAND.exec(command);
 	if (!match) return undefined;
 	if (match[1] === "sdd-attempt" && !GENTLE_AI_SDD_ATTEMPT.test(command)) return undefined;

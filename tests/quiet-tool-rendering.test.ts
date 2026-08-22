@@ -224,6 +224,33 @@ test("quiet tool rendering identifies only routine Gentle AI SDD and RDD command
 	assert.equal(gentleAiRoutineCommand({ command: "echo gentle-ai review status" }), undefined);
 });
 
+test("quiet tool rendering refuses to compact composed Gentle AI shell commands", () => {
+	const { pi, tools } = createPi();
+	withEnv({ GENTLE_PI_QUIET_TOOLS: undefined }, () => quietTools(pi as any));
+	const commands = [
+		"gentle-ai review status --next-transition && rm -rf target",
+		"gentle-ai review status; rm -rf target",
+		"gentle-ai review status || rm -rf target",
+		"gentle-ai review status | tee status.json",
+		"gentle-ai review status & rm -rf target",
+		"gentle-ai review status\nrm -rf target",
+		"gentle-ai review status --next-transition $(rm -rf target)",
+		"gentle-ai review status --next-transition `rm -rf target`",
+		"gentle-ai review status --next-transition <(cat target)",
+		"gentle-ai review status --next-transition >(tee target)",
+		"gentle-ai review status --next-transition > status.json",
+		"gentle-ai review status --next-transition < status.json",
+	];
+
+	for (const command of commands) {
+		assert.equal(gentleAiRoutineCommand({ command }), undefined, command);
+		const call = renderToString(tools.get("bash").renderCall({ command }, passthroughTheme, {}));
+		const output = renderToString(tools.get("bash").renderResult(textResult("command output"), { expanded: true, isPartial: false }, passthroughTheme, { args: { command } }));
+		assert.equal(call.replace(/[ \t]+$/gm, "").trimEnd(), `$ ${command}`);
+		assert.match(output, /command output/);
+	}
+});
+
 test("quiet tool rendering compacts successful routine Gentle AI calls but preserves failures", () => {
 	const { pi, tools } = createPi();
 	withEnv({ GENTLE_PI_QUIET_TOOLS: undefined }, () => quietTools(pi as any));
