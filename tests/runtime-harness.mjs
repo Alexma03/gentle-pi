@@ -485,7 +485,7 @@ async function run() {
 			/Controller-owned review lineage/,
 			"a failed-closed dispatch must never inject a substituted candidate view into the lens sub-agent's task",
 		);
-		await chmod(join(candidateDriftCwd, ".git", "gentle-ai", "candidate-views", view.token), 0o700);
+		await chmod(view.root, 0o700);
 		registry.cleanup(view.token);
 	} finally {
 		restoreWorkspaceWritePermissions(candidateDriftCwd);

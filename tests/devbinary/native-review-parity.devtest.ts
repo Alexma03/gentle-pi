@@ -152,7 +152,9 @@ test("dev-binary: granted consent executes its exact candidate-bound invocation 
 		assert.ok(answered.start.selectedLenses.length > 0);
 		assert.equal(answered.start.raw?.repository_context !== undefined, true);
 	}
-	assert.deepEqual(consentAnswerCall(calls, "granted"), consent.choices[0].invocation.split(" ").slice(1));
+	const grantedChoice = consent.choices.find((choice) => choice.answer === "granted");
+	assert.ok(grantedChoice, "consent must include a granted choice");
+	assert.deepEqual(consentAnswerCall(calls, "granted"), grantedChoice.invocation.split(" ").slice(1));
 });
 
 test("dev-binary: declined consent executes its exact candidate-bound invocation once and creates no lineage, result, or actor", { skip: !RUNNABLE }, async (t) => {
@@ -175,7 +177,9 @@ test("dev-binary: declined consent executes its exact candidate-bound invocation
 		assert.equal("start" in answered, false);
 		assert.equal("actor" in answered.raw, false);
 	}
-	assert.deepEqual(consentAnswerCall(calls, "declined"), consent.choices[1].invocation.split(" ").slice(1));
+	const declinedChoice = consent.choices.find((choice) => choice.answer === "declined");
+	assert.ok(declinedChoice, "consent must include a declined choice");
+	assert.deepEqual(consentAnswerCall(calls, "declined"), declinedChoice.invocation.split(" ").slice(1));
 	const after = await native.targetStatus({ cwd, agent: "pi" });
 	assert.equal(after.authority, undefined);
 	assert.equal(after.receipt.status, "not_applicable");

@@ -112,7 +112,7 @@ The only platform-specific repository test is skipped outside Windows. U8 theref
 
 ## #191 Outcome
 
-#191 removed Pi-owned delivery authorization and publication-target revalidation from ordinary review. The extension does not import a publication-gate module or consult review authority to decide commit, push, pull-request, or release delivery.
+Issue #191 removed Pi-owned delivery authorization and publication-target revalidation from ordinary review. The extension does not import a publication-gate module or consult review authority to decide commit, push, pull-request, or release delivery.
 
 `review-transaction.ts` retains its reducer, replay, object-store, lock, snapshot, and semantic-replay dependencies for explicit graph-v1 Judgment Day and historical compatibility; no additional module deletion is justified.
 

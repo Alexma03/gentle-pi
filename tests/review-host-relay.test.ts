@@ -32,6 +32,7 @@ import { decodeReviewNextTransitionV3, type ReviewCaptureSubmissionV1, type Revi
 
 const FAKE_GENTLE_AI = `#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 const argv = process.argv.slice(2);
 if (process.env.RELAY_FAKE_LOG) fs.appendFileSync(process.env.RELAY_FAKE_LOG, JSON.stringify({ argv, cwd: process.cwd(), contract: process.env.${GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV} ?? null }) + "\\n");
 if (argv.some((token) => token === "--materialize" || token.startsWith("--materialize="))) {
@@ -45,14 +46,14 @@ if (argv.some((token) => token === "--materialize" || token.startsWith("--materi
 const inputToken = argv.find((token) => token === "--input" || token.startsWith("--input="));
 if (inputToken !== undefined) {
 	const mode = process.env.RELAY_FAKE_SUBMIT_MODE || "ok";
+	const inputPath = inputToken.startsWith("--input=") ? inputToken.slice("--input=".length) : argv[argv.indexOf("--input") + 1];
 	if (mode === "ok" || mode === "cleanup-fail") {
-		const inputPath = inputToken.startsWith("--input=") ? inputToken.slice("--input=".length) : argv[argv.indexOf("--input") + 1];
 		const bytes = fs.readFileSync(inputPath);
 		if (process.env.RELAY_FAKE_SUBMIT_CAPTURE) fs.writeFileSync(process.env.RELAY_FAKE_SUBMIT_CAPTURE, bytes);
 		const accepted = JSON.stringify({ schema: "gentle-ai.review-result-artifact/v2", admission_decision: "completed" });
 		if (mode === "cleanup-fail") {
 			process.stdout.write(accepted, () => {
-				fs.chmodSync(require("node:path").dirname(require("node:path").dirname(inputPath)), 0o500);
+				fs.chmodSync(path.dirname(path.dirname(inputPath)), 0o500);
 				process.exit(0);
 			});
 			return;
@@ -60,6 +61,7 @@ if (inputToken !== undefined) {
 		process.stdout.write(accepted);
 		process.exit(0);
 	}
+	if (mode === "refuse-cleanup-fail") fs.chmodSync(path.dirname(path.dirname(inputPath)), 0o500);
 	process.stderr.write("capture binding does not match the current reviewing authority\\n");
 	process.exit(1);
 }
@@ -69,6 +71,7 @@ process.exit(9);
 
 const FAKE_PI = `#!/usr/bin/env node
 const fs = require("node:fs");
+const path = require("node:path");
 const argv = process.argv.slice(2);
 if (process.env.RELAY_FAKE_PI_LOG) fs.appendFileSync(process.env.RELAY_FAKE_PI_LOG, JSON.stringify({ argv, cwd: process.cwd(), entries: fs.readdirSync(process.cwd()), contract: process.env.${GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV} ?? null }) + "\\n");
 const chunks = [];
@@ -77,6 +80,7 @@ process.stdin.on("end", () => {
 	const stdin = Buffer.concat(chunks);
 	if (process.env.RELAY_FAKE_PI_STDIN_CAPTURE) fs.writeFileSync(process.env.RELAY_FAKE_PI_STDIN_CAPTURE, stdin);
 	const mode = process.env.RELAY_FAKE_PI_MODE || "ok";
+	if (process.env.RELAY_FAKE_PI_BREAK_CLEANUP === "true") fs.chmodSync(path.dirname(process.cwd()), 0o500);
 	if (mode === "ok") { process.stdout.write(Buffer.from(process.env.RELAY_FAKE_PI_OUTPUT_B64 || "", "base64")); process.exit(0); }
 	if (mode === "empty") process.exit(0);
 	if (mode === "hang") { setTimeout(() => process.exit(0), 10_000); return; }
@@ -382,6 +386,28 @@ test("the production relay path resolves the reviewer bound from the environment
 	assert.equal(existsSync(fixture.submitCapturePath), false);
 });
 
+test("a relay Pi timeout keeps its typed mapping and timing evidence when opaque scratch cleanup also fails", async (t) => {
+	const fixture = harness(t, { RELAY_FAKE_PI_MODE: "hang", RELAY_FAKE_PI_BREAK_CLEANUP: "true" });
+	const scratchParent = mkdtempSync(join(tmpdir(), "gentle-pi-relay-pi-primary-failure-"));
+	const originalTmpdir = process.env.TMPDIR;
+	process.env.TMPDIR = scratchParent;
+	try {
+		const error = await rejectsWithRelayError(
+			runReviewHostRelaySlot(relayRequest(fixture, { piTimeoutMs: 300 })),
+			REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT,
+			"pi",
+		);
+		assert.equal(error.timedOut, true);
+		assert.equal(error.timeoutMs, 300);
+		assert.ok(error.elapsedMs !== null && error.elapsedMs >= 250);
+	} finally {
+		if (originalTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = originalTmpdir;
+		chmodSync(scratchParent, 0o700);
+		rmSync(scratchParent, { recursive: true, force: true });
+	}
+});
+
 test("a killed reviewer reports elapsed, limit, and what to change instead of an opaque transport failure", async (t) => {
 	const fixture = harness(t, { RELAY_FAKE_PI_MODE: "hang" });
 	const error = await rejectsWithRelayError(runReviewHostRelaySlot(relayRequest(fixture, { piTimeoutMs: 300 })), REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT, "pi");
@@ -410,6 +436,31 @@ test("submission refusal is a typed error whose outcome is unknown pending STATU
 	assert.equal(error.mutationOutcome, "unknown");
 	assert.match(error.stderr, /capture binding does not match/);
 	assert.equal(readLog(fixture.logPath).length, 2);
+});
+
+test("submission refusal preserves its primary evidence when result staging cleanup also fails", async (t) => {
+	const fixture = harness(t, { RELAY_FAKE_SUBMIT_MODE: "refuse-cleanup-fail" });
+	const scratchParent = mkdtempSync(join(tmpdir(), "gentle-pi-relay-primary-failure-"));
+	const originalTmpdir = process.env.TMPDIR;
+	process.env.TMPDIR = scratchParent;
+	try {
+		const error = await rejectsWithRelayError(
+			runReviewHostRelaySlot(relayRequest(fixture)),
+			REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED,
+			"submit",
+		);
+		assert.equal(error.exitCode, 1);
+		assert.equal(error.timedOut, false);
+		assert.equal(error.timeoutMs, 30_000);
+		assert.ok(error.elapsedMs !== null && error.elapsedMs >= 0);
+		assert.match(error.stderr, /capture binding does not match/);
+		assert.doesNotMatch(error.message, /staging cleanup/i);
+	} finally {
+		if (originalTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = originalTmpdir;
+		chmodSync(scratchParent, 0o700);
+		rmSync(scratchParent, { recursive: true, force: true });
+	}
 });
 
 test("relay scratch and staging directories are removed after failures too", async (t) => {

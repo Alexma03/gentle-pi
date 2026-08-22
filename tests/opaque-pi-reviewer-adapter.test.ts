@@ -28,22 +28,22 @@ process.stdin.on("end", () => {
 		entries_after: fs.readdirSync(process.cwd()),
 	};
 	if (process.env.OPAQUE_PI_LOG) fs.appendFileSync(process.env.OPAQUE_PI_LOG, JSON.stringify(log) + "\\n");
+	if (mode === "break-cleanup" || process.env.OPAQUE_PI_BREAK_CLEANUP === "true") {
+		fs.chmodSync(path.dirname(process.cwd()), 0o500);
+	}
 	if (mode === "empty") process.exit(0);
 	if (mode === "hang") { setTimeout(() => process.exit(0), 10_000); return; }
 	if (mode === "nonzero") { process.stderr.write("opaque pi failed\\n"); process.exit(7); }
-	if (mode === "break-cleanup") {
-		fs.chmodSync(path.dirname(process.cwd()), 0o500);
-	}
 	process.stdout.write(Buffer.from(process.env.OPAQUE_PI_OUTPUT_B64 || "", "base64"));
 });
 `;
 
 const PROMPT_BYTES = Buffer.concat([
-	Buffer.from("opaque prompt\\r\\n\u0000", "utf8"),
+	Buffer.from("opaque prompt\r\n\u0000", "utf8"),
 	Buffer.from([0x01, 0xff, 0xfe, 0x00]),
 ]);
 const OUTPUT_BYTES = Buffer.concat([
-	Buffer.from("opaque output\\r\\n\u0000", "utf8"),
+	Buffer.from("opaque output\r\n\u0000", "utf8"),
 	Buffer.from([0x07, 0xff, 0xfe, 0x00]),
 ]);
 
@@ -180,6 +180,41 @@ test("the opaque adapter leaves no prompt or result file in scratch and reports 
 			OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.CLEANUP_FAILED,
 		);
 		assert.match(error.message, /scratch directory/i);
+	} finally {
+		if (originalTmpdir === undefined) delete process.env.TMPDIR;
+		else process.env.TMPDIR = originalTmpdir;
+		chmodSync(scratchParent, 0o700);
+		rmSync(scratchParent, { recursive: true, force: true });
+	}
+});
+
+test("the opaque adapter preserves primary nonzero and timeout errors when scratch cleanup also fails", async (t) => {
+	const fixture = harness(t);
+	const scratchParent = mkdtempSync(join(tmpdir(), "gentle-pi-opaque-reviewer-primary-failure-"));
+	const originalTmpdir = process.env.TMPDIR;
+	process.env.TMPDIR = scratchParent;
+	try {
+		const nonzero = await rejectsWithTransportError(
+			runOpaquePiReviewer(PROMPT_BYTES, {
+				piExecutable: fixture.pi,
+				environment: { ...fixture.environment, OPAQUE_PI_MODE: "nonzero", OPAQUE_PI_BREAK_CLEANUP: "true" },
+				timeoutMs: 10_000,
+			}),
+			OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.NONZERO_EXIT,
+		);
+		assert.equal(nonzero.exitCode, 7);
+		assert.deepEqual(nonzero.stderr, Buffer.from("opaque pi failed\n"));
+		chmodSync(scratchParent, 0o700);
+
+		const timedOut = await rejectsWithTransportError(
+			runOpaquePiReviewer(PROMPT_BYTES, {
+				piExecutable: fixture.pi,
+				environment: { ...fixture.environment, OPAQUE_PI_MODE: "hang", OPAQUE_PI_BREAK_CLEANUP: "true" },
+				timeoutMs: 300,
+			}),
+			OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.TIMED_OUT,
+		);
+		assert.equal(timedOut.timedOut, true);
 	} finally {
 		if (originalTmpdir === undefined) delete process.env.TMPDIR;
 		else process.env.TMPDIR = originalTmpdir;

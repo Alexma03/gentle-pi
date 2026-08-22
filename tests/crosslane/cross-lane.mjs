@@ -1055,6 +1055,7 @@ async function main() {
 		initialRddMode: undefined,
 		enabledRddMode: undefined,
 		finalRddMode: undefined,
+		fakePiRestoreError: undefined,
 		rddModeError: undefined,
 		environmentRestored: false,
 		environmentRestoreError: undefined,
@@ -1144,7 +1145,7 @@ async function main() {
 			try {
 				fakePi.restore();
 			} catch (error) {
-				cleanup.rddModeError = `fake Pi environment cleanup failed: ${describeError(error)}`;
+				cleanup.fakePiRestoreError = describeError(error);
 			}
 		}
 		if (sandbox !== undefined && modeRepo !== undefined && binary !== undefined) {
@@ -1152,7 +1153,7 @@ async function main() {
 				const finalRdd = sandboxReviewModeStatus(binary, modeRepo, "on", "global", "final sandbox status");
 				cleanup.finalRddMode = `${finalRdd.effective}/${finalRdd.source}`;
 			} catch (error) {
-				cleanup.rddModeError ??= describeError(error);
+				cleanup.rddModeError = describeError(error);
 			}
 		}
 		try {
@@ -1181,6 +1182,10 @@ async function main() {
 	console.log("");
 	console.log(`total: ${checks.length} checks, ${failed} failed`);
 	console.log(`cleanup: fake Pi invocations=${cleanup.fakePiInvocations}; sandbox RDD initial=${cleanup.initialRddMode ?? "unverified"}; enabled=${cleanup.enabledRddMode ?? "unverified"}; final=${cleanup.finalRddMode ?? "unverified"}; process environment restored=${cleanup.environmentRestored}; scratch root removed=${cleanup.rootRemoved}; auto-spools unread=0 undeleted=0 (none are battery-owned)`);
+	if (cleanup.fakePiRestoreError !== undefined) {
+		console.log(`cleanup failure: fake Pi environment restore failed (${cleanup.fakePiRestoreError})`);
+		failed += 1;
+	}
 	if (cleanup.rddModeError !== undefined) {
 		console.log(`cleanup failure: sandbox RDD verification failed (${cleanup.rddModeError})`);
 		failed += 1;

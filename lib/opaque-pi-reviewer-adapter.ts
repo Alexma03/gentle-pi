@@ -161,6 +161,7 @@ export async function runOpaquePiReviewer(prompt: Buffer, options: OpaquePiRevie
 	}
 
 	let scratchDirectory: string | undefined;
+	let primaryFailure = false;
 	try {
 		try {
 			scratchDirectory = await mkdtemp(join(tmpdir(), "gentle-pi-opaque-reviewer-"));
@@ -225,15 +226,20 @@ export async function runOpaquePiReviewer(prompt: Buffer, options: OpaquePiRevie
 			promptByteLength: prompt.length,
 			stdoutByteLength: processResult.stdout.length,
 		};
+	} catch (error) {
+		primaryFailure = true;
+		throw error;
 	} finally {
 		if (scratchDirectory !== undefined) {
 			try {
 				await rm(scratchDirectory, { recursive: true, force: true });
 			} catch (error) {
-				throw new OpaquePiReviewerTransportError(
-					OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.CLEANUP_FAILED,
-					`Pi scratch directory cleanup failed: ${errorMessage(error)}`,
-				);
+				if (!primaryFailure) {
+					throw new OpaquePiReviewerTransportError(
+						OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.CLEANUP_FAILED,
+						`Pi scratch directory cleanup failed: ${errorMessage(error)}`,
+					);
+				}
 			}
 		}
 	}

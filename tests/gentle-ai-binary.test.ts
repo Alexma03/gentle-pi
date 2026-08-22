@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import test from "node:test";
 import {
 	GENTLE_AI_BINARY_MISSING_CODE,
@@ -46,6 +46,7 @@ let pinnedBinaryIsolation: PinnedBinaryIsolation | undefined;
 test.beforeEach((t) => {
 	const home = mkdtempSync(join(tmpdir(), "gentle-pi-pinned-binary-home-"));
 	const environment: GentleAiDevBinaryEnvironment = { env: { ...process.env }, home };
+	delete environment.env.GENTLE_PI_CONFIG_HOME;
 	const savedEnvironmentValue = environment.env[GENTLE_AI_DEV_BINARY_ENV];
 	const registrationPath = gentleAiDevBinaryRegistrationPath(environment);
 	const savedRegistration = existsSync(registrationPath)
@@ -66,7 +67,7 @@ test.beforeEach((t) => {
 		if (savedRegistration === undefined) {
 			unregisterGentleAiDevBinary(environment);
 		} else {
-			mkdirSync(join(home, ".pi", "gentle-ai"), { recursive: true });
+			mkdirSync(dirname(registrationPath), { recursive: true });
 			writeFileSync(registrationPath, savedRegistration);
 		}
 		setGentleAiDevBinaryEnvironmentForTesting(undefined);

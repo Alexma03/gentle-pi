@@ -69,7 +69,7 @@ try {
 	const decoded = decodeReviewCapabilitiesV2(capabilities, executableDigest);
 	if (decoded.contract !== "gentle-ai.review-integration/v2" || decoded.packageVersion !== versions[0].name.slice(1)) throw new Error("package-local Gentle AI returned incompatible capabilities");
 	const packageManifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
-	process.stdout.write(`packed package E2E passed (gentle-pi ${packageManifest.version ?? "unknown"}; Gentle AI ${capabilities.package?.version ?? "unknown"})\n`);
+	process.stdout.write(`packed package E2E passed (gentle-pi ${packageManifest.version ?? "unknown"}; Gentle AI ${decoded.packageVersion ?? "unknown"})\n`);
 } finally {
 	rmSync(temporary, { recursive: true, force: true });
 }

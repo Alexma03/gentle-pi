@@ -56,7 +56,12 @@ function context(cwd: string): ExtensionContext {
 
 function repository(t: test.TestContext, prefix = "gentle-pi-workspace-root-"): string {
 	const cwd = mkdtempSync(join(tmpdir(), prefix));
-	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	t.after(() => {
+		if (process.platform !== "win32") {
+			try { execFileSync("chmod", ["-R", "u+w", cwd], { stdio: "ignore" }); } catch { /* best effort */ }
+		}
+		rmSync(cwd, { recursive: true, force: true });
+	});
 	execFileSync("git", ["init", "-b", "main"], { cwd });
 	writeFileSync(join(cwd, "app.ts"), "export const value = 1;\n");
 	execFileSync("git", ["add", "."], { cwd });

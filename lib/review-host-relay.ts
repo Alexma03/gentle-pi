@@ -507,6 +507,7 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 	// completing form: its exact operation and argument tokens, with only the
 	// artifact path substituted into the declared {{value}} slot.
 	const stagingDirectory = await mkdtemp(join(tmpdir(), "gentle-pi-host-relay-result-"));
+	let primaryFailure = false;
 	try {
 		await chmod(stagingDirectory, 0o700);
 		const resultFile = join(stagingDirectory, "result.raw");
@@ -534,15 +535,20 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 			resultByteLength: piResult.stdoutByteLength,
 			submission: submission.stdout.toString("utf8"),
 		};
+	} catch (error) {
+		primaryFailure = true;
+		throw error;
 	} finally {
 		try {
 			await rm(stagingDirectory, { recursive: true, force: true });
 		} catch (error) {
-			throw new ReviewHostRelayError(
-				REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED,
-				"submit",
-				`Pi host relay result staging cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-			);
+			if (!primaryFailure) {
+				throw new ReviewHostRelayError(
+					REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED,
+					"submit",
+					`Pi host relay result staging cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
 	}
 }
