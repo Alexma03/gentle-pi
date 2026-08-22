@@ -702,6 +702,35 @@ const FAILURE_CAUSE_CATEGORIES = ["inventory_io_or_layout", "lock_ambiguous", "r
 
 
 
+export const REVIEW_ADVISORY_FINDING_SEVERITY = {
+	BLOCKER: "BLOCKER",
+	CRITICAL: "CRITICAL",
+	WARNING: "WARNING",
+	SUGGESTION: "SUGGESTION",
+}         ;
+
+
+export const REVIEW_ADVISORY_FINDING_DISPOSITION = {
+	INFORMATIONAL: "informational",
+	FOLLOW_UP: "follow_up",
+	REFUTED: "refuted",
+}         ;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1978,16 +2007,34 @@ export function decodeReviewFailureV2(value         )                  {
 // operation/v2
 // ---------------------------------------------------------------------------
 
+export function decodeReviewAdvisoryFindingsV1(value         , label        )                           {
+	const body = exactRecord(value, label, ["statement", "findings"]);
+	return {
+		statement: nonempty(body.statement, `${label}.statement`),
+		findings: array(body.findings, `${label}.findings`, (entry, itemLabel) => {
+			const finding = exactRecord(entry, itemLabel, ["id", "severity", "disposition"], ["lens", "location"]);
+			return {
+				id: nonempty(finding.id, `${itemLabel}.id`),
+				...(finding.lens === undefined ? {} : { lens: nonempty(finding.lens, `${itemLabel}.lens`) }),
+				...(finding.location === undefined ? {} : { location: nonempty(finding.location, `${itemLabel}.location`) }),
+				severity: enumeration(finding.severity, Object.values(REVIEW_ADVISORY_FINDING_SEVERITY), `${itemLabel}.severity`),
+				disposition: enumeration(finding.disposition, Object.values(REVIEW_ADVISORY_FINDING_DISPOSITION), `${itemLabel}.disposition`),
+			};
+		}, { minimum: 1 }),
+	};
+}
+
 export function decodeReviewOperationV2(value         )                    {
 	const body = exactRecord(value, "operation", ["schema", "contract", "operation", "result"]);
 	requireIdentity(body, "gentle-ai.review-integration.operation/v2");
 	const operation = enumeration(body.operation, ["review.finalize", "review.validate", "review.bind_sdd", "review.retry_final_verification"]         , "operation.operation");
 	let result                         ;
+	let advisoryFindings                                      ;
 	if (operation === REVIEW_INTEGRATION_OPERATION.FINALIZE) {
-		result = exactRecord(body.result, "operation.result", ["operation", "lineage_id", "state", "action", "store_revision"], ["eligibility", "next_transition", "validation_request", "escalation"]);
+		result = exactRecord(body.result, "operation.result", ["operation", "lineage_id", "state", "action", "store_revision"], ["eligibility", "next_transition", "validation_request", "escalation", "advisory_findings"]);
 		if (result.operation !== "review/finalize") throw new TypeError("operation.result does not match review.finalize");
 		nonempty(result.lineage_id, "operation.result.lineage_id");
-		nonempty(result.state, "operation.result.state");
+		const state = nonempty(result.state, "operation.result.state");
 		nonempty(result.action, "operation.result.action");
 		sha256(result.store_revision, "operation.result.store_revision");
 		if (result.eligibility !== undefined) decodeEligibility(result.eligibility, "operation.result.eligibility");
@@ -1997,6 +2044,10 @@ export function decodeReviewOperationV2(value         )                    {
 			if (result.state !== "correction_required") throw new TypeError("operation.result.validation_request requires state correction_required");
 		}
 		if (result.escalation !== undefined) nonempty(result.escalation, "operation.result.escalation");
+		if (result.advisory_findings !== undefined) {
+			if (state !== REVIEW_START_STATE.APPROVED) throw new TypeError("operation.result.advisory_findings requires state approved");
+			advisoryFindings = decodeReviewAdvisoryFindingsV1(result.advisory_findings, "operation.result.advisory_findings");
+		}
 	} else if (operation === REVIEW_INTEGRATION_OPERATION.VALIDATE) {
 		result = exactRecord(body.result, "operation.result", ["schema", "result", "allowed", "action", "reason", "context"], ["delivery"]);
 		if (result.schema !== "gentle-ai.review-gate-result/v1") throw new TypeError("operation.result does not match review.validate");
@@ -2033,7 +2084,13 @@ export function decodeReviewOperationV2(value         )                    {
 		sha256(result.incident_digest, "operation.result.incident_digest");
 		if (result.recovery_disposition !== "final_verification_retry") throw new TypeError("operation.result.recovery_disposition must be final_verification_retry");
 	}
-	return { contract: REVIEW_INTEGRATION_CONTRACT, operation, result, raw: body };
+	return {
+		contract: REVIEW_INTEGRATION_CONTRACT,
+		operation,
+		result,
+		...(advisoryFindings === undefined ? {} : { advisoryFindings }),
+		raw: body,
+	};
 }
 
 // ---------------------------------------------------------------------------

@@ -3195,6 +3195,7 @@ function mapNativeFinalizeResult(result: NativeFinalizeResult): Record<string, u
 		action: result.action,
 		store_revision: result.storeRevision,
 		...(result.receiptPath === undefined ? {} : { receipt_path: result.receiptPath }),
+		...(result.advisoryFindings === undefined ? {} : { advisory_findings: result.advisoryFindings }),
 	};
 }
 

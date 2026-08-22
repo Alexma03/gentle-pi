@@ -13,6 +13,7 @@ import {
 	decodeReviewCapabilitiesV2,
 	decodeReviewConsentV2,
 	decodeReviewConsentV3,
+	decodeReviewAdvisoryFindingsV1,
 	decodeReviewFailureV2,
 	decodeReviewOperationV2,
 	decodeReviewRepairV2,
@@ -26,6 +27,7 @@ import {
 	type ReviewRepairV2,
 	type ReviewStartState,
 	type ReviewStatusV3,
+	type ReviewAdvisoryFindingsV1,
 } from "./review-integration-v2.ts";
 
 const execFileAsync = promisify(execFile);
@@ -698,7 +700,7 @@ export const NATIVE_START_ACTION = { CREATED: "created", RESUMED: "resumed", REU
 export type NativeStartAction = (typeof NATIVE_START_ACTION)[keyof typeof NATIVE_START_ACTION];
 export interface NativeStartResult { lineageId: string; state: ReviewStartState; riskLevel: string; selectedLenses: readonly string[]; changedFiles: number; changedLines: number; correctionBudget: number; action: NativeStartAction; lensesRequired: boolean; riskReasons?: readonly Record<string, unknown>[]; raw?: Readonly<Record<string, unknown>>; riskEvidence?: readonly string[]; hint?: string; }
 export interface NativeValidateResult { allowed: boolean; result: "allow" | "scope-changed" | "invalidated" | "escalated"; action: string; reason: string; gateContext: NativeGateContext; delivery?: ReviewGateDelivery; }
-export interface NativeFinalizeResult { lineageId: string; state: string; action: string; storeRevision: string; receiptPath?: string; validationRequest?: Readonly<Record<string, unknown>>; escalation?: string; }
+export interface NativeFinalizeResult { lineageId: string; state: string; action: string; storeRevision: string; receiptPath?: string; validationRequest?: Readonly<Record<string, unknown>>; escalation?: string; advisoryFindings?: ReviewAdvisoryFindingsV1; }
 export interface NativeBindSddResult {
 	revision: string;
 	change: string;
@@ -2529,6 +2531,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 				// nested object is private to lib/review-integration-v2.ts.
 				...(body.validation_request === undefined ? {} : { validationRequest: body.validation_request as Readonly<Record<string, unknown>> }),
 				...(body.escalation === undefined ? {} : { escalation: requiredString(body.escalation) }),
+				...(envelope.advisoryFindings === undefined ? {} : { advisoryFindings: envelope.advisoryFindings }),
 			};
 		} finally {
 			if (directory !== undefined) await this.cleanupDirectory(directory).catch(() => undefined);
@@ -2750,12 +2753,17 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 					storeRevision: requiredString(result.store_revision),
 					...(result.validation_request === undefined ? {} : { validationRequest: result.validation_request as Readonly<Record<string, unknown>> }),
 					...(result.escalation === undefined ? {} : { escalation: requiredString(result.escalation) }),
+					...(envelope.advisoryFindings === undefined ? {} : { advisoryFindings: envelope.advisoryFindings }),
 				};
 			}
-			const plain = exactObject(body, ["operation", "lineage_id", "state", "action", "store_revision"], ["receipt_path", "validation_request", "escalation"]);
+			const plain = exactObject(body, ["operation", "lineage_id", "state", "action", "store_revision"], ["receipt_path", "validation_request", "escalation", "advisory_findings"]);
 			if (plain.operation !== "review/finalize") throw new Error("wrong finalize discriminator");
 			const state = requiredString(plain.state);
 			if (!(NATIVE_FINALIZE_STATE as readonly string[]).includes(state)) throw new Error("unknown finalize state");
+			if (plain.advisory_findings !== undefined && state !== "approved") throw new TypeError("plain finalize advisory_findings requires state approved");
+			const advisoryFindings = plain.advisory_findings === undefined
+				? undefined
+				: decodeReviewAdvisoryFindingsV1(plain.advisory_findings, "plain finalize advisory_findings");
 			return {
 				lineageId: requiredString(plain.lineage_id),
 				state,
@@ -2764,6 +2772,7 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 				...(plain.receipt_path === undefined ? {} : { receiptPath: requiredString(plain.receipt_path) }),
 				...(plain.validation_request === undefined ? {} : { validationRequest: plain.validation_request as Readonly<Record<string, unknown>> }),
 				...(plain.escalation === undefined ? {} : { escalation: requiredString(plain.escalation) }),
+				...(advisoryFindings === undefined ? {} : { advisoryFindings }),
 			};
 		});
 	}

@@ -17,6 +17,7 @@ import {
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
 } from "../lib/review-integration-v2.ts";
+import { decodeReviewOperationV2 as decodeRuntimeReviewOperationV2 } from "../runtime/review-integration-v2.mjs";
 
 const fixtureRoot = join(process.cwd(), "contracts", "review-integration", "v2", "fixtures");
 const fixture = <T = unknown>(name: string): T => JSON.parse(readFileSync(join(fixtureRoot, name), "utf8")) as T;
@@ -162,6 +163,64 @@ test("operation envelopes strictly bind the outer operation to one exact result 
 	assert.equal(decodeReviewOperationV2(envelope).operation, "review.finalize");
 	assertAdditionalProperty(decodeReviewOperationV2, envelope);
 	assertNestedRequired(decodeReviewOperationV2, envelope, ["result"], ["operation", "lineage_id", "state", "action", "store_revision"]);
+});
+
+function advisoryFindings(): JsonObject {
+	return {
+		statement: "Approval stands; these findings require no correction.",
+		findings: [{
+			id: "review-advisory-001",
+			lens: "review-reliability",
+			location: "lib/review.ts:12",
+			severity: "WARNING",
+			disposition: "informational",
+		}],
+	};
+}
+
+test("operation finalize accepts published advisory_findings and rejects malformed advisory rows", () => {
+	const decoders: readonly Decoder[] = [decodeReviewOperationV2, decodeRuntimeReviewOperationV2];
+	for (const decoder of decoders) {
+		const accepted = finalizeEnvelope();
+		(accepted.result as JsonObject).advisory_findings = advisoryFindings();
+		const decoded = decoder(accepted) as { advisoryFindings?: unknown };
+		assert.deepEqual(decoded.advisoryFindings, advisoryFindings());
+
+		for (const mutate of [
+			(value: JsonObject) => { ((value.findings as JsonObject[])[0]!).severity = "NOTICE"; },
+			(value: JsonObject) => { ((value.findings as JsonObject[])[0]!).disposition = "corrected"; },
+			(value: JsonObject) => { ((value.findings as JsonObject[])[0]!).id = 1; },
+			(value: JsonObject) => { ((value.findings as JsonObject[])[0]!).unadvertised = true; },
+			(value: JsonObject) => { value.findings = []; },
+		] as const) {
+			const malformed = finalizeEnvelope();
+			const findings = advisoryFindings();
+			mutate(findings);
+			(malformed.result as JsonObject).advisory_findings = findings;
+			assert.throws(() => decoder(malformed));
+		}
+
+		const wrongState = finalizeEnvelope();
+		(wrongState.result as JsonObject).state = "reviewing";
+		(wrongState.result as JsonObject).advisory_findings = advisoryFindings();
+		assert.throws(() => decoder(wrongState), /approved/);
+
+		const wrongOperation: JsonObject = {
+			schema: "gentle-ai.review-integration.operation/v2",
+			contract: REVIEW_INTEGRATION_CONTRACT,
+			operation: "review.validate",
+			result: {
+				schema: "gentle-ai.review-gate-result/v1",
+				result: "allow",
+				allowed: true,
+				action: "continue",
+				reason: "receipt matches",
+				context: { gate: "pre-commit" },
+				advisory_findings: advisoryFindings(),
+			},
+		};
+		assert.throws(() => decoder(wrongOperation), /advisory_findings.*not allowed/);
+	}
 });
 
 test("net-new decoders: consent, next-transition, and artifact-subject reject malformed payloads", () => {
