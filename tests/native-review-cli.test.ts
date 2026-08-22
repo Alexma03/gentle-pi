@@ -950,6 +950,7 @@ test("finalizeTransition preserves approved burned advisory_findings", async () 
 			},
 		},
 		{ name: "plain transition", body: plainResult },
+		{ name: "plain non-approved transition", body: { ...plainResult, state: "escalated" }, rejects: true },
 	] as const;
 	for (const clientFactory of [
 		{
@@ -970,12 +971,17 @@ test("finalizeTransition preserves approved burned advisory_findings", async () 
 					{ stdout: JSON.stringify(await v216Capabilities(digest)) },
 					{ stdout: JSON.stringify(response.body) },
 				]);
-				const result = await clientFactory.create(queue.adapter).finalizeTransition({
+				const invocation = clientFactory.create(queue.adapter).finalizeTransition({
 					cwd: "/repo",
 					argumentTokens: ["--lineage=review-advisory-finalize", "--captured-results=true"],
 				});
 				const label = `${clientFactory.name}/${response.name}`;
-				assert.deepEqual(result.advisoryFindings, advisoryFindings, label);
+				if ("rejects" in response) {
+					await assert.rejects(invocation, { code: "schema-incompatible" }, label);
+				} else {
+					const result = await invocation;
+					assert.deepEqual(result.advisoryFindings, advisoryFindings, label);
+				}
 				assert.deepEqual(queue.calls.map((call) => call.arguments), [
 					["review", "capabilities", "--contract", "gentle-ai.review-integration/v2"],
 					["review", "finalize", "--lineage=review-advisory-finalize", "--captured-results=true"],
