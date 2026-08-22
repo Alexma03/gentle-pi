@@ -1288,24 +1288,30 @@ export class CandidateViewRegistry {
 	restoreForFinalizeFromNative(lineageId: string, contributorRoot: string, descriptor: NativeCandidateProjectionDescriptor): CandidateView {
 		const root = this.canonicalRoot(contributorRoot);
 		const key = this.lineageKey(root, lineageId);
-		this.restoreProjectionFromNative(lineageId, root, descriptor);
-		const projection = this.resolveProjection(lineageId, root);
-		const matchesProjection = (candidate: CandidateViewRecord): boolean => candidate.baseTree === projection.baseTree && candidate.candidateTree === projection.candidateTree && JSON.stringify(candidate.scope.paths) === JSON.stringify(projection.paths);
-		const emptyIntendedUntracked = projection.intendedUntracked?.length === 0;
-		let record = materializeCandidateView({ contributorRoot: root, baseRef: projection.baseCommit, committedOnly: projection.committedOnly, ...(!emptyIntendedUntracked && projection.intendedUntracked !== undefined ? { intendedUntracked: projection.intendedUntracked } : {}) }, this.gitExecutor);
-		if (!matchesProjection(record) && emptyIntendedUntracked) {
-			this.remove(record);
-			record = materializeCandidateView({ contributorRoot: root, baseRef: projection.baseCommit, committedOnly: projection.committedOnly, intendedUntracked: [] }, this.gitExecutor);
-		}
+		let projectionRestored = false;
+		let record: CandidateViewRecord | undefined;
 		try {
+			this.restoreProjectionFromNative(lineageId, root, descriptor);
+			projectionRestored = true;
+			const projection = this.resolveProjection(lineageId, root);
+			const matchesProjection = (candidate: CandidateViewRecord): boolean => candidate.baseTree === projection.baseTree && candidate.candidateTree === projection.candidateTree && JSON.stringify(candidate.scope.paths) === JSON.stringify(projection.paths);
+			const emptyIntendedUntracked = projection.intendedUntracked?.length === 0;
+			record = materializeCandidateView({ contributorRoot: root, baseRef: projection.baseCommit, committedOnly: projection.committedOnly, ...(!emptyIntendedUntracked && projection.intendedUntracked !== undefined ? { intendedUntracked: projection.intendedUntracked } : {}) }, this.gitExecutor);
+			if (!matchesProjection(record) && emptyIntendedUntracked) {
+				this.remove(record);
+				record = undefined;
+				record = materializeCandidateView({ contributorRoot: root, baseRef: projection.baseCommit, committedOnly: projection.committedOnly, intendedUntracked: [] }, this.gitExecutor);
+			}
 			if (!matchesProjection(record)) throw new CandidateViewError("live candidate does not match the native frozen projection");
 			this.records.set(record.token, record);
 			this.bindRecord(record.token, lineageId, []);
 			return this.expose(record);
 		} catch (error) {
-			this.projections.delete(key);
-			this.records.delete(record.token);
-			this.remove(record);
+			if (projectionRestored) this.projections.delete(key);
+			if (record !== undefined) {
+				this.forget(record);
+				this.remove(record);
+			}
 			throw error;
 		}
 	}
@@ -1323,26 +1329,27 @@ export class CandidateViewRegistry {
 		const root = this.canonicalRoot(contributorRoot);
 		const key = this.lineageKey(root, lineageId);
 		if (this.current.has(root)) throw new CandidateViewError("candidate view already has a current lineage binding", "current-binding-already-established");
+		let projectionRestored = false;
+		let record: CandidateViewRecord | undefined;
 		try {
 			const lenses = this.validateSelectedLenses(selectedLenses);
 			this.restoreProjectionFromNative(lineageId, root, descriptor);
+			projectionRestored = true;
 			const projection = this.resolveProjection(lineageId, root);
-			const record = materializeCandidateView({ contributorRoot: root, baseRef: projection.baseCommit, committedOnly: projection.committedOnly, ...(projection.intendedUntracked === undefined ? {} : { intendedUntracked: projection.intendedUntracked }) }, this.gitExecutor);
-			try {
-				if (record.baseTree !== projection.baseTree || record.candidateTree !== projection.candidateTree || JSON.stringify(record.scope.paths) !== JSON.stringify(projection.paths)) {
-					throw new CandidateViewError("live candidate does not match the native frozen projection");
-				}
-				this.records.set(record.token, record);
-				this.bindRecord(record.token, lineageId, lenses);
-				this.current.set(root, { lineageId, token: record.token });
-			} catch (error) {
-				this.projections.delete(key);
-				this.records.delete(record.token);
-				this.remove(record);
-				throw error;
+			record = materializeCandidateView({ contributorRoot: root, baseRef: projection.baseCommit, committedOnly: projection.committedOnly, ...(projection.intendedUntracked === undefined ? {} : { intendedUntracked: projection.intendedUntracked }) }, this.gitExecutor);
+			if (record.baseTree !== projection.baseTree || record.candidateTree !== projection.candidateTree || JSON.stringify(record.scope.paths) !== JSON.stringify(projection.paths)) {
+				throw new CandidateViewError("live candidate does not match the native frozen projection");
 			}
+			this.records.set(record.token, record);
+			this.bindRecord(record.token, lineageId, lenses);
+			this.current.set(root, { lineageId, token: record.token });
 			this.lastHydrationFailures.delete(root);
 		} catch (error) {
+			if (projectionRestored) this.projections.delete(key);
+			if (record !== undefined) {
+				this.forget(record);
+				this.remove(record);
+			}
 			this.lastHydrationFailures.set(root, {
 				lineageId,
 				reason: error instanceof CandidateViewError ? error.reason : "candidate-view-invalid",

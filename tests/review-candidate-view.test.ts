@@ -1188,6 +1188,139 @@ test("failed finalize restores remove the inserted registry record and readonly 
 	assert.equal(existsSync(materializedRoot()!), false);
 });
 
+function materializationFailureRegistry(t: test.TestContext, failureAt: number): { registry: CandidateViewRegistry; roots: () => readonly string[]; removalAttempts: (root: string) => number; internals: CandidateViewRegistryInternals } {
+	const roots: string[] = [];
+	const removalAttempts = new Map<string, number>();
+	let materializations = 0;
+	let failPending = true;
+	const registry = new CandidateViewRegistry((file, arguments_, options) => {
+		if (arguments_[0] === "worktree" && arguments_[1] === "add") {
+			const root = arguments_[arguments_.indexOf("--no-checkout") + 1];
+			assert.equal(typeof root, "string", "worktree add must name its candidate root");
+			roots.push(root);
+			materializations += 1;
+		}
+		if (arguments_[0] === "worktree" && arguments_[1] === "remove") {
+			const root = arguments_[arguments_.indexOf("--force") + 1];
+			assert.equal(typeof root, "string", "worktree remove must name its candidate root");
+			removalAttempts.set(root, (removalAttempts.get(root) ?? 0) + 1);
+		}
+		if (failPending && materializations === failureAt && options.cwd === roots.at(-1) && arguments_[0] === "read-tree") {
+			failPending = false;
+			throw Object.assign(new Error("test-only materialization failure"), { status: 1 });
+		}
+		return execFileSync(file, arguments_, options);
+	});
+	t.after(() => registry.cleanupAll());
+	return { registry, roots: () => roots, removalAttempts: (root) => removalAttempts.get(root) ?? 0, internals: registry as unknown as CandidateViewRegistryInternals };
+}
+
+test("finalize restore removes a registered projection when its first materialization fails and retries cleanly", (t) => {
+	const contributorRoot = repository(t);
+	writeFileSync(join(contributorRoot, "tracked.txt"), "candidate\n");
+	const source = new CandidateViewRegistry();
+	const frozen = source.create({ contributorRoot });
+	const lineageId = "finalize-materialization-failure";
+	const descriptor = {
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+		intendedUntracked: [],
+		projection: "workspace" as const,
+	};
+	const baselineWorktrees = git(contributorRoot, "worktree", "list", "--porcelain");
+	const { registry, roots, internals } = materializationFailureRegistry(t, 1);
+	try {
+		assert.throws(() => registry.restoreForFinalizeFromNative(lineageId, contributorRoot, descriptor), CandidateViewError);
+		assert.equal(registry.hasProjection(lineageId, contributorRoot), false);
+		assert.equal(internals.records.size, 0);
+		assert.equal(git(contributorRoot, "worktree", "list", "--porcelain"), baselineWorktrees);
+		assert.equal(existsSync(roots()[0]!), false);
+
+		const restored = registry.restoreForFinalizeFromNative(lineageId, contributorRoot, descriptor);
+		assert.equal(registry.resolveForFinalize(lineageId, contributorRoot).token, restored.token);
+		registry.cleanup(restored.token);
+	} finally {
+		source.cleanup(frozen.token);
+	}
+});
+
+test("finalize restore does not re-remove its first fallback record when the empty-untracked retry materialization fails", (t) => {
+	const contributorRoot = repository(t);
+	writeFileSync(join(contributorRoot, "tracked.txt"), "candidate\n");
+	writeFileSync(join(contributorRoot, "excluded.txt"), "excluded\n");
+	const source = new CandidateViewRegistry();
+	const frozen = source.create({ contributorRoot, intendedUntracked: [] });
+	const lineageId = "finalize-fallback-materialization-failure";
+	const descriptor = {
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+		intendedUntracked: [],
+		projection: "workspace" as const,
+	};
+	const baselineWorktrees = git(contributorRoot, "worktree", "list", "--porcelain");
+	const { registry, roots, removalAttempts, internals } = materializationFailureRegistry(t, 2);
+	try {
+		assert.throws(() => registry.restoreForFinalizeFromNative(lineageId, contributorRoot, descriptor), CandidateViewError);
+		assert.equal(removalAttempts(roots()[0]!), 1, "the first mismatched record must receive exactly one physical worktree removal");
+		assert.equal(registry.hasProjection(lineageId, contributorRoot), false);
+		assert.equal(internals.records.size, 0);
+		assert.equal(git(contributorRoot, "worktree", "list", "--porcelain"), baselineWorktrees);
+		assert.equal(existsSync(roots()[0]!), false);
+		assert.equal(existsSync(roots()[1]!), false);
+
+		const restored = registry.restoreForFinalizeFromNative(lineageId, contributorRoot, descriptor);
+		assert.equal(registry.resolveForFinalize(lineageId, contributorRoot).token, restored.token);
+		registry.cleanup(restored.token);
+	} finally {
+		source.cleanup(frozen.token);
+	}
+});
+
+test("dispatch restore removes a registered projection when materialization fails and records the hydration failure before retrying", (t) => {
+	const contributorRoot = repository(t);
+	writeFileSync(join(contributorRoot, "tracked.txt"), "candidate\n");
+	const source = new CandidateViewRegistry();
+	const frozen = source.create({ contributorRoot });
+	const lineageId = "dispatch-materialization-failure";
+	const descriptor = {
+		baseTree: frozen.baseTree,
+		currentCandidateTree: frozen.candidateTree,
+		paths: frozen.paths,
+		intendedUntracked: [],
+		projection: "workspace" as const,
+	};
+	const baselineWorktrees = git(contributorRoot, "worktree", "list", "--porcelain");
+	const { registry, roots, internals } = materializationFailureRegistry(t, 1);
+	try {
+		let failure: unknown;
+		try {
+			registry.restoreCurrentForDispatchFromNative(lineageId, contributorRoot, descriptor, ["review-reliability"]);
+		} catch (error) {
+			failure = error;
+		}
+		assert.ok(failure instanceof CandidateViewError);
+		assert.equal(registry.hasProjection(lineageId, contributorRoot), false);
+		assert.equal(registry.hasCurrentBinding(contributorRoot), false);
+		assert.equal(internals.records.size, 0);
+		assert.equal(git(contributorRoot, "worktree", "list", "--porcelain"), baselineWorktrees);
+		assert.equal(existsSync(roots()[0]!), false);
+		assert.deepEqual(registry.lastDispatchHydrationFailure(contributorRoot), {
+			lineageId,
+			reason: failure.reason,
+			message: failure.message,
+		});
+
+		registry.restoreCurrentForDispatchFromNative(lineageId, contributorRoot, descriptor, ["review-reliability"]);
+		const restored = registry.resolveCurrentForLens("review-reliability", contributorRoot);
+		assert.equal(registry.lastDispatchHydrationFailure(contributorRoot), undefined);
+		registry.cleanup(restored.token);
+	} finally {
+		source.cleanup(frozen.token);
+	}
+});
+
 test("candidate root resolution drift is exposed as a typed candidate-view error", () => {
 	const missingRoot = join(tmpdir(), `gentle-pi-missing-root-${process.pid}-${Date.now()}`);
 	assert.throws(

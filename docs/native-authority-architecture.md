@@ -72,8 +72,8 @@ The committed U1-U4 baseline is `origin/main..HEAD`. U5-U8 and #191 are in the u
 | Diff boundary | Files | Additions | Deletions |
 | --- | ---: | ---: | ---: |
 | Committed U1-U4: `git diff --shortstat origin/main..HEAD` | 21 | 770 | 2,027 |
-| Unstaged U5-#191, including three untracked delivery artifacts | 33 | 1,591 | 6,940 |
-| Accumulated U1-#191, including three untracked delivery artifacts | 46 | 2,302 | 8,908 |
+| Unstaged U5-#191, including two untracked delivery artifacts | 33 | 1,591 | 6,940 |
+| Accumulated U1-#191, including two untracked delivery artifacts | 46 | 2,302 | 8,908 |
 
 The two unit ranges are intentionally reported separately. `git diff --shortstat` excludes untracked files, so the architecture report and measurement script are outside the tracked shortstat totals. Unit-range additions and deletions are not arithmetically additive because U5-#191 also edits or removes paths already changed by U1-U4; the accumulated comparison is Git's final origin-to-worktree result.
 
