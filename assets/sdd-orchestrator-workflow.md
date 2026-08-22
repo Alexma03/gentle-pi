@@ -57,21 +57,15 @@ Do not guess the active change. If change selection is ambiguous, ask the user a
 
 Do not ask SDD setup questions on session start. The first time the user initiates an SDD process in a Pi session, run the SDD preflight once and keep those choices for the rest of that session. Runtime trigger detection is intentionally deterministic: slash SDD flows and `/sdd-init` run preflight automatically; for natural-language requests, the parent/orchestrator decides semantically whether SDD is needed and must run/reuse `/gentle:sdd-preflight` before continuing.
 
-**Hard gate:** `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named "preflight" are not session preflight. They are project context only. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has either:
+**Hard gate:** `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named "preflight" are not session preflight. They are project context only. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has an injected `## SDD Session Preflight` block or an equivalent resolution from the canonical authority order below.
 
-1. an injected `## SDD Session Preflight` block, or
-2. an explicit user answer in the current conversation covering all four preflight choices below.
+Resolve each field in this order: (1) explicit current user/session choice, (2) valid persisted preference, (3) capability or already-selected strategy constraint, (4) canonical documented default, and (5) ask only when the field is genuinely unresolved. If `/gentle:sdd-preflight` cannot be invoked, resolve the same order inline; do not recreate a four-question setup prompt. Missing Engram is a capability constraint that resolves the artifact store to `openspec` unless the user has made an incompatible explicit request, which remains a human decision.
 
-If neither exists and `/gentle:sdd-preflight` cannot be invoked from the current context, ask the four choices manually with `ask_user_question` before any SDD phase work. Treat missing Engram availability as a reason to ask/confirm artifact store, not as permission to assume defaults.
+Preflight canonical defaults are execution `auto`, artifact store `openspec`, delivery strategy `ask-on-risk`, and review budget `400`; capability and already-selected constraints may narrow them.
 
-The preflight captures:
+Selectors/inputs appear only for genuinely unresolved fields. Defaulted and one-option fields do not prompt; persisted/session values are reused, and an explicit current choice overrides them when presented. `chain_strategy` remains deferred, and `exception-ok` requires explicit `size:exception` acceptance and is never inferred.
 
-- execution mode: `interactive` or `auto`;
-- artifact store: `openspec`, `engram`, or `both` when callable memory tools are available;
-- chained PR strategy: the canonical `delivery_strategy` — `ask-on-risk`, `auto-chain`, `single-pr`, or `exception-ok`. The preflight menu offers the first three; `exception-ok` is reachable only when the user explicitly accepts `size:exception`, either up front or when `ask-on-risk` stops to ask;
-- review budget in changed lines.
-
-Those four PR values are exactly the `delivery_strategy` domain `sdd-tasks` and `sdd-apply` accept; never emit a value outside it. The preflight offers no separate chained option because `delivery_strategy` is only consulted once the tasks forecast flags review-budget risk: below that line there is nothing to chain, and above it `auto-chain` already resolves without asking again.
+The exact `delivery_strategy` domain accepted by `sdd-tasks` and `sdd-apply` is `ask-on-risk`, `auto-chain`, `single-pr`, or `exception-ok`; above the review threshold, `auto-chain` resolves without asking again.
 
 The package should ensure SDD assets are present as global Pi runtime assets without the user needing to remember per-project setup commands. If assets are missing, install them non-destructively into:
 
