@@ -18,6 +18,33 @@ const passthroughTheme = {
 	},
 };
 
+const statusTheme = {
+	bold(value: string) {
+		return value;
+	},
+	fg(color: string, value: string) {
+		return `<${color}>${value}</${color}>`;
+	},
+};
+
+function routineRenderContext(overrides: Record<string, unknown> = {}) {
+	return {
+		args: {},
+		toolCallId: "tool-call",
+		invalidate() {},
+		lastComponent: undefined,
+		state: {},
+		cwd: "/repo",
+		executionStarted: false,
+		argsComplete: true,
+		isPartial: true,
+		expanded: false,
+		showImages: false,
+		isError: false,
+		...overrides,
+	};
+}
+
 function renderToString(component: { render(width: number): string[] }): string {
 	return component.render(120).join("\n");
 }
@@ -240,13 +267,16 @@ test("quiet tool rendering refuses to compact composed Gentle AI shell commands"
 		"gentle-ai review status --next-transition >(tee target)",
 		"gentle-ai review status --next-transition > status.json",
 		"gentle-ai review status --next-transition < status.json",
+		"gentle-ai review status $HOME",
+		"gentle-ai review status ${HOME}",
+		"gentle-ai review status\n",
 	];
 
 	for (const command of commands) {
 		assert.equal(gentleAiRoutineCommand({ command }), undefined, command);
 		const call = renderToString(tools.get("bash").renderCall({ command }, passthroughTheme, {}));
 		const output = renderToString(tools.get("bash").renderResult(textResult("command output"), { expanded: true, isPartial: false }, passthroughTheme, { args: { command } }));
-		assert.equal(call.replace(/[ \t]+$/gm, "").trimEnd(), `$ ${command}`);
+		assert.equal(call.replace(/[ \t]+$/gm, "").trimEnd(), `$ ${command.trimEnd()}`);
 		assert.match(output, /command output/);
 	}
 });
@@ -264,10 +294,160 @@ test("quiet tool rendering compacts successful routine Gentle AI calls but prese
 	const failure = renderToString(tool.renderResult(textResult("review status failed: authority unavailable"), { expanded: false, isPartial: false, isError: true }, passthroughTheme, { args: { command } }));
 
 	assert.equal([...textRose].length, 2);
-	assert.equal(call.trimEnd(), `${textRose} Gentle AI review …`);
+	assert.equal(call.trimEnd(), `${textRose} Gentle AI · running · review status`);
 	assert.equal(collapsed, "");
 	assert.match(expanded, /"next_transition":"stop"/);
 	assert.match(failure, /review status failed: authority unavailable/);
+});
+
+test("quiet tool rendering transitions one Gentle AI header through lifecycle states", () => {
+	const { pi, tools } = createPi();
+	withEnv({ GENTLE_PI_QUIET_TOOLS: undefined }, () => quietTools(pi as any));
+	const tool = tools.get("bash");
+	const command = "gentle-ai review status --cwd /repo/private-change";
+
+	const initial = tool.renderCall({ command }, statusTheme, routineRenderContext());
+	const initialText = renderToString(initial).trimEnd();
+	const running = tool.renderCall(
+		{ command },
+		statusTheme,
+		routineRenderContext({ executionStarted: true, lastComponent: initial }),
+	);
+	const runningText = renderToString(running).trimEnd();
+	const completed = tool.renderCall(
+		{ command },
+		statusTheme,
+		routineRenderContext({
+			executionStarted: true,
+			isPartial: false,
+			lastComponent: running,
+		}),
+	);
+	const completedText = renderToString(completed).trimEnd();
+	const failed = tool.renderCall(
+		{ command },
+		statusTheme,
+		routineRenderContext({
+			executionStarted: true,
+			isPartial: false,
+			isError: true,
+			lastComponent: completed,
+		}),
+	);
+	const failedText = renderToString(failed).trimEnd();
+
+	assert.strictEqual(initial, running);
+	assert.strictEqual(running, completed);
+	assert.strictEqual(completed, failed);
+	assert.equal(initialText, "<warning>🌹︎ Gentle AI · running · review status</warning>");
+	assert.equal(runningText, "<warning>🌹︎ Gentle AI · running · review status</warning>");
+	assert.equal(completedText, "<success>🌹︎ Gentle AI · completed · review status</success>");
+	assert.equal(failedText, "<error>🌹︎ Gentle AI · failed · review status</error>");
+	assert.doesNotMatch(failedText, /private-change/);
+});
+
+test("quiet tool rendering displays only finite safe Gentle AI operation paths", () => {
+	const { pi, tools } = createPi();
+	withEnv({ GENTLE_PI_QUIET_TOOLS: undefined }, () => quietTools(pi as any));
+	const tool = tools.get("bash");
+	const rose = "🌹︎";
+	const cases = [
+		["gentle-ai sdd-status change-123 --cwd /repo/private", "sdd status"],
+		["gentle-ai sdd-continue change-123 --json", "sdd continue"],
+		["gentle-ai sdd-attempt acquire --change change-123", "sdd attempt acquire"],
+		["gentle-ai sdd-attempt settle --change change-123 --actor maintainer", "sdd attempt settle"],
+		["gentle-ai review capabilities --cwd /repo/private", "review capabilities"],
+		["gentle-ai review start --target sha256:secret --path src/private.ts", "review start"],
+		["gentle-ai review finalize --lineage lineage-secret --payload '{\"secret\":true}'", "review finalize"],
+		["gentle-ai review status --lineage lineage-secret", "review status"],
+		["gentle-ai review repair --reason private-reason", "review repair"],
+		["gentle-ai review invalidate --lineage lineage-secret", "review invalidate"],
+		["gentle-ai review abandon --lineage lineage-secret", "review abandon"],
+		["gentle-ai review recover --lineage lineage-secret", "review recover"],
+		["gentle-ai review reclaim --lineage lineage-secret", "review reclaim"],
+		["gentle-ai review validate --cwd /repo/private", "review validate"],
+		["gentle-ai review capture-result --input result.json", "review capture result"],
+		["gentle-ai review capture-refuter --input result.json", "review capture refuter"],
+		["gentle-ai review capture-validation --input result.json", "review capture validation"],
+		["gentle-ai review capture-evidence --input evidence.json", "review capture evidence"],
+		["gentle-ai review preserve-result --input result.json", "review preserve result"],
+		["gentle-ai review lens-context --lens reviewer", "review lens context"],
+		["gentle-ai review retry-final-verification --incident incident.json", "review retry final verification"],
+		["gentle-ai review store-reset --authorization secret", "review store reset"],
+		["gentle-ai review inspect-authority --path /repo/private", "review inspect authority"],
+		["gentle-ai review inspect-candidate --path /repo/private", "review inspect candidate"],
+		["gentle-ai review dispose-result --reference result-secret", "review dispose result"],
+		["gentle-ai review reopen-results --reference result-secret", "review reopen results"],
+		["gentle-ai review opencode-transport --payload secret", "review opencode transport"],
+		["gentle-ai review bind-sdd --change change-123 --lineage lineage-secret", "review bind sdd"],
+		["gentle-ai review mode enable --actor maintainer", "review mode enable"],
+		["gentle-ai review mode disable --actor maintainer", "review mode disable"],
+		["gentle-ai review mode status --json", "review mode status"],
+		["gentle-ai review validate --gate post-apply --cwd /repo/private", "review validate post apply"],
+		["gentle-ai review validate --gate pre-commit --cwd /repo/private", "review validate pre commit"],
+		["gentle-ai review validate --gate pre-push --cwd /repo/private", "review validate pre push"],
+		["gentle-ai review validate --gate pre-pr --cwd /repo/private", "review validate pre pr"],
+		["gentle-ai review validate --gate release --cwd /repo/private", "review validate release"],
+		["gentle-ai review schema capture-result-dry-run --path /tmp/private.json", "review schema capture result dry run"],
+		["gentle-ai review schema final-verification-incident --path /tmp/private.json", "review schema final verification incident"],
+		["gentle-ai review schema refuter --path /tmp/private.json", "review schema refuter"],
+		["gentle-ai review schema reviewer --path /tmp/private.json", "review schema reviewer"],
+		["gentle-ai review schema validator --path /tmp/private.json", "review schema validator"],
+		["gentle-ai review schema verification-evidence --path /tmp/private.json", "review schema verification evidence"],
+		["gentle-ai review schema verification-evidence-record --path /tmp/private.json", "review schema verification evidence record"],
+		["gentle-ai review unknown-operation --change change-123 --reason private-reason", "review"],
+		["gentle-ai review mode restart --actor maintainer", "review"],
+		["gentle-ai review validate --gate unknown-gate --cwd /repo/private", "review"],
+		["gentle-ai review schema unknown-schema --path /tmp/private.json", "review schema"],
+	];
+
+	for (const [command, path] of cases) {
+		const rendered = renderToString(
+			tool.renderCall(
+				{ command },
+				passthroughTheme,
+				routineRenderContext({ args: { command } }),
+			),
+		);
+		assert.equal(rendered.trimEnd(), `${rose} Gentle AI · running · ${path}`, command);
+		assert.doesNotMatch(rendered, /change-123|private|secret|lineage|sha256|result\.json|incident\.json/);
+	}
+});
+
+test("quiet tool rendering hides the routine partial result because the header owns state", () => {
+	const { pi, tools } = createPi();
+	withEnv({ GENTLE_PI_QUIET_TOOLS: undefined }, () => quietTools(pi as any));
+	const tool = tools.get("bash");
+	const command = "gentle-ai review status --cwd /repo/private";
+
+	const partial = renderToString(
+		tool.renderResult(
+			textResult("{\"status\":\"running\"}"),
+			{ expanded: false, isPartial: true },
+			passthroughTheme,
+			{ ...routineRenderContext({ args: { command } }), isError: false },
+		),
+	);
+	const partialExpanded = renderToString(
+		tool.renderResult(
+			textResult("{\"status\":\"running\"}"),
+			{ expanded: true, isPartial: true },
+			passthroughTheme,
+			{ ...routineRenderContext({ args: { command } }), isError: false },
+		),
+	);
+	const partialFailure = renderToString(
+		tool.renderResult(
+			textResult("review status failed: authority unavailable"),
+			{ expanded: false, isPartial: true },
+			passthroughTheme,
+			{ ...routineRenderContext({ args: { command } }), isError: true },
+		),
+	);
+
+	assert.equal(partial, "");
+	assert.match(partialExpanded, /"status":"running"/);
+	assert.match(partialFailure, /review status failed: authority unavailable/);
 });
 
 test("quiet tool rendering keeps collapsed git bash result tails", () => {
