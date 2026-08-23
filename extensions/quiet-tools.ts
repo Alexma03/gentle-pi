@@ -103,6 +103,116 @@ function isGitCommand(args: Record<string, unknown> | undefined): boolean {
 	return /^(?:env\s+\S+=\S+\s+|command\s+|\w+=\S+\s+)*git(?:\s|$)/.test(command);
 }
 
+export type GentleAiRoutineCommand = "sdd-status" | "sdd-continue" | "sdd-attempt" | "review";
+
+const SHELL_COMMAND_PREFIX = String.raw`(?:env\s+\S+=\S+\s+|command\s+|\w+=\S+\s+)*`;
+const GENTLE_AI_EXECUTABLE = String.raw`(?:gentle-ai|(?:\.{1,2}[\\/]|(?:[A-Za-z]:)?(?:[\\/][^\\/\s]+)*[\\/])\.gentle-ai[\\/]v\d+\.\d+\.\d+[\\/]gentle-ai(?:\.exe)?)`;
+const GENTLE_AI_COMMAND_ARGUMENTS = new RegExp(String.raw`^${SHELL_COMMAND_PREFIX}${GENTLE_AI_EXECUTABLE}\s+(.+)$`);
+const SHELL_EXPANSION_OR_COMPOSITION = /[;&|`<>\r\n$]/;
+
+const REVIEW_DIRECT_OPERATIONS = new Set([
+	"capabilities",
+	"start",
+	"finalize",
+	"status",
+	"repair",
+	"invalidate",
+	"abandon",
+	"recover",
+	"reclaim",
+	"validate",
+	"capture-result",
+	"capture-refuter",
+	"capture-validation",
+	"capture-evidence",
+	"preserve-result",
+	"lens-context",
+	"retry-final-verification",
+	"store-reset",
+	"inspect-authority",
+	"inspect-candidate",
+	"dispose-result",
+	"reopen-results",
+	"opencode-transport",
+	"bind-sdd",
+]);
+const REVIEW_MODE_VALUES = new Set(["enable", "disable", "status"]);
+const REVIEW_VALIDATE_GATES = new Set(["post-apply", "pre-commit", "pre-push", "pre-pr", "release"]);
+const REVIEW_SCHEMA_NAMES = new Set([
+	"capture-result-dry-run",
+	"final-verification-incident",
+	"refuter",
+	"reviewer",
+	"validator",
+	"verification-evidence",
+	"verification-evidence-record",
+]);
+
+function gentleAiCommandTokens(args: Record<string, unknown> | undefined): string[] | undefined {
+	const rawCommand = typeof args?.command === "string" ? args.command : "";
+	if (SHELL_EXPANSION_OR_COMPOSITION.test(rawCommand)) return undefined;
+	const command = rawCommand.trim();
+	const match = GENTLE_AI_COMMAND_ARGUMENTS.exec(command);
+	return match?.[1].trim().split(/\s+/) ?? undefined;
+}
+
+function displayToken(token: string): string {
+	return token.replace(/-/g, " ");
+}
+
+function validateGate(tokens: string[]): string | undefined {
+	const gateFlag = tokens.findIndex((token) => token === "--gate" || token.startsWith("--gate="));
+	if (gateFlag < 0) return undefined;
+	const gate = tokens[gateFlag]!.startsWith("--gate=")
+		? tokens[gateFlag]!.slice("--gate=".length)
+		: tokens[gateFlag + 1];
+	return gate !== undefined && REVIEW_VALIDATE_GATES.has(gate) ? gate : "";
+}
+
+/**
+ * Matches only supported routine Gentle AI CLI calls, including bounded
+ * package-local paths, not arbitrary shell output that merely mentions
+ * gentle-ai. These commands otherwise emit machine-readable SDD/RDD data.
+ */
+export function gentleAiRoutineCommand(args: Record<string, unknown> | undefined): GentleAiRoutineCommand | undefined {
+	const tokens = gentleAiCommandTokens(args);
+	if (!tokens) return undefined;
+	if (tokens[0] === "sdd-status") return "sdd-status";
+	if (tokens[0] === "sdd-continue") return "sdd-continue";
+	if (tokens[0] === "sdd-attempt" && (tokens[1] === "acquire" || tokens[1] === "settle")) return "sdd-attempt";
+	if (tokens[0] === "review") return "review";
+	return undefined;
+}
+
+export function gentleAiOperationPath(args: Record<string, unknown> | undefined): string | undefined {
+	const tokens = gentleAiCommandTokens(args);
+	if (!tokens) return undefined;
+
+	if (tokens[0] === "sdd-status") return "sdd status";
+	if (tokens[0] === "sdd-continue") return "sdd continue";
+	if (tokens[0] === "sdd-attempt" && (tokens[1] === "acquire" || tokens[1] === "settle")) {
+		return `sdd attempt ${tokens[1]}`;
+	}
+	if (tokens[0] !== "review") return undefined;
+
+	const operation = tokens[1];
+	if (operation === undefined) return "review";
+	if (operation === "mode") {
+		const mode = tokens[2];
+		return mode !== undefined && REVIEW_MODE_VALUES.has(mode) ? `review mode ${displayToken(mode)}` : "review";
+	}
+	if (operation === "validate") {
+		const gate = validateGate(tokens);
+		if (gate === "") return "review";
+		return gate === undefined ? "review validate" : `review validate ${displayToken(gate)}`;
+	}
+	if (operation === "schema") {
+		const schema = tokens[2];
+		return schema !== undefined && REVIEW_SCHEMA_NAMES.has(schema) ? `review schema ${displayToken(schema)}` : "review schema";
+	}
+	return REVIEW_DIRECT_OPERATIONS.has(operation) ? `review ${displayToken(operation)}` : "review";
+}
+
 interface ToolResultFormatOptions {
 	expanded: boolean;
 	isError?: boolean;
@@ -116,6 +226,7 @@ export function formatToolResultOutput(
 ): string {
 	const text = safeText(extractTextContent(result));
 	if (expanded || isError) return text ? `\n${text}` : "";
+	if (toolName === "bash" && gentleAiRoutineCommand(args)) return "";
 
 	if (toolName === "bash" && isGitCommand(args)) {
 		const tail = tailLines(text, COLLAPSED_TAIL_LINE_LIMIT);
@@ -140,6 +251,27 @@ function lineRangeSuffix(args: Record<string, unknown>, theme: ThemeLike): strin
 	const startLine = typeof args.offset === "number" ? args.offset : 1;
 	const endLine = typeof args.limit === "number" ? startLine + args.limit - 1 : undefined;
 	return theme.fg("warning", `:${startLine}${endLine === undefined ? "" : `-${endLine}`}`);
+}
+
+interface ToolRenderContextLike {
+	args?: Record<string, unknown>;
+	executionStarted?: boolean;
+	isPartial?: boolean;
+	isError?: boolean;
+	lastComponent?: unknown;
+}
+
+function renderGentleAiCall(operationPath: string, theme: ThemeLike, context?: ToolRenderContextLike): Text {
+	const status = context?.isError
+		? "failed"
+		: !context?.executionStarted || context.isPartial
+			? "running"
+			: "completed";
+	const color = status === "running" ? "warning" : status === "completed" ? "success" : "error";
+	const value = theme.fg(color, theme.bold(`🌹︎ Gentle AI · ${status} · ${operationPath}`));
+	const component = context?.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+	component.setText(value);
+	return component;
 }
 
 function formatToolCall(toolName: QuietToolName, args: Record<string, unknown>, theme: ThemeLike): string {
@@ -192,19 +324,29 @@ function registerQuietTool(pi: ExtensionAPI, toolName: QuietToolName): void {
 			const runtimeTool = getBuiltInTools(ctx.cwd)[toolName];
 			return runtimeTool.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
-		renderCall(args, theme) {
-			return new Text(formatToolCall(toolName, args as Record<string, unknown>, theme), 0, 0);
+		renderCall(args, theme, context) {
+			const callArgs = args as Record<string, unknown>;
+			const operationPath = toolName === "bash" ? gentleAiOperationPath(callArgs) : undefined;
+			if (operationPath) return renderGentleAiCall(operationPath, theme, context);
+			return new Text(formatToolCall(toolName, callArgs, theme), 0, 0);
 		},
 		renderResult(result, options, theme, context) {
+			const renderContext = context as ToolRenderContextLike | undefined;
+			const isError = renderContext?.isError ?? options.isError ?? false;
+			const routineCommand = toolName === "bash" && gentleAiRoutineCommand(renderContext?.args);
 			if (options.isPartial) {
-				return new Text(theme.fg("warning", partialLabel(toolName)), 0, 0);
+				if (routineCommand && !isError) {
+					if (!options.expanded) return new Text("", 0, 0);
+				} else if (!(routineCommand && isError)) {
+					return new Text(theme.fg("warning", partialLabel(toolName)), 0, 0);
+				}
 			}
 			const output = formatToolResultOutput(toolName, result, {
 				expanded: options.expanded,
-				isError: options.isError,
-				args: context.args as Record<string, unknown> | undefined,
+				isError,
+				args: renderContext?.args,
 			});
-			const color = options.expanded ? "toolOutput" : options.isError ? "error" : "muted";
+			const color = options.expanded ? "toolOutput" : isError ? "error" : "muted";
 			return new Text(output ? theme.fg(color, output) : "", 0, 0);
 		},
 	});
