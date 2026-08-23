@@ -233,6 +233,9 @@ function isNormativeLine(line: string): boolean {
 }
 
 const fixtureLines = readFileSync(FIXTURE_PATH, "utf8").split("\n");
+// Fixture line 191 predates canonical-authority resolution; keep its coverage by
+// asserting the intentionally updated production wording instead of weakening the range.
+const CURRENT_HARD_PREFLIGHT_INVARIANT = "Hard preflight invariant: `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named \"preflight\" are not session preflight. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has an injected `## SDD Session Preflight` block or a canonical-authority resolution. Defaults and capability constraints may resolve fields without confirmation prompts; preserve unresolved-choice and safety gates.";
 const SUPERSEDED_LIFECYCLE_REVIEW_LINES = new Set([
 	70,
 	// 74/77: the loose mode-choice background lines were replaced by the
@@ -266,6 +269,7 @@ for (const range of DISPOSITION_MAP) {
 				const raw = fixtureLines[ln - 1];
 				if (raw === undefined || !isNormativeLine(raw)) continue;
 				const trimmed = raw.trim();
+				const expected = ln === 191 ? CURRENT_HARD_PREFLIGHT_INVARIANT : trimmed;
 				if (SUPERSEDED_LIFECYCLE_REVIEW_LINES.has(ln)) {
 					assert.ok(
 						!targetContent.includes(trimmed),
@@ -281,8 +285,8 @@ for (const range of DISPOSITION_MAP) {
 					continue;
 				}
 				assert.ok(
-					targetContent.includes(trimmed),
-					`normative line lost: fixture:${ln} "${trimmed}" not found verbatim in ${TARGET_FILE[range.target]} (disposition: ${range.target}, section: ${range.label})`,
+					targetContent.includes(expected),
+					`normative line lost: fixture:${ln} "${expected}" not found verbatim in ${TARGET_FILE[range.target]} (disposition: ${range.target}, section: ${range.label})`,
 				);
 			}
 		},

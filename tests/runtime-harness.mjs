@@ -1049,17 +1049,13 @@ async function run() {
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-sync.md")), true);
 		assert.equal(existsSync(join(globalAgentHome, "gentle-ai", "support", "sdd-status-contract.md")), true);
 		assert.equal(existsSync(join(globalAgentHome, "chains", "sdd-full.chain.md")), true);
-		assert.equal(ctx.ui.selections.length, 3);
-		assert.equal(ctx.ui.selections[0].label, "SDD execution mode");
-		assert.equal(ctx.ui.selections[1].label, "SDD artifact store");
-		assert.deepEqual(ctx.ui.selections[1].options, ["openspec"]);
-		assert.equal(ctx.ui.selections[2].label, "SDD PR chaining");
-		assert.match(ctx.ui.notifications.at(-1).message, /Preference source: user prompt/);
+		assert.equal(ctx.ui.selections.length, 0, "automatic SDD triggers must not render confirmation-only selectors");
+		assert.match(ctx.ui.notifications.at(-1).message, /Preference source: canonical default or persisted preference/);
 		assert.deepEqual(
 			await inputHook({ text: "please use sdd for this change", source: "interactive" }, ctx),
 			{ action: "continue" },
 		);
-		assert.equal(ctx.ui.selections.length, 3, "natural SDD trigger should reuse session choices");
+		assert.equal(ctx.ui.selections.length, 0, "natural SDD triggers reuse preferences without prompts");
 		assert.deepEqual(
 			await inputHook({ text: "/sdd", source: "interactive" }, ctx),
 			{ action: "continue" },
@@ -1072,7 +1068,7 @@ async function run() {
 			await inputHook({ text: "/sdd:plan", source: "interactive" }, ctx),
 			{ action: "continue" },
 		);
-		assert.equal(ctx.ui.selections.length, 3);
+		assert.equal(ctx.ui.selections.length, 0, "slash SDD triggers use automatic defaults without prompts");
 
 		assert.deepEqual(
 			await inputHook({ text: "/sdd-plan this change", source: "interactive" }, ctx),
@@ -1100,19 +1096,18 @@ async function run() {
 				"global SDD model routing must be materialized in agent frontmatter, not project settings overrides",
 			);
 		}
-		assert.equal(ctx.ui.selections.length, 3);
-		assert.deepEqual(ctx.ui.selections[1].options, ["openspec"]);
-		assert.match(ctx.ui.notifications.at(-1).message, /SDD preflight complete/);
+		assert.equal(ctx.ui.selections.length, 0, "automatic SDD routing must not render confirmation-only selectors");
+		assert.match(ctx.ui.notifications.at(-1).message, /Preference source: canonical default or persisted preference/);
 		await commands.get("gentle:status").handler("", ctx);
 		assert.match(ctx.ui.notifications.at(-1).message, /Global SDD assets stale: 0 file\(s\)/);
 		assert.doesNotMatch(ctx.ui.notifications.at(-1).message, /install-sdd --force/);
 
 		await inputHook({ text: "/sdd-plan another change", source: "interactive" }, ctx);
-		assert.equal(ctx.ui.selections.length, 3, "preflight should run only once per session");
+		assert.equal(ctx.ui.selections.length, 0, "automatic preflight should remain prompt-free for the session");
 		const promptHook = hooks.get("before_agent_start")[0];
 		const promptResult = await promptHook({ systemPrompt: "base" }, ctx);
 		assert.match(promptResult.systemPrompt, /SDD Session Preflight/);
-		assert.match(promptResult.systemPrompt, /Execution mode: interactive/);
+		assert.match(promptResult.systemPrompt, /Execution mode: auto/);
 		const workerPromptResult = await promptHook(
 			{ agentName: "worker", systemPrompt: "worker base" },
 			ctx,
@@ -1137,7 +1132,7 @@ async function run() {
 			});
 			assert.equal(existsSync(join(slashSddCwd, ".pi", "agents", "sdd-apply.md")), false);
 			assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
-			assert.equal(ctx.ui.selections.length, 3, `${text} should run canonical preflight`);
+			assert.equal(ctx.ui.selections.length, 0, `${text} should use automatic preflight without selectors`);
 		} finally {
 			await rm(slashSddCwd, { recursive: true, force: true });
 		}
@@ -1149,9 +1144,11 @@ async function run() {
 		await commands.get("gentle:sdd-preflight").handler("", ctx);
 		assert.equal(existsSync(join(commandSddCwd, ".pi", "agents", "sdd-apply.md")), false);
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
-		assert.equal(ctx.ui.selections.length, 3);
+		assert.equal(ctx.ui.selections.length, 2, "explicit preflight prompts intentional choice fields");
+		assert.equal(ctx.ui.selections.some(({ label }) => label === "SDD artifact store"), false, "one-option artifact store must be elided");
+		assert.match(ctx.ui.notifications.at(-1).message, /Preference source: explicit session choice/);
 		await commands.get("gentle:sdd-preflight").handler("", ctx);
-		assert.equal(ctx.ui.selections.length, 3, "manual preflight command should reuse session choices");
+		assert.equal(ctx.ui.selections.length, 4, "explicit preflight remains an intentional re-prompt");
 	} finally {
 		await rm(commandSddCwd, { recursive: true, force: true });
 	}
@@ -1170,7 +1167,7 @@ async function run() {
 		assert.equal(existsSync(join(sddAgentGuardCwd, ".pi", "chains", "sdd-full.chain.md")), false);
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
 		assert.equal(existsSync(join(globalAgentHome, "chains", "sdd-full.chain.md")), true);
-		assert.equal(ctx.ui.selections.length, 3);
+		assert.equal(ctx.ui.selections.length, 0, "automatic SDD-agent startup must not render selectors");
 		assert.match(promptResult.systemPrompt, /SDD Session Preflight/);
 		assert.doesNotMatch(
 			promptResult.systemPrompt,
@@ -1191,7 +1188,7 @@ async function run() {
 			},
 			ctx,
 		);
-		assert.equal(ctx.ui.selections.length, 3, "SDD agent guard should reuse session choices");
+		assert.equal(ctx.ui.selections.length, 0, "SDD-agent startup should reuse automatic preferences");
 		assert.doesNotMatch(
 			reusedPromptResult.systemPrompt,
 			/el Gentleman Identity and Harness/,
@@ -1213,7 +1210,7 @@ async function run() {
 			ctx,
 		);
 		assert.match(promptResult.systemPrompt, /SDD Session Preflight/);
-		assert.match(promptResult.systemPrompt, /No interactive UI was available/);
+		assert.match(promptResult.systemPrompt, /canonical defaults or persisted choices/);
 		assert.equal(ctx.ui.selections.length, 0);
 		assert.equal(existsSync(join(noUiSddAgentCwd, ".pi", "agents", "sdd-apply.md")), false);
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-apply.md")), true);
@@ -1326,7 +1323,7 @@ async function run() {
 		pi.setActiveTools(["read", "bash", "edit", "write", "engram_mem_save"]);
 		const ctx = createCtx(directEngramToolCwd, true, "direct-engram-session");
 		await commands.get("gentle:sdd-preflight").handler("", ctx);
-		assert.deepEqual(ctx.ui.selections[1].options, ["openspec"]);
+		assert.equal(ctx.ui.selections.some(({ label }) => label === "SDD artifact store"), false, "unrecognized Engram capability must elide the artifact selector");
 	} finally {
 		pi.setActiveTools(["read", "bash", "edit", "write"]);
 		await rm(directEngramToolCwd, { recursive: true, force: true });
@@ -1384,12 +1381,12 @@ async function run() {
 		assert.equal(existsSync(join(globalAgentHome, "agents", "sdd-sync.md")), true);
 		assert.equal(existsSync(join(globalAgentHome, "gentle-ai", "support", "sdd-status-contract.md")), true);
 		assert.equal(existsSync(join(globalAgentHome, "chains", "sdd-full.chain.md")), true);
-		assert.equal(ctx.ui.selections.length, 3);
+		assert.equal(ctx.ui.selections.length, 0, "sdd-init uses automatic preflight defaults");
 		assert.match(ctx.ui.notifications[0].message, /SDD preflight complete/);
 		assert.match(ctx.ui.notifications.at(-1).message, /Wrote openspec\/config\.yaml/);
 
 		await commands.get("gentle:sdd-preflight").handler("", ctx);
-		assert.equal(ctx.ui.selections.length, 3, "/sdd-init preflight should be reused by later manual preflight");
+		assert.equal(ctx.ui.selections.length, 2, "explicit preflight prompts after automatic sdd-init");
 	} finally {
 		await rm(sddCwd, { recursive: true, force: true });
 	}

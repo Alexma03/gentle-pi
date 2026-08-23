@@ -36,6 +36,8 @@ import {
 	isPackageManagedSddAsset,
 	isSddPreflightTrigger,
 	renderSddPreflightPrompt,
+	SDD_PREFLIGHT_FIELDS,
+	type SddPreflightField,
 	type SddPreflightPreferences,
 	updatePackageManagedSddAgentOwnership,
 } from "../lib/sdd-preflight.ts";
@@ -5494,12 +5496,8 @@ function createGentleAiExtensionForTesting(
 		},
 	});
 
-	function runSddPreflight(ctx: ExtensionContext): Promise<SddPreflightPreferences> {
-		return ensureSddPreflight(ctx, {
-			pi,
-			installAssets: (cwd) => installSddAssets(cwd, false),
-			applyModelConfig: async () => applySavedModelConfig(ctx),
-		});
+	function runSddPreflight(ctx: ExtensionContext, promptFields: readonly SddPreflightField[] = []): Promise<SddPreflightPreferences> {
+		return ensureSddPreflight(ctx, { pi, installAssets: (cwd) => installSddAssets(cwd, false), applyModelConfig: async () => applySavedModelConfig(ctx) }, { promptFields });
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -5619,7 +5617,7 @@ function createGentleAiExtensionForTesting(
 		description:
 			"Run or reuse the lazy SDD preflight for this Pi session.",
 		handler: async (_args, ctx) => {
-			await runSddPreflight(ctx);
+			await runSddPreflight(ctx, SDD_PREFLIGHT_FIELDS);
 		},
 	});
 
