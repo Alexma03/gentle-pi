@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -9,8 +9,8 @@ import test, { after } from "node:test";
 // orchestrator-lazy-diet migration tests
 //
 // Locks the split of the always-on `assets/orchestrator.md` into a thin core
-// plus three path-substituted lazy reference files (see design.md "Core
-// budget rebuilt from measured drafts" and "Appendix: drafted core texts").
+// plus lazy reference files (see design.md "Core budget rebuilt from measured
+// drafts" and "Appendix: drafted core texts").
 //
 // `getOrchestratorPrompt`'s rendered return value is memoized in a
 // module-level cache (first-read-wins for the process lifetime — see design.md
@@ -19,17 +19,19 @@ import test, { after } from "node:test";
 // ambient environment variables, so production runtime asset resolution stays
 // deterministic. The representative production assets directory below is
 // populated by COPYING the real repo assets (dynamically, at test-run time)
-// into a short-path tmpdir — this isolates byte-budget measurement from the
-// real repo's absolute path length while keeping content representative of
-// production. Tests that need to inspect the real repo files directly (the
-// disposition-mapped union sweep, the core-alone token assertions) read
-// `assets/*.md` directly via `readFileSync`, sidestepping the cache entirely.
+// into short and deliberately long tmpdir paths. This isolates byte-budget
+// measurement from the real repo's absolute path length while keeping content
+// representative of production. Tests that need to inspect the real repo files
+// directly (the disposition-mapped union sweep, the core-alone token
+// assertions) read `assets/*.md` directly via `readFileSync`, sidestepping the
+// cache entirely.
 // ---------------------------------------------------------------------------
 
 const REPO_ROOT = join(import.meta.dirname, "..");
 const REAL_ASSETS_DIR = join(REPO_ROOT, "assets");
 const FIXTURE_PATH = join(import.meta.dirname, "fixtures", "orchestrator.pre-diet.md");
-const BUDGET_BYTES = 10240;
+const BUDGET_BYTES = 8192;
+const MIN_CONTROLLED_LONG_ASSETS_ROOT_CHARS = 93;
 
 const LAZY_ASSET_NAMES = [
 	"orchestrator.md",
@@ -38,42 +40,40 @@ const LAZY_ASSET_NAMES = [
 	"orchestrator-memory.md",
 	"orchestrator-skills.md",
 ] as const;
+const LAZY_REFERENCE_FILE_NAMES = LAZY_ASSET_NAMES.slice(1);
+
+function copyRequiredLazyAssets(destination: string): void {
+	for (const name of LAZY_ASSET_NAMES) {
+		const source = join(REAL_ASSETS_DIR, name);
+		assert.ok(existsSync(source), `missing packaged lazy asset: ${name}`);
+		copyFileSync(source, join(destination, name));
+	}
+}
 
 const representativeProductionAssetsDir = mkdtempSync(join(tmpdir(), "gp-b-"));
-for (const name of LAZY_ASSET_NAMES) {
-	const src = join(REAL_ASSETS_DIR, name);
-	writeFileSync(
-		join(representativeProductionAssetsDir, name),
-		existsSync(src) ? readFileSync(src) : `stub placeholder for ${name} (not authored yet)\n`,
-	);
-}
+copyRequiredLazyAssets(representativeProductionAssetsDir);
 const { __testing } = await import("../extensions/gentle-ai.ts");
 
-const MIN_REALISTIC_INSTALL_ASSETS_PATH_CHARS = 59;
-
-// Realistic-length assets path: mirrors an actual installed path such as
-// `~/.pi/agent/npm/node_modules/gentle-pi/assets`, so the budget assertion is
-// not laundered through an artificially short mkdtemp path. The helper is also
-// exercised in a fresh child process (`tests/fixtures/measure-orchestrator-prompt.mjs`)
-// to keep production cache behavior separate from fixture measurements.
-const realisticBaseDir = mkdtempSync(join(tmpdir(), "gp-realistic-"));
-const realisticDir = join(realisticBaseDir, ".pi", "agent", "npm", "node_modules", "gentle-pi", "assets");
-mkdirSync(realisticDir, { recursive: true });
-assert.ok(
-	realisticDir.length >= MIN_REALISTIC_INSTALL_ASSETS_PATH_CHARS,
-	`realistic scratch assets path is only ${realisticDir.length} chars, need >= ${MIN_REALISTIC_INSTALL_ASSETS_PATH_CHARS} to mirror a real install path`,
+// A controlled long assets root proves the parent prompt remains within the
+// canonical budget independently of the checkout or installed-package path.
+// The child-process measurement keeps production cache behavior separate from
+// fixture measurements.
+const controlledLongBaseDir = mkdtempSync(join(tmpdir(), "gp-long-"));
+const controlledLongAssetsDir = join(
+	controlledLongBaseDir,
+	"path-independent-prompt-budget-".repeat(3),
+	"assets",
 );
-for (const name of LAZY_ASSET_NAMES) {
-	const src = join(REAL_ASSETS_DIR, name);
-	writeFileSync(
-		join(realisticDir, name),
-		existsSync(src) ? readFileSync(src) : `stub placeholder for ${name} (not authored yet)\n`,
-	);
-}
+mkdirSync(controlledLongAssetsDir, { recursive: true });
+assert.ok(
+	controlledLongAssetsDir.length >= MIN_CONTROLLED_LONG_ASSETS_ROOT_CHARS,
+	`controlled long assets root is only ${controlledLongAssetsDir.length} chars, need >= ${MIN_CONTROLLED_LONG_ASSETS_ROOT_CHARS}`,
+);
+copyRequiredLazyAssets(controlledLongAssetsDir);
 
 after(() => {
 	rmSync(representativeProductionAssetsDir, { recursive: true, force: true });
-	rmSync(realisticBaseDir, { recursive: true, force: true });
+	rmSync(controlledLongBaseDir, { recursive: true, force: true });
 });
 
 function readRealAsset(name: string): string {
@@ -98,7 +98,7 @@ function measureOrchestratorPromptBytes(assetsDir: string): number {
 // 2.2 — Byte budget (Spec: Always-On Injection Byte Budget)
 // ---------------------------------------------------------------------------
 
-test("getOrchestratorPrompt return value stays within the 10,240 B budget (short-path stub sanity check)", () => {
+test("getOrchestratorPrompt return value stays within the canonical 8,192 B budget at a short assets root", () => {
 	const rendered = __testing.renderOrchestratorPrompt(representativeProductionAssetsDir);
 	const bytes = Buffer.byteLength(rendered, "utf8");
 	assert.ok(
@@ -107,12 +107,27 @@ test("getOrchestratorPrompt return value stays within the 10,240 B budget (short
 	);
 });
 
-test(`getOrchestratorPrompt return value stays within the 10,240 B budget at a realistic (>= ${MIN_REALISTIC_INSTALL_ASSETS_PATH_CHARS} char) install path length`, () => {
-	const bytes = measureOrchestratorPromptBytes(realisticDir);
+test(`getOrchestratorPrompt keeps a controlled long (>= ${MIN_CONTROLLED_LONG_ASSETS_ROOT_CHARS} char) assets root within the canonical budget`, () => {
+	const rendered = __testing.renderOrchestratorPrompt(controlledLongAssetsDir);
+	const bytes = measureOrchestratorPromptBytes(controlledLongAssetsDir);
+	assert.equal(bytes, Buffer.byteLength(rendered, "utf8"), "child-process and direct render byte counts must match");
 	assert.ok(
 		bytes <= BUDGET_BYTES,
-		`getOrchestratorPrompt() returned ${bytes} B at a realistic ${realisticDir.length}-char ASSETS_DIR path, exceeds the ${BUDGET_BYTES} B budget`,
+		`getOrchestratorPrompt() returned ${bytes} B at controlled ${controlledLongAssetsDir.length}-char assets root, exceeds the ${BUDGET_BYTES} B budget`,
 	);
+	assert.equal(
+		rendered.split(controlledLongAssetsDir).length - 1,
+		1,
+		"the absolute assets root must be declared exactly once",
+	);
+	assert.ok(
+		rendered.includes(`Package assets root: \`${controlledLongAssetsDir}\`. Lazy asset paths below are relative to this root.`),
+		"the parent prompt must declare how to resolve relative lazy asset paths",
+	);
+	for (const name of LAZY_REFERENCE_FILE_NAMES) {
+		assert.ok(rendered.includes(`\`${name}\``), `lazy asset filename is missing: ${name}`);
+	}
+	assert.doesNotMatch(rendered, /\{\{/, "unresolved {{...}} placeholder leaked into the rendered prompt");
 });
 
 // ---------------------------------------------------------------------------
@@ -233,8 +248,10 @@ function isNormativeLine(line: string): boolean {
 }
 
 const fixtureLines = readFileSync(FIXTURE_PATH, "utf8").split("\n");
-// Fixture line 191 predates canonical-authority resolution; keep its coverage by
-// asserting the intentionally updated production wording instead of weakening the range.
+// Fixture lines 187 and 191 predate the root-relative lazy-asset contract and
+// canonical-authority resolution. Keep their coverage by asserting the
+// intentionally updated production wording instead of weakening the range.
+const CURRENT_SDD_WORKFLOW_PATH = "`sdd-orchestrator-workflow.md`";
 const CURRENT_HARD_PREFLIGHT_INVARIANT = "Hard preflight invariant: `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named \"preflight\" are not session preflight. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has an injected `## SDD Session Preflight` block or a canonical-authority resolution. Defaults and capability constraints may resolve fields without confirmation prompts; preserve unresolved-choice and safety gates.";
 const SUPERSEDED_LIFECYCLE_REVIEW_LINES = new Set([
 	70,
@@ -269,7 +286,12 @@ for (const range of DISPOSITION_MAP) {
 				const raw = fixtureLines[ln - 1];
 				if (raw === undefined || !isNormativeLine(raw)) continue;
 				const trimmed = raw.trim();
-				const expected = ln === 191 ? CURRENT_HARD_PREFLIGHT_INVARIANT : trimmed;
+				const expected =
+					ln === 187
+						? CURRENT_SDD_WORKFLOW_PATH
+						: ln === 191
+							? CURRENT_HARD_PREFLIGHT_INVARIANT
+							: trimmed;
 				if (SUPERSEDED_LIFECYCLE_REVIEW_LINES.has(ln)) {
 					assert.ok(
 						!targetContent.includes(trimmed),
@@ -360,20 +382,11 @@ test("relocated lazy bodies are not double-delivered in the always-on core", () 
 	);
 });
 
-test("relocated lazy files are reachable via in-core pointer paths", () => {
+test("relocated lazy files are reachable via root-relative in-core filenames", () => {
 	const rendered = __testing.getOrchestratorPrompt();
-	assert.ok(
-		rendered.includes(join(REAL_ASSETS_DIR, "orchestrator-delegation.md")),
-		"core is missing a reachable pointer to orchestrator-delegation.md",
-	);
-	assert.ok(
-		rendered.includes(join(REAL_ASSETS_DIR, "orchestrator-memory.md")),
-		"core is missing a reachable pointer to orchestrator-memory.md",
-	);
-	assert.ok(
-		rendered.includes(join(REAL_ASSETS_DIR, "orchestrator-skills.md")),
-		"core is missing a reachable pointer to orchestrator-skills.md",
-	);
+	for (const name of LAZY_REFERENCE_FILE_NAMES) {
+		assert.ok(rendered.includes(`\`${name}\``), `core is missing a reachable pointer to ${name}`);
+	}
 });
 
 // ---------------------------------------------------------------------------

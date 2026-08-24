@@ -568,22 +568,7 @@ function renderOrchestratorPrompt(
 	background: BackgroundSubagentsRendering = DEFAULT_BACKGROUND_SUBAGENTS_RENDERING,
 ): string {
 	return readFileSync(join(assetsDir, "orchestrator.md"), "utf8")
-		.replaceAll(
-			"{{GENTLE_PI_SDD_WORKFLOW_PATH}}",
-			join(assetsDir, "sdd-orchestrator-workflow.md"),
-		)
-		.replaceAll(
-			"{{GENTLE_PI_DELEGATION_PATH}}",
-			join(assetsDir, "orchestrator-delegation.md"),
-		)
-		.replaceAll(
-			"{{GENTLE_PI_MEMORY_PATH}}",
-			join(assetsDir, "orchestrator-memory.md"),
-		)
-		.replaceAll(
-			"{{GENTLE_PI_SKILLS_PATH}}",
-			join(assetsDir, "orchestrator-skills.md"),
-		)
+		.replaceAll("{{GENTLE_PI_ASSETS_ROOT}}", assetsDir)
 		.replaceAll(
 			"{{GENTLE_PI_BACKGROUND_POLICY}}",
 			renderBackgroundSubagentsStatusLine(background),

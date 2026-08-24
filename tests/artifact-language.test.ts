@@ -166,7 +166,9 @@ test("orchestrator lazy-loads detailed SDD workflow", async () => {
 	const workflow = await readFile(join(ROOT, "assets/sdd-orchestrator-workflow.md"), "utf8");
 
 	assert.match(orchestrator, /## SDD Workflow \(lazy-loaded\)/);
-	assert.match(orchestrator, /\{\{GENTLE_PI_SDD_WORKFLOW_PATH\}\}/);
+	assert.match(orchestrator, /Package assets root: `\{\{GENTLE_PI_ASSETS_ROOT\}\}`\. Lazy asset paths below are relative to this root\./);
+	assert.match(orchestrator, /`sdd-orchestrator-workflow\.md`/);
+	assert.doesNotMatch(orchestrator, /\{\{GENTLE_PI_SDD_WORKFLOW_PATH\}\}/);
 	assert.match(orchestrator, /injected `## SDD Session Preflight` block or a canonical-authority resolution/);
 	assert.match(orchestrator, /Defaults and capability constraints may resolve fields without confirmation prompts/);
 	assert.doesNotMatch(orchestrator, /or an explicit user answer covering the preflight choices/);
