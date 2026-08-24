@@ -167,6 +167,8 @@ const contractHashes = {
   "contracts/review-integration/v2/schemas/capabilities.schema.json": "7ab061ed27bd3b929d6033cc20f56097e851f4454ca14a815255748b50191248",
   "contracts/review-integration/v2/schemas/consent.schema.json": "b2b4465338497f11927de91cb2e5da12b6cb4a1039afe05aebe1abbf53b21858",
   "contracts/review-integration/v2/schemas/failure.schema.json": "a56a2f715c3138d6f2cee37257cd6e758a15d4e0b1215745951d85831d148967",
+  "contracts/review-integration/v2/schemas/last-event-closure.schema.json": "3e58a4207e54ac955dbef227d2f1a2adcdf8c34f230009785c85b3895023c52a",
+  "contracts/review-integration/v2/schemas/opencode-provider-role.schema.json": "c6b9f216f89c044f8e844b55e7200114850cfbc16642bca0677f30a399d8aa9b",
   "contracts/review-integration/v2/schemas/operation.schema.json": "1c0128a0576064d4338ee0a1945e9d0d0569c1a7a2140217b2539af5d1a9ed1e",
   "contracts/review-integration/v2/schemas/repair.schema.json": "98a85fd45a8ae7f6211ffeeb3f9c478fa1dd1c17f385751f15f2111e6c3ab167",
   "contracts/review-integration/v2/schemas/start.schema.json": "2991e3fcca672d9257d61b6a336fb34e58b15a8e03f8a09a7adf892cae6a8085",

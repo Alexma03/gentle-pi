@@ -11,7 +11,6 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 import { domainHashV1 } from "../lib/review-canonical.ts";
-import { NativeReviewCliV216, NATIVE_REVIEW_ERROR_CODE, NativeReviewCliError } from "../lib/native-review-cli.ts";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const EXTENSIONS = [
@@ -210,6 +209,119 @@ async function run() {
 	const { pi, hooks, commands, flags, tools } = createPi();
 	await loadExtensions(pi);
 
+	// gentle-pi#404: a collect binding that returns the native last-event
+	// closure must terminate after one capture. It must not re-enter a public
+	// lifecycle mutation or synthesize a follow-up transition.
+	{
+		const lineageId = "runtime-last-event";
+		const sha = `sha256:${"a".repeat(64)}`;
+		const tree = "b".repeat(40);
+		const repositoryContext = `rctx1_${"c".repeat(64)}`;
+		const calls = [];
+		const arguments_ = [
+			{ name: "lineage", value: lineageId, token: `--lineage=${lineageId}` },
+			{ name: "expected-revision", value: sha, token: `--expected-revision=${sha}` },
+			{ name: "target", value: sha, token: `--target=${sha}` },
+			{ name: "repository-context", value: repositoryContext, token: `--repository-context=${repositoryContext}` },
+			{ name: "lens", value: "review-risk", token: "--lens=review-risk" },
+			{ name: "order", value: "0", token: "--order=0" },
+			{ name: "subject-hash", value: sha, token: `--subject-hash=${sha}` },
+		];
+		const input = {
+			name: "correction_plan",
+			schema: "gentle-ai.review-correction-plan/v1",
+			captureOperation: "review.capture-correction-plan",
+			arguments: arguments_,
+			submission: {
+				operationToken: "capture-correction-plan",
+				argumentTokens: [...arguments_.map((argument) => argument.token), "--correction-lines={{value}}"],
+				values: [{ slot: "correction_lines", domain: "positive_integer", substitutionLocation: 7, minimum: 1, maximum: 1 }],
+			},
+		};
+		const status = {
+			contract: "gentle-ai.review-integration/v2",
+			applicability: "current_target",
+			authority: { version: "compact-v2", lineageId, state: "correction_required", generation: 1, revision: sha },
+			receipt: { status: "expected_missing" },
+			action: "stop",
+			replayability: "not_replayable",
+			targetIdentity: sha,
+			projection: {
+				schema: "gentle-ai.review-candidate-projection/v1",
+				kind: "current-changes",
+				projection: "workspace",
+				baseTree: tree,
+				initialReviewTree: tree,
+				currentCandidateTree: tree,
+				pathsDigest: sha,
+				paths: ["app.ts"],
+				intendedUntracked: [],
+				intendedUntrackedProof: sha,
+				initialSnapshotIdentity: sha,
+				currentSnapshotIdentity: sha,
+			},
+			repair: { schema: "gentle-ai.review-authority-repair-assessment/v1", status: "unsupported", counts: { lineages: 0, compactLineages: 0, legacyLineages: 0, events: 0, bytes: 0, eligibleCandidates: 0, unsupportedLineages: 0, conflicts: 0 }, supportedOperations: ["review/complete-fix", "review/validate-fix"], authorizationSchema: "gentle-ai.review-repair-authorization/v1" },
+			candidates: [],
+			nextTransition: { kind: "collect", reasonCode: "correction_plan_required", collect: { inputs: [input] } },
+			raw: { schema: "gentle-ai.review-integration.status/v5" },
+		};
+		const nativeReviewCli = {
+			async targetStatus(request) {
+				calls.push({ operation: "status", request });
+				return status;
+			},
+			async captureCorrectionPlan(request) {
+				calls.push({ operation: "capture-correction-plan", request });
+				return {
+					schema: "gentle-ai.review-last-event-closure/v1",
+					operation: "review.capture-correction-plan",
+					lineageId,
+					state: "correction_required",
+					targetIdentity: sha,
+					requestHash: sha,
+					correctionLines: 1,
+					storeRevision: sha,
+				};
+			},
+		};
+		const lastEventPi = createPi();
+		const { createGentleAiExtension } = await import(pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href);
+		createGentleAiExtension({ nativeReviewCli })(lastEventPi.pi);
+		const controller = lastEventPi.tools.get("gentle_review");
+		const capture = lastEventPi.tools.get("gentle_review_capture");
+		assert.ok(controller, "runtime must register the public status controller");
+		assert.ok(capture, "runtime must register the one-slot capture tool");
+		assert.equal(controller.parameters.properties.operation.enum.includes("finalize"), false);
+		assert.equal(controller.parameters.properties.operation.enum.includes("validate"), false);
+
+		const publicStatus = await controller.execute(
+			"runtime-status",
+			{ operation: "status", lineageId },
+			undefined,
+			undefined,
+			createCtx(ROOT, false, lineageId),
+		);
+		const collectBindings = publicStatus.details.collectBindings;
+		assert.equal(publicStatus.details.status, "blocked");
+		assert.equal(collectBindings.length, 1);
+
+		const captured = await capture.execute(
+			"runtime-capture",
+			{ lineageId, collectBinding: collectBindings[0].collectBinding, correctionLines: 1 },
+			undefined,
+			undefined,
+			createCtx(ROOT, false, lineageId),
+		);
+		assert.equal(captured.details.status, "closed");
+		assert.equal(captured.details.outcome, "native-last-event-closure");
+		assert.equal(captured.details.closure.operation, "review.capture-correction-plan");
+		assert.deepEqual(
+			calls.map(({ operation }) => operation),
+			["status", "status", "capture-correction-plan"],
+			"last-event closure must make no follow-up lifecycle mutation",
+		);
+	}
+
 	for (const name of EXPECTED_COMMANDS) {
 		assert.ok(commands.has(name), `missing command ${name}`);
 	}
@@ -272,10 +384,13 @@ async function run() {
 		assert.doesNotMatch(promptResult.systemPrompt, /default\s*\|\s*sonnet\s*\|\s*Non-SDD general delegation/);
 		assert.match(promptResult.systemPrompt, /openspec\/config\.yaml.*not session preflight/s);
 		assert.match(promptResult.systemPrompt, /Do not mark SDD preflight complete/);
-		assert.match(
-			promptResult.systemPrompt,
-			new RegExp(`${ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*assets.*sdd-orchestrator-workflow\\.md`),
+		assert.ok(
+			promptResult.systemPrompt.includes(
+				`Package assets root: \`${join(ROOT, "assets")}\`. Lazy asset paths below are relative to this root.`,
+			),
+			"parent prompt must declare the one absolute root for relative lazy asset paths",
 		);
+		assert.match(promptResult.systemPrompt, /`sdd-orchestrator-workflow\.md`/);
 		assert.doesNotMatch(
 			promptResult.systemPrompt,
 			new RegExp(ambientTestAssetsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
@@ -490,259 +605,6 @@ async function run() {
 	} finally {
 		restoreWorkspaceWritePermissions(candidateDriftCwd);
 		await rm(candidateDriftCwd, { recursive: true, force: true });
-	}
-
-	// Corrective v2 lifecycle settling test: the real controller must call the
-	// native evidence surface before it accepts a targeted-validation document.
-	// This is intentionally controller-level rather than a pure resolver test;
-	// the ordered call trace proves production wiring and the fail-closed gate.
-	const correctionCwd = await tempWorkspace();
-	try {
-		const { createGentleAiExtension } = await import(pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href);
-		const { CandidateViewRegistry } = await import(pathToFileURL(join(ROOT, "lib/review-candidate-view.ts")).href);
-		gitSync(correctionCwd, "init", "-b", "main");
-		await writeFile(join(correctionCwd, "app.ts"), "export const value = 1;\n");
-		gitSync(correctionCwd, "add", "app.ts");
-		gitSync(correctionCwd, "-c", "user.name=Runtime Harness", "-c", "user.email=runtime-harness@example.invalid", "commit", "-m", "base");
-		await writeFile(join(correctionCwd, "app.ts"), "export const value = 2;\n");
-		const candidateViews = new CandidateViewRegistry();
-		const frozen = candidateViews.create({ contributorRoot: correctionCwd });
-		candidateViews.retain(frozen.token, "runtime-correction");
-		const sha = (digit) => `sha256:${digit.repeat(64)}`;
-		const repair = { schema: "gentle-ai.review-authority-repair-assessment/v1", status: "unsupported", counts: { lineages: 0, compactLineages: 0, legacyLineages: 0, events: 0, bytes: 0, eligibleCandidates: 0, unsupportedLineages: 0, conflicts: 0 }, supportedOperations: ["review/complete-fix", "review/validate-fix"], authorizationSchema: "gentle-ai.review-repair-authorization/v1" };
-		const projection = { schema: "gentle-ai.review-integration.projection/v1", kind: "current-changes", projection: "workspace", baseTree: frozen.baseTree, initialReviewTree: frozen.candidateTree, currentCandidateTree: frozen.candidateTree, pathsDigest: sha("a"), paths: frozen.paths, intendedUntracked: [], intendedUntrackedProof: sha("b"), initialSnapshotIdentity: sha("c"), currentSnapshotIdentity: sha("c") };
-		const status = { contract: "gentle-ai.review-integration/v2", applicability: "current_target", authority: { version: "compact-v2", lineageId: "runtime-correction", state: "correction_required", generation: 1, revision: sha("d") }, receipt: { status: "expected_missing" }, action: "finalize", replayability: "not_replayable", frozen: { tier: "medium", originalChangedLines: 1, correctionBudget: 1 }, targetIdentity: sha("e"), projection, repair, candidates: [], nextTransition: { kind: "collect", reasonCode: "verification_evidence_required", collect: { inputs: [{ name: "verification_evidence", schema: "gentle-ai.review-verification-evidence/v2", captureOperation: "review.capture-evidence", arguments: [{ name: "lineage", value: "runtime-correction" }] }] } }, raw: {} };
-		const validationRequest = { schema: "gentle-ai.review-targeted-validation-request/v1", requestHash: sha("f"), lineageId: "runtime-correction", expectedRevision: sha("d"), targetIdentity: sha("e"), fixFindingIds: [], projection: "workspace", correctionCandidateTree: frozen.candidateTree, correctionTargetIdentity: sha("e"), correctionPaths: frozen.paths, correctionPathsDigest: sha("a") };
-		const afterCapture = { ...status, authority: { ...status.authority, state: "validating" }, validationRequest, nextTransition: { kind: "collect", reasonCode: "targeted_validation_required", collect: { inputs: [{ name: "targeted_validation", schema: validationRequest.schema, captureOperation: "external.run_targeted_validation", arguments: [{ name: "lineage", value: "runtime-correction" }], validationRequest }] } } };
-		const calls = [];
-		const statusRequests = [];
-		const evidenceRequests = [];
-		const finalizeRequests = [];
-		let statuses = 0;
-		const nativeReviewCli = {
-			async targetStatus(request) { calls.push("status"); statusRequests.push(request); statuses += 1; return statuses === 1 ? status : afterCapture; },
-			async captureEvidence(request) { calls.push("capture-evidence"); evidenceRequests.push(request); return { schema: "gentle-ai.review-verification-evidence/v2", version: 2, lineageId: "runtime-correction", authorityRevision: sha("d"), targetIdentity: sha("e"), candidateTree: frozen.candidateTree, pathsDigest: sha("a"), paths: frozen.paths, ledgerIds: [], rawPayloadSha256: sha("1"), rawPayloadBytes: request.evidenceDocument.length, outcome: "passed", recordDigest: sha("2") }; },
-			async finalize(request) { calls.push("finalize"); finalizeRequests.push(request); return { lineageId: "runtime-correction", state: "approved", action: "approved", storeRevision: sha("3") }; },
-			async start() { throw new Error("not expected"); }, async validate() { throw new Error("not expected"); }, async bindSdd() { throw new Error("not expected"); }, async sddStatus() { return { ready: false }; }, async reviewStatus() { throw new Error("not expected"); },
-		};
-		const correctionPi = createPi();
-		createGentleAiExtension({ nativeReviewCli, candidateViews })(correctionPi.pi);
-		const controller = correctionPi.tools.get("gentle_review");
-		const response = await controller.execute("runtime-correction", { operation: "finalize", lineageId: "runtime-correction", input: JSON.stringify({ final_evidence: "focused verification passed", final_verification_outcome: "passed", validation: { request_hash: "f".repeat(64), correction_ids: [], original_criteria: { passed: true, evidence: ["acceptance passes"] }, correction_regression: { passed: true, evidence: ["regression passes"] }, fix_caused_findings: [], follow_ups: [] } }) }, undefined, undefined, createCtx(correctionCwd));
-		assert.deepEqual(
-			calls,
-			["status", "capture-evidence", "status", "finalize"],
-			`clean correction FINALIZE must not reconcile after native success: ${JSON.stringify(response.details)}`,
-		);
-		assert.equal(finalizeRequests.length, 1);
-		const happyCandidateRoot = statusRequests[0].cwd;
-		assert.notEqual(happyCandidateRoot, correctionCwd);
-		assert.deepEqual(
-			statusRequests.map(({ cwd, lineageId, projection, agent, untrackedScope, expectedUntrackedInventory, intendedUntracked }) => ({
-				cwd,
-				lineageId,
-				projection: projection ?? null,
-				agent: agent ?? null,
-				untrackedScope: untrackedScope ?? null,
-				expectedUntrackedInventory: expectedUntrackedInventory ?? null,
-				intendedUntracked: intendedUntracked ?? null,
-			})),
-			[
-				{ cwd: happyCandidateRoot, lineageId: "runtime-correction", projection: null, agent: "pi", untrackedScope: null, expectedUntrackedInventory: null, intendedUntracked: null },
-				{ cwd: correctionCwd, lineageId: "runtime-correction", projection: null, agent: null, untrackedScope: null, expectedUntrackedInventory: null, intendedUntracked: null },
-			],
-		);
-		const happyCorrectionCandidateRoot = evidenceRequests[0].cwd;
-		assert.equal(happyCorrectionCandidateRoot, happyCandidateRoot);
-		assert.equal(evidenceRequests[0].lineageId, "runtime-correction");
-		assert.equal(finalizeRequests[0].cwd, happyCorrectionCandidateRoot);
-		assert.equal(finalizeRequests[0].lineageId, "runtime-correction");
-		assert.equal(response.details.result.state, "approved");
-	} finally {
-		restoreWorkspaceWritePermissions(correctionCwd);
-		await rm(correctionCwd, { recursive: true, force: true });
-	}
-
-	// A local registry fault is intentionally induced only after the native
-	// FINALIZE result has committed. The fifth STATUS is then reconciliation,
-	// not a permissive retry and never part of the clean lifecycle.
-	const postNativeAmbiguityCwd = await tempWorkspace();
-	try {
-		const { createGentleAiExtension } = await import(pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href);
-		const { CandidateViewRegistry } = await import(pathToFileURL(join(ROOT, "lib/review-candidate-view.ts")).href);
-		gitSync(postNativeAmbiguityCwd, "init", "-b", "main");
-		await writeFile(join(postNativeAmbiguityCwd, "app.ts"), "export const value = 1;\n");
-		gitSync(postNativeAmbiguityCwd, "add", "app.ts");
-		gitSync(postNativeAmbiguityCwd, "-c", "user.name=Runtime Harness", "-c", "user.email=runtime-harness@example.invalid", "commit", "-m", "base");
-		await writeFile(join(postNativeAmbiguityCwd, "app.ts"), "export const value = 2;\n");
-		const sha = (digit) => `sha256:${digit.repeat(64)}`;
-		const lineageId = "runtime-correction-post-native-ambiguity";
-		class PostNativePromotionFailureRegistry extends CandidateViewRegistry {
-			promoteCorrected() {
-				throw new Error("test-only post-native CandidateViewRegistry promote failure");
-			}
-		}
-		const candidateViews = new PostNativePromotionFailureRegistry();
-		const frozen = candidateViews.create({ contributorRoot: postNativeAmbiguityCwd });
-		candidateViews.retain(frozen.token, lineageId);
-		const repair = { schema: "gentle-ai.review-authority-repair-assessment/v1", status: "unsupported", counts: { lineages: 0, compactLineages: 0, legacyLineages: 0, events: 0, bytes: 0, eligibleCandidates: 0, unsupportedLineages: 0, conflicts: 0 }, supportedOperations: ["review/complete-fix", "review/validate-fix"], authorizationSchema: "gentle-ai.review-repair-authorization/v1" };
-		const projection = { schema: "gentle-ai.review-integration.projection/v1", kind: "current-changes", projection: "workspace", baseTree: frozen.baseTree, initialReviewTree: frozen.candidateTree, currentCandidateTree: frozen.candidateTree, pathsDigest: sha("a"), paths: frozen.paths, intendedUntracked: [], intendedUntrackedProof: sha("b"), initialSnapshotIdentity: sha("c"), currentSnapshotIdentity: sha("c") };
-		const status = { contract: "gentle-ai.review-integration/v2", applicability: "current_target", authority: { version: "compact-v2", lineageId, state: "correction_required", generation: 1, revision: sha("d") }, receipt: { status: "expected_missing" }, action: "finalize", replayability: "not_replayable", frozen: { tier: "medium", originalChangedLines: 1, correctionBudget: 1 }, targetIdentity: sha("e"), projection, repair, candidates: [], nextTransition: { kind: "collect", reasonCode: "verification_evidence_required", collect: { inputs: [{ name: "verification_evidence", schema: "gentle-ai.review-verification-evidence/v2", captureOperation: "review.capture-evidence", arguments: [{ name: "lineage", value: lineageId }] }] } }, raw: { phase: "correction_required" } };
-		const validationRequest = { schema: "gentle-ai.review-targeted-validation-request/v1", requestHash: sha("f"), lineageId, expectedRevision: sha("d"), targetIdentity: sha("e"), fixFindingIds: [], projection: "workspace", correctionCandidateTree: frozen.candidateTree, correctionTargetIdentity: sha("e"), correctionPaths: frozen.paths, correctionPathsDigest: sha("a") };
-		const afterCapture = { ...status, authority: { ...status.authority, state: "validating" }, validationRequest, nextTransition: { kind: "collect", reasonCode: "targeted_validation_required", collect: { inputs: [{ name: "targeted_validation", schema: validationRequest.schema, captureOperation: "external.run_targeted_validation", arguments: [{ name: "lineage", value: lineageId }], validationRequest }] } }, raw: { phase: "validating" } };
-		const terminalRaw = { schema: "gentle-ai.review-integration.status/v3", applicability: "current_target", action: "stop", authority: { lineage_id: lineageId, state: "approved", revision: sha("3") }, receipt: { status: "present" } };
-		const terminalStatus = { ...afterCapture, authority: { ...afterCapture.authority, state: "approved", revision: sha("3") }, receipt: { status: "present" }, action: "stop", replayability: "not_replayable", nextTransition: { kind: "stop", reasonCode: "review_completed" }, raw: terminalRaw };
-		const calls = [];
-		const statusRequests = [];
-		const evidenceRequests = [];
-		const finalizeRequests = [];
-		const nativeReviewCli = {
-			async targetStatus(request) {
-				calls.push("status");
-				statusRequests.push(request);
-				return statusRequests.length === 1 ? status : statusRequests.length === 2 ? afterCapture : terminalStatus;
-			},
-			async captureEvidence(request) {
-				calls.push("capture-evidence");
-				evidenceRequests.push(request);
-				return { schema: "gentle-ai.review-verification-evidence/v2", version: 2, lineageId, authorityRevision: sha("d"), targetIdentity: sha("e"), candidateTree: frozen.candidateTree, pathsDigest: sha("a"), paths: frozen.paths, ledgerIds: [], rawPayloadSha256: sha("1"), rawPayloadBytes: request.evidenceDocument.length, outcome: "passed", recordDigest: sha("2") };
-			},
-			async finalize(request) {
-				calls.push("finalize");
-				finalizeRequests.push(request);
-				return { lineageId, state: "approved", action: "approved", storeRevision: sha("3") };
-			},
-			async start() { throw new Error("not expected"); }, async validate() { throw new Error("not expected"); }, async bindSdd() { throw new Error("not expected"); }, async sddStatus() { return { ready: false }; }, async reviewStatus() { throw new Error("not expected"); },
-		};
-		const correctionPi = createPi();
-		createGentleAiExtension({ nativeReviewCli, candidateViews })(correctionPi.pi);
-		const response = await correctionPi.tools.get("gentle_review").execute(
-			lineageId,
-			{ operation: "finalize", lineageId, input: JSON.stringify({ final_evidence: "focused verification passed", final_verification_outcome: "passed", validation: { request_hash: "f".repeat(64), correction_ids: [], original_criteria: { passed: true, evidence: ["acceptance passes"] }, correction_regression: { passed: true, evidence: ["regression passes"] }, fix_caused_findings: [], follow_ups: [] } }) },
-			undefined,
-			undefined,
-			createCtx(postNativeAmbiguityCwd),
-		);
-		const statusCandidateRoot = statusRequests[0].cwd;
-		const correctionCandidateRoot = evidenceRequests[0].cwd;
-		assert.notEqual(statusCandidateRoot, postNativeAmbiguityCwd);
-		assert.equal(correctionCandidateRoot, statusCandidateRoot);
-		assert.deepEqual(calls, ["status", "capture-evidence", "status", "finalize", "status"]);
-		assert.equal(finalizeRequests.length, 1, "post-native reconciliation must never replay FINALIZE");
-		assert.deepEqual(
-			statusRequests.map(({ cwd, lineageId: requestLineageId, projection: requestProjection, agent, untrackedScope, expectedUntrackedInventory, intendedUntracked }) => ({
-				cwd,
-				lineageId: requestLineageId,
-				projection: requestProjection ?? null,
-				agent: agent ?? null,
-				untrackedScope: untrackedScope ?? null,
-				expectedUntrackedInventory: expectedUntrackedInventory ?? null,
-				intendedUntracked: intendedUntracked ?? null,
-			})),
-			[
-				{ cwd: statusCandidateRoot, lineageId, projection: null, agent: "pi", untrackedScope: null, expectedUntrackedInventory: null, intendedUntracked: null },
-				{ cwd: postNativeAmbiguityCwd, lineageId, projection: null, agent: null, untrackedScope: null, expectedUntrackedInventory: null, intendedUntracked: null },
-				{ cwd: correctionCandidateRoot, lineageId, projection: "workspace", agent: null, untrackedScope: null, expectedUntrackedInventory: null, intendedUntracked: null },
-			],
-		);
-		assert.equal(evidenceRequests[0].cwd, correctionCandidateRoot);
-		assert.equal(evidenceRequests[0].lineageId, lineageId);
-		assert.equal(finalizeRequests[0].cwd, correctionCandidateRoot);
-		assert.equal(finalizeRequests[0].lineageId, lineageId);
-		assert.equal(response.details.status, "blocked");
-		assert.equal(response.details.outcome, "native-mutation-status-reconciled");
-		assert.equal(response.details.provider_action, "stop");
-		assert.equal(response.details.next_action, "stop");
-		assert.equal(response.details.mutation_performed, true);
-		assert.equal(response.details.mutation_outcome, "committed");
-		assert.equal(response.details.lineage_id, lineageId);
-		assert.equal(response.details.state, "approved");
-		assert.equal(response.details.store_revision, sha("3"));
-		assert.deepEqual(response.details.reconciliation, terminalRaw);
-	} finally {
-		restoreWorkspaceWritePermissions(postNativeAmbiguityCwd);
-		await rm(postNativeAmbiguityCwd, { recursive: true, force: true });
-	}
-
-	// Task 11.2 (migrate-review-integration-v2): an unimplemented
-	// next_transition.execute.operation (e.g. a future "dispose-result") must
-	// raise a typed, named unsupported-transition-operation refusal and stop —
-	// never fall through to a generic schema-incompatible error, and never
-	// synthesize an invocation for it. Drives the real negotiated STATUS decode
-	// path (NativeReviewCliV216.targetStatus) against a stubbed adapter, so no
-	// live binary needs to advertise the unimplemented operation to prove this.
-	{
-		const capabilitiesFixturePath = join(
-			ROOT, "contracts", "review-integration", "v2", "fixtures", "capabilities.fixture.json",
-		);
-		const capabilitiesFixture = JSON.parse(await readFile(capabilitiesFixturePath, "utf8"));
-		const executableDigest = "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705";
-		const capabilitiesBody = {
-			...capabilitiesFixture,
-			package: { ...capabilitiesFixture.package, version: "2.4.0" },
-		};
-		const statusBody = {
-			schema: "gentle-ai.review-integration.status/v3",
-			contract: "gentle-ai.review-integration/v2",
-			operation: "review.status",
-			applicability: "unrelated",
-			receipt: { status: "not_applicable" },
-			action: "start",
-			replayability: "not_replayable",
-			target_identity: `sha256:${"a".repeat(64)}`,
-			repair: {
-				schema: "gentle-ai.review-authority-repair-assessment/v1",
-				status: "unsupported",
-				counts: { lineages: 0, compact_lineages: 0, legacy_lineages: 0, events: 0, bytes: 0, eligible_candidates: 0, unsupported_lineages: 0, conflicts: 0 },
-				supported_operations: ["review/complete-fix", "review/validate-fix"],
-				authorization_schema: "gentle-ai.review-repair-authorization/v1",
-			},
-			projection: {
-				schema: "gentle-ai.review-integration.projection/v1",
-				kind: "current-changes",
-				projection: "workspace",
-				base_tree: "b".repeat(40),
-				initial_review_tree: "b".repeat(40),
-				current_candidate_tree: "b".repeat(40),
-				paths_digest: `sha256:${"a".repeat(64)}`,
-				paths: [],
-				intended_untracked: [],
-				intended_untracked_proof: `sha256:${"a".repeat(64)}`,
-				initial_snapshot_identity: `sha256:${"a".repeat(64)}`,
-				current_snapshot_identity: `sha256:${"a".repeat(64)}`,
-			},
-			candidates: [],
-			next_transition: {
-				kind: "execute",
-				reason_code: "disposable_result_pending",
-				execute: {
-					operation: "review.dispose-result",
-					arguments: [],
-					preconditions: [],
-					binding: { target_identity: `sha256:${"a".repeat(64)}` },
-				},
-			},
-		};
-		const calls = [];
-		const adapter = async (request) => {
-			calls.push(request.arguments);
-			const body = calls.length === 1 ? capabilitiesBody : statusBody;
-			return { stdout: JSON.stringify(body), stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
-		};
-		const client = new NativeReviewCliV216(
-			adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024,
-			async () => undefined, () => executableDigest,
-		);
-		let thrown;
-		try {
-			await client.targetStatus({ cwd: "/repo" });
-		} catch (error) {
-			thrown = error;
-		}
-		assert.ok(thrown instanceof NativeReviewCliError, "an unimplemented next_transition.execute.operation must raise a typed NativeReviewCliError");
-		assert.equal(thrown.code, NATIVE_REVIEW_ERROR_CODE.UNSUPPORTED_TRANSITION_OPERATION);
-		assert.match(thrown.message, /review\.dispose-result/, "the refusal must name the specific unimplemented operation");
-		assert.equal(calls.length, 2, "capabilities negotiation plus one STATUS call — never a third call synthesizing the unimplemented operation");
 	}
 
 	const bannerCwd = await tempWorkspace();

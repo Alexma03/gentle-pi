@@ -62,7 +62,6 @@ import {
 	sddStatusSeverity,
 	type SddPhase,
 } from "../lib/sdd-status.ts";
-import { parseNativeCompactFinalizeInput, toNativeValidatorDocument } from "../lib/review-compact-contract.ts";
 import {
 	REVIEW_HOST_RELAY_FAILURE,
 	REVIEW_HOST_RELAY_PI_TIMEOUT_ENV,
@@ -129,15 +128,20 @@ import {
 	sanitizeForeignNativeReviewDiagnostics,
 	type NativeReviewCli,
 	type NativeTargetStatusRequest,
-	type NativeFinalizeResult,
-	type NativeReviewVerificationEvidenceV2,
 	type NativeReviewModeOperation,
 	type NativeReviewModeSource,
 	type NativeReviewProcessDiagnostics,
 	type NativeStartResult,
 } from "../lib/native-review-cli.ts";
-import type { ReviewCollectInputV3, ReviewConsentEnvelope, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
-import { assertDistinctCorrectionEvidence, resolveCorrectionStep, type CorrectionEvidence, type CorrectionOutcome, type CorrectionStep } from "../lib/review-correction-lifecycle.ts";
+import {
+	decodeReviewLastEventClosureV1,
+	type ReviewCollectInputV3,
+	type ReviewConsentEnvelope,
+	type ReviewLastEventClosureBinding,
+	type ReviewLastEventClosureV1,
+	type ReviewStatusV3,
+} from "../lib/review-integration-v2.ts";
+import { reconcileUnknownReviewLastEventCapture } from "../lib/review-last-event-controller.ts";
 import { recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
 
 const GRAPH_V1_ORDINARY_READ_ONLY = "Graph-v1 ordinary review authority is read-only; use native compact-v2 review operations";
@@ -564,22 +568,7 @@ function renderOrchestratorPrompt(
 	background: BackgroundSubagentsRendering = DEFAULT_BACKGROUND_SUBAGENTS_RENDERING,
 ): string {
 	return readFileSync(join(assetsDir, "orchestrator.md"), "utf8")
-		.replaceAll(
-			"{{GENTLE_PI_SDD_WORKFLOW_PATH}}",
-			join(assetsDir, "sdd-orchestrator-workflow.md"),
-		)
-		.replaceAll(
-			"{{GENTLE_PI_DELEGATION_PATH}}",
-			join(assetsDir, "orchestrator-delegation.md"),
-		)
-		.replaceAll(
-			"{{GENTLE_PI_MEMORY_PATH}}",
-			join(assetsDir, "orchestrator-memory.md"),
-		)
-		.replaceAll(
-			"{{GENTLE_PI_SKILLS_PATH}}",
-			join(assetsDir, "orchestrator-skills.md"),
-		)
+		.replaceAll("{{GENTLE_PI_ASSETS_ROOT}}", assetsDir)
 		.replaceAll(
 			"{{GENTLE_PI_BACKGROUND_POLICY}}",
 			renderBackgroundSubagentsStatusLine(background),
@@ -2364,10 +2353,8 @@ async function handlePersonaCommand(ctx: ExtensionContext): Promise<void> {
 const REVIEW_CONTROLLER_OPERATION = {
 	START: "start",
 	ANSWER_CONSENT: "answer-consent",
-	FINALIZE: "finalize",
 	ADVANCE: "advance",
 	STATUS: "status",
-	VALIDATE: "validate",
 	EXPORT: "export",
 	IMPORT: "import",
 	INSPECT: "inspect",
@@ -2379,13 +2366,10 @@ const REVIEW_CONTROLLER_OPERATION = {
 	RECONCILE_AUTHORITY: "reconcile-authority",
 	REPAIR_LEGACY_ALIAS: "repair-legacy-alias",
 	REPAIR: "repair",
-	BIND_SDD: "bind-sdd",
 } as const;
 
 type ReviewControllerOperation =
 	(typeof REVIEW_CONTROLLER_OPERATION)[keyof typeof REVIEW_CONTROLLER_OPERATION];
-
-const NATIVE_BIND_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 const REVIEW_CONTROLLER_PARAMETERS = {
 	type: "object",
@@ -2415,10 +2399,10 @@ const REVIEW_CONTROLLER_PARAMETERS = {
 		},
 		input: {
 			type: "string",
-			description: "A JSON-serialized object string, not a nested object. New native ordinary START uses {\"mode\":\"ordinary\"}; answer-consent uses exactly {\"consentBinding\":\"<opaque id>\",\"answer\":\"granted|declined\"}. An explicit baseRef requires committedOnly: true and requests a committed range, while repository-local policyPath remains optional. Legacy compact START retains policyHash. FINALIZE supplies only the negotiated collection answers: correction forecast, targeted validation, and final evidence paired with exactly one of final_verification_passed or final_verification_outcome (passed, verification_failed, procedural_tooling_failed); reviewer, refuter, and validator verdicts are admitted natively and never Pi-authored. Judgment Day retains graph-v1 input.",
+			description: "A JSON-serialized object string, not a nested object. New native ordinary START uses {\"mode\":\"ordinary\"}; answer-consent uses exactly {\"consentBinding\":\"<opaque id>\",\"answer\":\"granted|declined\"}. Ordinary provider capture belongs only to gentle_review_capture. An explicit baseRef requires committedOnly: true and requests a committed range, while repository-local policyPath remains optional. Legacy controller input remains separate.",
 		},
 		outputPath: { type: "string", description: "Retired with legacy bundle export; ignored. Export returns legacy-operation-retired." },
-		inputPath: { type: "string", description: "Repository-local JSON input file for finalize/advance (alternative to input). Legacy bundle import is retired." },
+		inputPath: { type: "string", description: "Repository-local JSON input file for the separate legacy controller flow (alternative to input). Legacy bundle import is retired." },
 		operationId: { type: "string", description: "Retired with legacy bundle transport; ignored. Export/import return legacy-operation-retired." },
 		lineageIds: { type: "string", description: "Retired with legacy bundle export; ignored. Export returns legacy-operation-retired." },
 		workspaceRoot: {
@@ -2427,6 +2411,45 @@ const REVIEW_CONTROLLER_PARAMETERS = {
 		},
 	},
 } as const;
+
+const REVIEW_CAPTURE_PARAMETERS = {
+	type: "object",
+	additionalProperties: false,
+	required: ["lineageId", "collectBinding"],
+	properties: {
+		lineageId: {
+			type: "string",
+			minLength: 1,
+			description: "Exact lineage from the current provider-issued collect transition.",
+		},
+		collectBinding: {
+			type: "string",
+			minLength: 1,
+			description: "JSON-serialized exact copy of one decoded provider-owned next_transition.collect input from current STATUS.",
+		},
+		reviewerRunAcknowledged: {
+			type: "boolean",
+			description: "Required only after the one-slot materialize reviewer forecast; authorizes exactly one Pi host-relay run.",
+		},
+		correctionLines: {
+			type: "integer",
+			minimum: 1,
+			description: "Positive correction-line plan, accepted only for the selected provider correction-plan slot and within its exact bounds.",
+		},
+		workspaceRoot: {
+			type: "string",
+			description: "Optional explicit existing Git worktree root, resolved with the controller's worktree confinement semantics.",
+		},
+	},
+} as const;
+
+interface ReviewCaptureParameters {
+	lineageId: string;
+	collectBinding: string;
+	reviewerRunAcknowledged?: boolean;
+	correctionLines?: number;
+	workspaceRoot?: string;
+}
 
 const REVIEW_SCOPE_PARAMETERS = {
 	type: "object",
@@ -2478,8 +2501,7 @@ function parseReviewControllerParameters(value: unknown): ReviewControllerParame
 	if (typeof value.operation !== "string" || !isReviewControllerOperation(value.operation)) {
 		throw new Error("Review controller operation is unsupported");
 	}
-	// VALIDATE is retained as an informational compact-controller compatibility operation; it never authorizes delivery.
-	const needsLineage = ![REVIEW_CONTROLLER_OPERATION.START, REVIEW_CONTROLLER_OPERATION.ANSWER_CONSENT, REVIEW_CONTROLLER_OPERATION.FINALIZE, REVIEW_CONTROLLER_OPERATION.STATUS, REVIEW_CONTROLLER_OPERATION.EXPORT, REVIEW_CONTROLLER_OPERATION.IMPORT, REVIEW_CONTROLLER_OPERATION.INSPECT, REVIEW_CONTROLLER_OPERATION.RESET, REVIEW_CONTROLLER_OPERATION.RECOVER, REVIEW_CONTROLLER_OPERATION.RECOVER_LOCK, REVIEW_CONTROLLER_OPERATION.ABANDON, REVIEW_CONTROLLER_OPERATION.QUARANTINE_LEGACY, REVIEW_CONTROLLER_OPERATION.RECONCILE_AUTHORITY, REVIEW_CONTROLLER_OPERATION.REPAIR_LEGACY_ALIAS, REVIEW_CONTROLLER_OPERATION.REPAIR, REVIEW_CONTROLLER_OPERATION.VALIDATE, REVIEW_CONTROLLER_OPERATION.BIND_SDD].includes(value.operation as ReviewControllerOperation);
+	const needsLineage = ![REVIEW_CONTROLLER_OPERATION.START, REVIEW_CONTROLLER_OPERATION.ANSWER_CONSENT, REVIEW_CONTROLLER_OPERATION.STATUS, REVIEW_CONTROLLER_OPERATION.EXPORT, REVIEW_CONTROLLER_OPERATION.IMPORT, REVIEW_CONTROLLER_OPERATION.INSPECT, REVIEW_CONTROLLER_OPERATION.RESET, REVIEW_CONTROLLER_OPERATION.RECOVER, REVIEW_CONTROLLER_OPERATION.RECOVER_LOCK, REVIEW_CONTROLLER_OPERATION.ABANDON, REVIEW_CONTROLLER_OPERATION.QUARANTINE_LEGACY, REVIEW_CONTROLLER_OPERATION.RECONCILE_AUTHORITY, REVIEW_CONTROLLER_OPERATION.REPAIR_LEGACY_ALIAS, REVIEW_CONTROLLER_OPERATION.REPAIR].includes(value.operation as ReviewControllerOperation);
 	if (needsLineage && (typeof value.lineageId !== "string" || value.lineageId.trim().length === 0)) {
 		throw new Error("Review controller requires a lineageId");
 	}
@@ -2498,6 +2520,25 @@ function parseReviewControllerParameters(value: unknown): ReviewControllerParame
 		if (typeof optional === "string") parameters[key] = optional;
 	}
 	return parameters;
+}
+
+function parseReviewCaptureParameters(value: unknown): ReviewCaptureParameters {
+	if (!isRecord(value)) throw new Error("Review capture parameters must be an object");
+	const allowed = new Set(["lineageId", "collectBinding", "reviewerRunAcknowledged", "correctionLines", "workspaceRoot"]);
+	const unexpected = Object.keys(value).find((key) => !allowed.has(key));
+	if (unexpected !== undefined) throw new Error(`Review capture does not accept ${unexpected}`);
+	if (!isCanonicalProcessString(value.lineageId)) throw new Error("Review capture requires an exact non-empty lineageId");
+	if (typeof value.collectBinding !== "string" || value.collectBinding.length === 0) throw new Error("Review capture requires a JSON-serialized collectBinding");
+	if (value.reviewerRunAcknowledged !== undefined && typeof value.reviewerRunAcknowledged !== "boolean") throw new Error("Review capture reviewerRunAcknowledged must be boolean");
+	if (value.correctionLines !== undefined && (!Number.isSafeInteger(value.correctionLines) || value.correctionLines < 1)) throw new Error("Review capture correctionLines must be a positive integer");
+	if (value.workspaceRoot !== undefined && typeof value.workspaceRoot !== "string") throw new Error("Review capture workspaceRoot must be a string");
+	return {
+		lineageId: value.lineageId,
+		collectBinding: value.collectBinding,
+		...(value.reviewerRunAcknowledged === undefined ? {} : { reviewerRunAcknowledged: value.reviewerRunAcknowledged }),
+		...(value.correctionLines === undefined ? {} : { correctionLines: value.correctionLines }),
+		...(value.workspaceRoot === undefined ? {} : { workspaceRoot: value.workspaceRoot }),
+	};
 }
 
 function requiredControllerString(
@@ -3031,64 +3072,20 @@ function mapNativeStartResult(result: NativeStartResult): Record<string, unknown
 	};
 }
 
-const RECONCILE_FINALIZE_NEXT_ACTION = "rerun-native-finalize-same-lineage";
-// Consumer-side bound only: the wire contract carries no attempt counter, so Pi
-// caps how many FINALIZE-driven reruns it will direct per lineage in one
-// process. Read-only observations (INSPECT/STATUS/START/VALIDATE/BIND_SDD)
-// never consume this budget; only reconciliation of an actually attempted
-// FINALIZE counts, and a successful FINALIZE clears the counter.
-const RECONCILE_FINALIZE_RERUN_LIMIT = 3;
-const reconcileFinalizeRerunAttemptsByLineage = new Map<string, number>();
-
 function requiredStatusActionText(lineageId?: string): string {
-	return `Run target-scoped review.status${lineageId === undefined ? "" : ` for lineage ${lineageId}`} and follow only its declared action; never start a new review, create a new budget, launch a lens, or fall back to inventory discovery.`;
+	return `Run target-scoped review.status${lineageId === undefined ? "" : ` for lineage ${lineageId}`} and follow only its declared action.`;
 }
 
-function reconcileFinalizeRouting(status: ReviewStatusV3, requestedLineageId?: string, countRerunAttempt = false, workspaceRoot?: string): Record<string, unknown> {
-	const lineageId = status.authority?.lineageId;
-	const base = { provider_action: "reconcile_finalize", replayability: status.replayability, reconciliation_required: true };
-	if (status.applicability !== "current_target" || lineageId === undefined || (requestedLineageId !== undefined && lineageId !== requestedLineageId)) {
-		return {
-			...base,
-			...(lineageId === undefined ? {} : { authority_lineage_id: lineageId }),
-			...(requestedLineageId === undefined ? {} : { requested_lineage_id: requestedLineageId }),
-			next_action: "stop-and-report-reconcile-lineage-mismatch",
-			required_status_action: `Finalize reconciliation reported authority${lineageId === undefined ? " without a current-target lineage" : ` for lineage ${lineageId}`}${requestedLineageId === undefined ? "" : ` while lineage ${requestedLineageId} was requested`}; stop and obtain explicit maintainer action. Never rerun finalize for a foreign lineage, start a new review, create a new budget, launch a lens, or fall back to inventory discovery.`,
-		};
-	}
-	const storageKey = workspaceRoot === undefined ? lineageId : reviewLifecycleStorageKey(workspaceRoot, lineageId);
-	const attempts = reconcileFinalizeRerunAttemptsByLineage.get(storageKey) ?? 0;
-	if (attempts >= RECONCILE_FINALIZE_RERUN_LIMIT) {
-		return {
-			...base,
-			lineage_id: lineageId,
-			next_action: "stop-and-escalate-finalize-reconciliation",
-			required_status_action: `Finalize reconciliation for lineage ${lineageId} was already directed ${RECONCILE_FINALIZE_RERUN_LIMIT} times without reaching terminal authority; stop and obtain explicit maintainer action instead of another rerun. Never start a new review, create a new budget, launch a lens, or fall back to inventory discovery.`,
-		};
-	}
-	if (countRerunAttempt) reconcileFinalizeRerunAttemptsByLineage.set(storageKey, attempts + 1);
-	return {
-		...base,
-		lineage_id: lineageId,
-		next_action: RECONCILE_FINALIZE_NEXT_ACTION,
-		required_status_action: `Finalize reconciliation required: rerun review.finalize for lineage ${lineageId} with the original content-bound payload; native discovery resumes committed authority. Never start a new review, create a new budget, launch a lens, or fall back to inventory discovery.`,
-	};
-}
-
-function mapNativeTargetStatus(operation: ReviewControllerOperation, status: ReviewStatusV3, requestedLineageId?: string, workspaceRoot?: string): Record<string, unknown> {
+function mapNativeTargetStatus(operation: ReviewControllerOperation, status: ReviewStatusV3, requestedLineageId?: string): Record<string, unknown> {
 	if (
 		status.nextTransition?.kind === "collect" &&
 		(operation === REVIEW_CONTROLLER_OPERATION.START || operation === REVIEW_CONTROLLER_OPERATION.INSPECT || operation === REVIEW_CONTROLLER_OPERATION.STATUS)
 	) {
-		return { operation, status: "blocked", result: status.raw };
-	}
-	if (status.action === "reconcile_finalize") {
-		const routing = reconcileFinalizeRouting(status, requestedLineageId, false, workspaceRoot);
 		return {
 			operation,
-			status: routing.next_action === RECONCILE_FINALIZE_NEXT_ACTION ? "in-progress" : "blocked",
+			status: "blocked",
 			result: status.raw,
-			...routing,
+			collectBindings: publicReviewCaptureBindings(status),
 		};
 	}
 	if (status.action === "recover") {
@@ -3104,19 +3101,9 @@ function mapNativeTargetStatus(operation: ReviewControllerOperation, status: Rev
 	}
 	return {
 		operation,
-		status: status.applicability === "current_target" && status.action === "finalize" ? "in-progress" : status.action === "start" ? "ready" : "blocked",
+		status: status.action === "start" ? "ready" : "blocked",
 		result: status.raw,
-	};
-}
-
-function mapNativeFinalizeResult(result: NativeFinalizeResult): Record<string, unknown> {
-	return {
-		lineage_id: result.lineageId,
-		state: result.state,
-		action: result.action,
-		store_revision: result.storeRevision,
-		...(result.receiptPath === undefined ? {} : { receipt_path: result.receiptPath }),
-		...(result.advisoryFindings === undefined ? {} : { advisory_findings: result.advisoryFindings }),
+		...(requestedLineageId === undefined ? {} : { requested_lineage_id: requestedLineageId }),
 	};
 }
 
@@ -3388,17 +3375,6 @@ function assertNativeStartCandidateBinding(candidateView: CandidateView, target:
 	}
 }
 
-function assertNativeFinalizeCandidateBinding(candidateView: CandidateView, target: ReviewStatusV3): void {
-	candidateView.verify();
-	if (
-		target.projection.baseTree !== candidateView.baseTree ||
-		target.projection.currentCandidateTree !== candidateView.candidateTree ||
-		JSON.stringify([...target.projection.paths].sort()) !== JSON.stringify([...candidateView.paths].sort())
-	) {
-		throw new CandidateViewError("native FINALIZE target does not match the immutable reviewer candidate view", "candidate-target-projection-drift");
-	}
-}
-
 function completeNativeStart(
 	operation: ReviewControllerOperation,
 	result: NativeStartResult,
@@ -3411,7 +3387,7 @@ function completeNativeStart(
 		const binding = { token: candidateView.token, lineageId: result.lineageId, selectedLenses: result.selectedLenses };
 		if (result.action === "resumed" && !candidateViews.hasCurrentBinding(candidateView.contributorRoot)) candidateViews.restoreCurrentFromNativeStart(binding);
 		else candidateViews.bindCurrent(binding);
-	} else if (candidateViews && ((result.action === "created" && result.state === "reviewing") || result.action === "resumed" || result.action === "reuse-receipt")) candidateViews.retain(candidateView.token, result.lineageId);
+	} else if (candidateViews && ((result.action === "created" && result.state === "reviewing") || result.action === "resumed")) candidateViews.retain(candidateView.token, result.lineageId);
 	else candidateViews?.cleanup(candidateView.token);
 	const actorBinding = result.lensesRequired
 		? {
@@ -3429,7 +3405,7 @@ function completeNativeStart(
 	};
 }
 
-function nativeOperationFailure(operation: ReviewControllerOperation, error: unknown): Record<string, unknown> {
+function nativeOperationFailure(operation: ReviewControllerOperation | "gentle_review_capture", error: unknown): Record<string, unknown> {
 	const value = error as { mutationOutcome?: unknown; nextAction?: unknown; diagnostics?: unknown; auditRecord?: unknown; launchAttempted?: unknown; candidateViewPreNative?: unknown; failureEnvelope?: { raw?: unknown; mutationOutcome?: unknown; replayability?: unknown; nextAction?: unknown } };
 	if (isRecord(value.failureEnvelope) && isRecord(value.failureEnvelope.raw)) {
 		const mutationOutcome = value.failureEnvelope.mutationOutcome;
@@ -3532,15 +3508,6 @@ async function reconcileNativeMutationFailure(
 		clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, canonicalRetentionRoot, status.authority?.lineageId, status.authority?.state);
 		const { required_status_action: staleStatusDirective, ...reconciledBase } = failure;
 		void staleStatusDirective;
-		if (status.action === "reconcile_finalize") {
-			return {
-				...reconciledBase,
-				outcome: "native-mutation-status-reconciled",
-				reconciliation: status.raw,
-				authority_applicability: status.applicability,
-				...reconcileFinalizeRouting(status, target.lineageId, operation === REVIEW_CONTROLLER_OPERATION.FINALIZE, target.cwd),
-			};
-		}
 		// Field defect (fambig, 2026-08-16): an envelope-less mutating failure
 		// is stamped mutationOutcome "unknown", but a reconciled authority
 		// revision identical to the pre-operation revision PROVES the failed
@@ -3661,205 +3628,8 @@ function clearRetainedNativeUntrackedSelectionOnTerminal(selections: Map<string,
 	if (lineageId !== undefined && (state === "approved" || state === "escalated")) selections.delete(reviewLifecycleStorageKey(workspaceRoot, lineageId));
 }
 
-function providerFinalizeArgumentTokens(status: ReviewStatusV3, argumentsList: readonly { name: string; value: string; token?: string }[]): readonly string[] {
-	const isStatusV5 = (status.raw as { schema?: unknown }).schema === "gentle-ai.review-integration.status/v5";
-	if (isStatusV5) {
-		if (argumentsList.some((argument) => typeof argument.token !== "string" || argument.token.trim().length === 0)) {
-			throw new CandidateViewError("status/v5 review.finalize requires every provider argument to carry a non-empty exact token", "finalize-transition-binding-drift");
-		}
-		return argumentsList.map((argument) => argument.token!);
-	}
-	return argumentsList.map((argument) => argument.token ?? `--${argument.name.replaceAll("_", "-")}=${argument.value}`);
-}
-
 function requiresExplicitTargetLifecycleRoot(requested: string | undefined, sessionCwd: string, workspaceRoot: string): boolean {
 	return requested !== undefined || workspaceRoot !== sessionCwd;
-}
-
-function correctionOutcome(input: ReturnType<typeof parseNativeCompactFinalizeInput>): CorrectionOutcome | undefined {
-	if (input.final_verification_outcome !== undefined) return input.final_verification_outcome;
-	if (input.final_verification_passed === undefined) return undefined;
-	return input.final_verification_passed ? "passed" : "verification_failed";
-}
-
-// Both targeted-validation collection forms count as "validation offered":
-// the host-run `external.run_targeted_validation` input and the Go-owned
-// `review.capture-validation` vector (gentle-pi#311 P4-roles).
-function isTargetedValidationCollectInput(input: { captureOperation: string }): boolean {
-	return input.captureOperation === "external.run_targeted_validation" || input.captureOperation === "review.capture-validation";
-}
-
-function requireEvidenceCollection(status: ReviewStatusV3): ReviewCollectInputV3 {
-	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
-	// An offered validation STEP is a targeted-validation collect input. The
-	// bare `validation_request` field is descriptive context both live
-	// emitters (pinned 2.2.3 and 2.4.0-main, probed 2026-08-16) publish
-	// alongside the evidence collect at `correction_required`; treating it as
-	// an offered step made the controller demand its validation phase before
-	// capturing the evidence the state itself demanded (field defect).
-	if (inputs.some(isTargetedValidationCollectInput)) {
-		throw new CandidateViewError("targeted validation was offered before correction evidence was captured", "evidence-first-ordering");
-	}
-	const evidence = inputs.filter((input) => input.captureOperation === "review.capture-evidence");
-	if (evidence.length !== 1) {
-		throw new CandidateViewError("provider status must collect exactly one correction evidence record before targeted validation", "evidence-first-ordering");
-	}
-	return evidence[0]!;
-}
-
-interface EvidenceCaptureBinding {
-	/** The identity the collect slot demands; the top-level status identity only as a pre-slot compatibility fallback. */
-	readonly targetIdentity: string;
-	readonly expectedRevision: string;
-	/** True when the slot rendered its own target identity; the record binds the slot's (fix-diff) scope, not the frozen projection scope. */
-	readonly slotBound: boolean;
-	readonly submission?: {
-		readonly argumentTokens: readonly string[];
-		readonly outcomeSubstitutionLocation: number;
-		readonly inputSubstitutionLocation: number;
-		readonly carriesRepositoryContext: boolean;
-	};
-}
-
-// Field defect (fambig, 2026-08-16): at every evidence-pending sub-state the
-// collect slot renders the identity native demands — for a correction that is
-// the FIX-DIFF identity, never the top-level live workspace snapshot identity.
-// Collect satisfaction binds to the slot's rendered arguments and submission
-// tokens; top-level status fields remain only a compatibility fallback for
-// pre-v5 emitters whose slots render no identities.
-function resolveEvidenceCaptureBinding(slot: ReviewCollectInputV3, status: ReviewStatusV3, lineageId: string, outcome: CorrectionOutcome): EvidenceCaptureBinding {
-	const named = new Map(slot.arguments.map((argument) => [argument.name, argument.value]));
-	const slotLineage = named.get("lineage");
-	if (slotLineage !== undefined && slotLineage !== lineageId) {
-		throw new CandidateViewError("provider evidence collect slot is bound to a different lineage", "correction-evidence-binding-drift");
-	}
-	const slotRevision = named.get("expected-revision");
-	if (slotRevision !== undefined && slotRevision !== status.authority?.revision) {
-		throw new CandidateViewError("provider evidence collect slot is bound to a different authority revision", "correction-evidence-binding-drift");
-	}
-	const slotTarget = named.get("target");
-	const binding = {
-		targetIdentity: slotTarget ?? status.targetIdentity,
-		expectedRevision: slotRevision ?? status.authority!.revision,
-		slotBound: slotTarget !== undefined,
-	};
-	const descriptor = slot.submissionDescriptor;
-	if (descriptor === undefined || descriptor.operationToken !== "capture-evidence") return binding;
-	const outcomeSlot = descriptor.values?.find((value) => value.slot === "outcome");
-	const inputSlot = descriptor.values?.find((value) => value.slot === "input");
-	if (outcomeSlot === undefined || inputSlot === undefined) {
-		throw new CandidateViewError("provider capture-evidence submission descriptor must render the outcome and input slots", "correction-evidence-binding-drift");
-	}
-	if (outcomeSlot.allowedValues !== undefined && !outcomeSlot.allowedValues.includes(outcome)) {
-		throw new CandidateViewError(`provider capture-evidence submission does not admit outcome ${outcome}`, "correction-evidence-binding-drift");
-	}
-	return {
-		...binding,
-		submission: {
-			argumentTokens: descriptor.argumentTokens,
-			outcomeSubstitutionLocation: outcomeSlot.substitutionLocation,
-			inputSubstitutionLocation: inputSlot.substitutionLocation,
-			carriesRepositoryContext: descriptor.argumentTokens.some((token) => token === "--repository-context" || token.startsWith("--repository-context=")),
-		},
-	};
-}
-
-async function captureEvidenceForCollection(
-	nativeReviewCli: NativeReviewCli,
-	binding: EvidenceCaptureBinding,
-	cwd: string,
-	lineageId: string,
-	outcome: CorrectionOutcome,
-	evidenceDocument: string,
-	signal: AbortSignal | undefined,
-): Promise<NativeReviewVerificationEvidenceV2> {
-	if (binding.submission !== undefined) {
-		if (nativeReviewCli.captureEvidenceSubmission === undefined) throw new CandidateViewError("native capture-evidence submission execution is unavailable", "evidence-first-ordering");
-		return nativeReviewCli.captureEvidenceSubmission({
-			// The slot's --repository-context is cwd-independent and authoritative,
-			// while execution still stays in the controller-selected worktree. A
-			// fallback --cwd flag is passed only when the slot renders no context.
-			...(binding.submission.carriesRepositoryContext ? { executionCwd: cwd } : { cwd }),
-			argumentTokens: binding.submission.argumentTokens,
-			outcomeSubstitutionLocation: binding.submission.outcomeSubstitutionLocation,
-			inputSubstitutionLocation: binding.submission.inputSubstitutionLocation,
-			outcome,
-			evidenceDocument,
-			...(signal === undefined ? {} : { signal }),
-		});
-	}
-	if (nativeReviewCli.captureEvidence === undefined) throw new CandidateViewError("native capture-evidence execution is unavailable", "evidence-first-ordering");
-	return nativeReviewCli.captureEvidence({
-		cwd,
-		lineageId,
-		targetIdentity: binding.targetIdentity,
-		expectedRevision: binding.expectedRevision,
-		outcome,
-		evidenceDocument,
-		...(signal === undefined ? {} : { signal }),
-	});
-}
-
-// Same misbinding class as capture-evidence (live smoke, 2026-08-16): the
-// correction PLAN and TARGETED VALIDATION collect slots render `finalize`
-// submission descriptors. When one is rendered, the reconstructed legacy
-// `--correction-lines`/`--validation` argv fails the live emitter's
-// committed-intent reconciliation, so the rendered tokens execute verbatim.
-function finalizeSubmissionSlot(
-	status: ReviewStatusV3,
-	slot: "correction_lines" | "validation",
-): { argumentTokens: readonly string[]; value: NonNullable<NonNullable<ReviewCollectInputV3["submissionDescriptor"]>["value"]> } | undefined {
-	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
-	for (const input of inputs) {
-		const descriptor = input.submissionDescriptor;
-		if (descriptor?.operationToken === "finalize" && descriptor.value?.slot === slot) {
-			return { argumentTokens: descriptor.argumentTokens, value: descriptor.value };
-		}
-	}
-	return undefined;
-}
-
-// A slot-bound record covers the slot-demanded (fix-diff) scope: its paths are
-// a subset of the frozen projection paths and its digest binds the record's
-// own paths (captured 2026-08-16, lineage review-2b6206ed68fb9128). Only the
-// pre-slot compatibility fallback still demands projection-exact paths.
-function evidencePathsDrift(captured: NativeReviewVerificationEvidenceV2, binding: EvidenceCaptureBinding, status: ReviewStatusV3): boolean {
-	if (binding.slotBound) {
-		return captured.paths.length === 0 || captured.paths.some((path) => !status.projection.paths.includes(path));
-	}
-	return captured.pathsDigest !== status.projection.pathsDigest || JSON.stringify([...captured.paths].sort()) !== JSON.stringify([...status.projection.paths].sort());
-}
-
-function requireTargetedValidationAfterEvidence(status: ReviewStatusV3): NonNullable<ReviewStatusV3["validationRequest"]> {
-	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
-	const targeted = inputs.filter(isTargetedValidationCollectInput);
-	const request = status.validationRequest;
-	if (
-		// Both live emitters (pinned 2.2.3 and 2.4.0-main, probed 2026-08-16)
-		// keep the post-evidence authority state at `correction_required`;
-		// `validating` is retained for pre-existing fixture compatibility.
-		(status.authority?.state !== "validating" && status.authority?.state !== "correction_required") || targeted.length !== 1 || targeted[0]?.validationRequest === undefined || request === undefined ||
-		JSON.stringify(targeted[0].validationRequest) !== JSON.stringify(request) || request.lineageId !== status.authority.lineageId ||
-		// The live emitter binds the request to the FROZEN authority target
-		// identity; the top-level target identity is the live workspace
-		// snapshot, which already contains the fix (probed 2026-08-16).
-		request.expectedRevision !== status.authority.revision || request.targetIdentity !== (status.authorityTargetIdentity ?? status.targetIdentity) ||
-		request.correctionCandidateTree !== status.projection.currentCandidateTree ||
-		request.correctionPaths.length === 0 || request.correctionPaths.some((path) => !status.projection.paths.includes(path))
-	) {
-		throw new CandidateViewError("passed evidence did not produce one provider-bound targeted validation request", "evidence-first-ordering");
-	}
-	return request;
-}
-
-function assertNoTargetedValidation(status: ReviewStatusV3): void {
-	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
-	// Same rule as requireEvidenceCollection: only an offered targeted-
-	// validation collect input counts; the descriptive `validation_request`
-	// context rides along on non-passing outcomes too.
-	if (inputs.some(isTargetedValidationCollectInput)) {
-		throw new CandidateViewError("non-passing evidence unexpectedly unlocked targeted validation", "evidence-first-ordering");
-	}
 }
 
 // gentle-pi#311 P4 — the thin Pi host relay. The provider decides which
@@ -3873,24 +3643,15 @@ function setReviewHostRelayRunnerForTesting(runner?: ReviewHostRelayRunner): voi
 }
 
 const REVIEW_HOST_RELAY_RETRY_ACTION =
-	"Re-query negotiated STATUS and relaunch only if the exact same bound slot is reoffered; never rerun from transcript inference.";
+	"Call fresh STATUS and submit only an exact reoffered one-slot binding; never replay this capture from transcript inference.";
 
-// gentle-pi#367: the ordinary continuation above is wrong for exactly one
-// failure class. A reviewer killed by the relay bound is deterministic — the
-// same slot, the same prompt and the same bound reach the same wall — so
-// telling the caller to relaunch it re-spends real model tokens to buy the
-// identical failure. The honest outcome stays blocked, never fabricates a
-// capture, and names the two things that can actually change the result.
-function reviewHostRelayTimeoutNextAction(error: ReviewHostRelayError, capturedCount: number): string {
-	const admitted = capturedCount === 0
-		? "No reviewer result was admitted in this run."
-		: `${capturedCount} reviewer result${capturedCount === 1 ? " is" : "s are"} already admitted in this lineage; negotiated STATUS reoffers only the outstanding slots, so those are not re-run.`;
+function reviewHostRelayTimeoutNextAction(error: ReviewHostRelayError): string {
 	const measured = error.elapsedMs === null || error.timeoutMs === null
 		? ""
 		: ` The reviewer was killed after ${error.elapsedMs}ms against a ${error.timeoutMs}ms bound.`;
-	return `Do not relaunch this slot unchanged: the same bound kills the same reviewer run again and re-spends the model tokens for nothing.${measured} ${admitted} `
+	return `Do not relaunch this slot unchanged: the same bound kills the same reviewer run again and re-spends the model tokens for nothing.${measured} `
 		+ `Change one of two things first: export ${REVIEW_HOST_RELAY_PI_TIMEOUT_ENV}=<milliseconds> above the reviewer's real wall time (hard ceiling ${REVIEW_HOST_RELAY_PI_TIMEOUT_MAX_MS}), or reduce the candidate scope so the materialized prompt is smaller. `
-		+ "Then re-query negotiated STATUS and relaunch only the slot it reoffers.";
+		+ "Then call fresh STATUS and submit only its exact reoffered slot.";
 }
 
 function reviewHostRelayFailureReport(error: ReviewHostRelayError): Record<string, unknown> {
@@ -3904,157 +3665,198 @@ function reviewHostRelayFailureReport(error: ReviewHostRelayError): Record<strin
 	};
 }
 
-async function executeReviewHostRelayCollection(
-	operation: ReviewControllerOperation,
-	lineageId: string,
-	slots: readonly ReviewHostRelaySlot[],
-	nativeReviewCli: NativeReviewCli,
-	cwd: string,
-	signal?: AbortSignal,
-): Promise<Record<string, unknown>> {
-	const captured: Array<Record<string, unknown>> = [];
-	for (const slot of slots) {
-		let result: Awaited<ReturnType<ReviewHostRelayRunner>>;
-		try {
-			// A materialize slot without the provider-owned submission form is
-			// a provider contract mismatch: fail closed before any launch and
-			// never synthesize the completing form.
-			if (slot.submission === undefined) {
-				throw new ReviewHostRelayError(
-					REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH,
-					"binding",
-					REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
-				);
-			}
-			result = await activeReviewHostRelayRunner({
-				captureArgumentTokens: slot.captureArgumentTokens,
-				targetCwd: cwd,
-				submission: slot.submission,
-				...(signal === undefined ? {} : { signal }),
-			});
-		} catch (error) {
-			if (!(error instanceof ReviewHostRelayError)) throw error;
-			const base = {
-				operation,
-				status: "blocked",
-				captured_slots: captured,
-				mutation_performed: captured.length > 0,
-				mutation_outcome: error.mutationOutcome === "unknown" ? "unknown" : captured.length > 0 ? "committed" : "none",
-			};
-			if (error.kind === REVIEW_HOST_RELAY_FAILURE.RELAY_UNAVAILABLE) {
-				return {
-					...base,
-					outcome: "pi-host-relay-unavailable",
-					reason: REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
-					next_action: "Install a gentle-ai release with the pi host relay surface; existing behavior stays untouched and there is no Pi-authored review document fallback.",
-				};
-			}
-			if (error.kind === REVIEW_HOST_RELAY_FAILURE.HANDSHAKE_REFUSED) {
-				return {
-					...base,
-					outcome: "pi-host-relay-handshake-refused",
-					reason: error.message,
-					refusal: error.stderr,
-					next_action: REVIEW_HOST_RELAY_RETRY_ACTION,
-				};
-			}
-			if (error.kind === REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT) {
-				return {
-					...base,
-					outcome: "pi-host-relay-timeout",
-					failure: reviewHostRelayFailureReport(error),
-					reason: error.message,
-					next_action: reviewHostRelayTimeoutNextAction(error, captured.length),
-				};
-			}
-			return {
-				...base,
-				outcome: "pi-host-relay-transport-failure",
-				failure: reviewHostRelayFailureReport(error),
-				reason: error.message,
-				next_action: REVIEW_HOST_RELAY_RETRY_ACTION,
-			};
-		}
-		captured.push({
-			...(slot.lens === undefined ? {} : { lens: slot.lens }),
-			...(slot.order === undefined ? {} : { order: slot.order }),
-			...(slot.subjectHash === undefined ? {} : { subject_hash: slot.subjectHash }),
-			prompt_bytes: result.promptByteLength,
-			result_bytes: result.resultByteLength,
-			submission: result.submission,
-		});
+function mapLastEventClosure(
+	closure: ReviewLastEventClosureV1,
+	binding: ReviewLastEventClosureBinding,
+): Record<string, unknown> {
+	if (closure.lineageId !== binding.lineageId) throw new CandidateViewError("last-event closure returned a different lineage", "last-event-closure-binding-drift");
+	if (binding.targetIdentity !== undefined && closure.targetIdentity !== undefined && closure.targetIdentity !== binding.targetIdentity) {
+		throw new CandidateViewError("last-event closure returned a different target", "last-event-closure-binding-drift");
 	}
-	const after = await nativeReviewCli.targetStatus!({ cwd, lineageId, ...readRetainedNativeUntrackedSelection(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, cwd, lineageId), ...(signal === undefined ? {} : { signal }) });
-	clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, cwd, after.authority?.lineageId, after.authority?.state);
 	return {
-		...mapNativeTargetStatus(operation, after, lineageId),
-		host_relay: { transport: "pi_host_relay", captured_slots: captured },
+		tool: "gentle_review_capture",
+		status: "closed",
+		outcome: "native-last-event-closure",
+		closure: {
+			schema: closure.schema,
+			operation: closure.operation,
+			lineage_id: closure.lineageId,
+			state: closure.state,
+			store_revision: closure.storeRevision,
+			...(closure.action === undefined ? {} : { action: closure.action }),
+			...(closure.targetIdentity === undefined ? {} : { target_identity: closure.targetIdentity }),
+			...(closure.requestHash === undefined ? {} : { request_hash: closure.requestHash }),
+			...(closure.correctionLines === undefined ? {} : { correction_lines: closure.correctionLines }),
+			...(closure.advisoryFindings === undefined ? {} : { advisory_findings: closure.advisoryFindings }),
+		},
+		lineage_id: closure.lineageId,
+		state: closure.state,
+		store_revision: closure.storeRevision,
 	};
 }
 
-// gentle-pi#311 P4-roles — the Go-owned adversarial role route. The provider
-// renders each non-lens role slot (`review.capture-refuter` /
-// `review.capture-validation`) as a SELF-CONTAINED authority-advancing
-// vector: binding tokens plus `--agent=pi --execute=true` and no submission
-// descriptor. Pi executes each exact vector once, verbatim and in the
-// foreground; Go materializes the role prompt, spawns its own locked-down pi
-// subprocess, and admits the raw verdict. On any failure the typed error is
-// surfaced and nothing is relaunched — the caller re-queries negotiated
-// STATUS and executes only a vector it reoffers.
-const REVIEW_PROVIDER_ROLE_RETRY_ACTION =
-	"Re-query negotiated STATUS and execute only the exact role vector it reoffers; never relaunch from transcript inference.";
+function decodeRelayLastEventClosure(submission: string): ReviewLastEventClosureV1 | undefined {
+	let body: unknown;
+	try { body = JSON.parse(submission); } catch { throw new CandidateViewError("host relay submission returned malformed JSON", "last-event-closure-decode-failed"); }
+	if (typeof body !== "object" || body === null || Array.isArray(body) || (body as { schema?: unknown }).schema !== "gentle-ai.review-last-event-closure/v1") return undefined;
+	return decodeReviewLastEventClosureV1(body);
+}
 
-async function executeProviderRoleVectorCollection(
-	operation: ReviewControllerOperation,
-	lineageId: string,
-	slots: readonly ReviewProviderRoleVectorSlot[],
+async function reconcileUnknownReviewCaptureFailure(
+	error: unknown,
 	nativeReviewCli: NativeReviewCli,
 	cwd: string,
+	binding: ReviewLastEventClosureBinding,
+): Promise<Record<string, unknown>> {
+	const failure = nativeOperationFailure("gentle_review_capture", error);
+	if (!nativeMutationRequiresStatus(error)) return failure;
+	try {
+		const status = await reconcileUnknownReviewLastEventCapture(nativeReviewCli, cwd, binding);
+		return {
+			tool: "gentle_review_capture",
+			status: "reconciled",
+			outcome: "native-capture-outcome-unknown",
+			native_failure: failure,
+			lineage_id: binding.lineageId,
+			target_identity: status.targetIdentity,
+			provider_action: status.action,
+			...(status.nextTransition === undefined ? {} : { next_transition: status.nextTransition }),
+			result: status.raw,
+		};
+	} catch (statusError) {
+		return {
+			...failure,
+			outcome: "native-capture-status-reconciliation-failed",
+			reconciliation_failure: nativeOperationFailure("gentle_review_capture", statusError),
+		};
+	}
+}
+
+async function executeReviewHostRelayCapture(
+	slot: ReviewHostRelaySlot,
+	nativeReviewCli: NativeReviewCli,
+	cwd: string,
+	binding: ReviewLastEventClosureBinding,
+	signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+	try {
+		if (slot.submission === undefined) {
+			throw new ReviewHostRelayError(
+				REVIEW_HOST_RELAY_FAILURE.SUBMISSION_CONTRACT_MISMATCH,
+				"binding",
+				REVIEW_HOST_RELAY_SUBMISSION_MISSING_MESSAGE,
+			);
+		}
+		const result = await activeReviewHostRelayRunner({
+			captureArgumentTokens: slot.captureArgumentTokens,
+			targetCwd: cwd,
+			submission: slot.submission,
+			...(signal === undefined ? {} : { signal }),
+		});
+		const closure = decodeRelayLastEventClosure(result.submission);
+		if (closure !== undefined) return mapLastEventClosure(closure, binding);
+		return {
+			tool: "gentle_review_capture",
+			status: "captured",
+			outcome: "native-reviewer-result-captured",
+			lineage_id: binding.lineageId,
+			host_relay: {
+				transport: "pi_host_relay",
+				...(slot.lens === undefined ? {} : { lens: slot.lens }),
+				...(slot.order === undefined ? {} : { order: slot.order }),
+				...(slot.subjectHash === undefined ? {} : { subject_hash: slot.subjectHash }),
+				prompt_bytes: result.promptByteLength,
+				result_bytes: result.resultByteLength,
+				submission: result.submission,
+			},
+		};
+	} catch (error) {
+		if (!(error instanceof ReviewHostRelayError)) return await reconcileUnknownReviewCaptureFailure(error, nativeReviewCli, cwd, binding);
+		if (error.mutationOutcome === "unknown") return await reconcileUnknownReviewCaptureFailure(error, nativeReviewCli, cwd, binding);
+		if (error.kind === REVIEW_HOST_RELAY_FAILURE.RELAY_UNAVAILABLE) {
+			return {
+				tool: "gentle_review_capture",
+				status: "blocked",
+				outcome: "pi-host-relay-unavailable",
+				reason: REVIEW_HOST_RELAY_UNAVAILABLE_MESSAGE,
+				mutation_performed: false,
+				mutation_outcome: "none",
+			};
+		}
+		if (error.kind === REVIEW_HOST_RELAY_FAILURE.HANDSHAKE_REFUSED) {
+			return {
+				tool: "gentle_review_capture",
+				status: "blocked",
+				outcome: "pi-host-relay-handshake-refused",
+				reason: error.message,
+				refusal: error.stderr,
+				mutation_performed: false,
+				mutation_outcome: "none",
+			};
+		}
+		return {
+			tool: "gentle_review_capture",
+			status: "blocked",
+			outcome: error.kind === REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT ? "pi-host-relay-timeout" : "pi-host-relay-transport-failure",
+			failure: reviewHostRelayFailureReport(error),
+			reason: error.message,
+			mutation_performed: false,
+			mutation_outcome: "none",
+			next_action: error.kind === REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT
+				? reviewHostRelayTimeoutNextAction(error)
+				: REVIEW_HOST_RELAY_RETRY_ACTION,
+		};
+	}
+}
+
+const REVIEW_PROVIDER_ROLE_RETRY_ACTION =
+	"Call fresh STATUS and execute only the exact one-slot role vector it reoffers; never relaunch from transcript inference.";
+
+async function executeProviderRoleVectorCapture(
+	slot: ReviewProviderRoleVectorSlot,
+	nativeReviewCli: NativeReviewCli,
+	cwd: string,
+	binding: ReviewLastEventClosureBinding,
 	signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
 	if (nativeReviewCli.captureProviderRole === undefined) {
 		return {
-			operation,
+			tool: "gentle_review_capture",
 			status: "blocked",
 			outcome: "provider-role-capture-unsupported",
-			reason: "The provider issued self-contained role capture vectors, but this runtime has no native provider-role capture surface.",
+			reason: "The provider issued a self-contained role capture vector, but this runtime has no native provider-role capture surface.",
 			mutation_performed: false,
 			mutation_outcome: "none",
-			next_action: "Install a gentle-pi release with the provider-role capture surface; the vectors stay reoffered by negotiated STATUS.",
 		};
 	}
-	const executed: Array<Record<string, unknown>> = [];
-	for (const slot of slots) {
-		let artifact: Awaited<ReturnType<NonNullable<NativeReviewCli["captureProviderRole"]>>>;
-		try {
-			artifact = await nativeReviewCli.captureProviderRole({
-				captureOperation: slot.captureOperation,
-				argumentTokens: slot.argumentTokens,
-				cwd,
-				...(signal === undefined ? {} : { signal }),
-			});
-		} catch (error) {
-			return {
-				...nativeOperationFailure(operation, error),
-				outcome: "provider-role-vector-failed",
-				provider_roles: { transport: "go_owned_pi_process", executed_slots: executed },
-				retry_discipline: REVIEW_PROVIDER_ROLE_RETRY_ACTION,
-			};
-		}
-		executed.push({
-			capture_operation: slot.captureOperation,
-			role: artifact.role,
-			lineage_id: artifact.lineageId,
-			target_identity: artifact.targetIdentity,
-			captured: artifact.captured,
+	try {
+		const artifact = await nativeReviewCli.captureProviderRole({
+			captureOperation: slot.captureOperation,
+			argumentTokens: slot.argumentTokens,
+			cwd,
+			...(signal === undefined ? {} : { signal }),
 		});
+		if ("operation" in artifact) return mapLastEventClosure(artifact, binding);
+		return {
+			tool: "gentle_review_capture",
+			status: "captured",
+			outcome: "native-provider-role-captured",
+			lineage_id: artifact.lineageId,
+			provider_role: {
+				transport: "go_owned_pi_process",
+				capture_operation: slot.captureOperation,
+				role: artifact.role,
+				target_identity: artifact.targetIdentity,
+				captured: artifact.captured,
+			},
+		};
+	} catch (error) {
+		const outcome = await reconcileUnknownReviewCaptureFailure(error, nativeReviewCli, cwd, binding);
+		return {
+			...outcome,
+			...(outcome.status === "reconciled" ? {} : { retry_discipline: REVIEW_PROVIDER_ROLE_RETRY_ACTION }),
+		};
 	}
-	const after = await nativeReviewCli.targetStatus!({ cwd, lineageId, ...readRetainedNativeUntrackedSelection(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, cwd, lineageId), ...(signal === undefined ? {} : { signal }) });
-	clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelectionsByNativeReviewCli.get(nativeReviewCli)!, cwd, after.authority?.lineageId, after.authority?.state);
-	return {
-		...mapNativeTargetStatus(operation, after, lineageId),
-		provider_roles: { transport: "go_owned_pi_process", executed_slots: executed },
-	};
 }
 
 // The provider-named lenses still awaiting a reviewer result: one lens per
@@ -4118,18 +3920,18 @@ function clearReviewTransportProbeForTesting(nativeReviewCli: NativeReviewCli | 
 }
 
 function hostTransportUnavailable(
-	operation: ReviewControllerOperation,
+	operation: ReviewControllerOperation | "gentle_review_capture",
 	transport: ReviewTransportRefusal,
 ): Record<string, unknown> {
 	return {
-		operation,
+		...(operation === "gentle_review_capture" ? { tool: operation } : { operation }),
 		status: "blocked",
 		outcome: "pi-host-relay-transport-unavailable",
 		reason: `The native provider refused the required pi reviewer transport (${transport.code}): ${transport.message}`,
 		relay_transport: transport,
 		mutation_performed: false,
 		mutation_outcome: "none",
-		next_action: "Install a native gentle-ai provider that supports `review status --agent pi`, then re-run FINALIZE. Pi never falls back to an agent-less lifecycle route.",
+		next_action: "Install a native gentle-ai provider that supports `review status --agent pi`, then call fresh STATUS and submit its exact one-slot capture binding. Pi never falls back to an agent-less lifecycle route.",
 	};
 }
 
@@ -4159,6 +3961,206 @@ async function negotiatedStatusForHostTransport(
 		reviewTransportRefusalByProvider.set(provider, transport);
 		return { transport };
 	}
+}
+
+function canonicalReviewCaptureBinding(value: unknown): string {
+	if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") return JSON.stringify(value);
+	if (Array.isArray(value)) return `[${value.map((entry) => canonicalReviewCaptureBinding(entry)).join(",")}]`;
+	if (!isRecord(value)) throw new Error("Review capture collectBinding must encode a JSON object");
+	return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalReviewCaptureBinding(value[key])}`).join(",")}}`;
+}
+
+function parseCanonicalReviewCaptureBinding(input: string): string {
+	let binding: unknown;
+	try {
+		binding = JSON.parse(input);
+	} catch (error) {
+		throw new Error(`Review capture collectBinding is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!isRecord(binding)) throw new Error("Review capture collectBinding must encode exactly one collect input object");
+	return canonicalReviewCaptureBinding(binding);
+}
+
+function exactCollectArgument(input: ReviewCollectInputV3, name: string): string | undefined {
+	const matches = input.arguments.filter((argument) => argument.name === name);
+	return matches.length === 1 ? matches[0]!.value : undefined;
+}
+
+interface PublicReviewCaptureBinding {
+	collectBinding: string;
+}
+
+function publicReviewCaptureBindings(status: ReviewStatusV3): readonly PublicReviewCaptureBinding[] {
+	if (status.nextTransition?.kind !== "collect") return [];
+	return (status.nextTransition.collect?.inputs ?? []).map((input) => ({
+		collectBinding: canonicalReviewCaptureBinding(input),
+	}));
+}
+
+function captureBindingRejected(reason: string): Record<string, unknown> {
+	return {
+		tool: "gentle_review_capture",
+		status: "blocked",
+		outcome: "capture-binding-rejected",
+		reason,
+		mutation_performed: false,
+		mutation_outcome: "none",
+	};
+}
+
+interface SelectedReviewCapture {
+	input: ReviewCollectInputV3;
+	binding: ReviewLastEventClosureBinding;
+}
+
+function selectExactReviewCapture(
+	status: ReviewStatusV3,
+	lineageId: string,
+	canonicalBinding: string,
+): SelectedReviewCapture | Record<string, unknown> {
+	const statusLineageId = status.authority?.lineageId;
+	const statusTargetIdentity = status.targetIdentity;
+	if (
+		!isCanonicalProcessString(lineageId) ||
+		!isCanonicalProcessString(statusLineageId) ||
+		!isCanonicalProcessString(statusTargetIdentity) ||
+		status.applicability !== "current_target" ||
+		statusLineageId !== lineageId
+	) {
+		return captureBindingRejected("current STATUS does not offer one non-empty matching lineage and target identity");
+	}
+	if (status.nextTransition?.kind !== "collect") {
+		return captureBindingRejected("current STATUS does not offer a collect transition");
+	}
+	const matches = (status.nextTransition.collect?.inputs ?? []).filter((input) => canonicalReviewCaptureBinding(input) === canonicalBinding);
+	if (matches.length !== 1) {
+		return captureBindingRejected(matches.length === 0
+			? "collectBinding is missing or stale for current STATUS"
+			: "collectBinding matches more than one current STATUS input");
+	}
+	const input = matches[0]!;
+	const inputLineageId = exactCollectArgument(input, "lineage");
+	const inputTargetIdentity = exactCollectArgument(input, "target");
+	// Go's targeted-validator vector binds its capture target to the correction
+	// target from the provider-owned validation request, rather than STATUS's
+	// current candidate identity. All other captures remain bound to STATUS.
+	const expectedInputTargetIdentity = input.validationRequest?.correctionTargetIdentity ?? statusTargetIdentity;
+	if (
+		!isCanonicalProcessString(inputLineageId) ||
+		!isCanonicalProcessString(inputTargetIdentity) ||
+		inputLineageId !== lineageId ||
+		inputTargetIdentity !== expectedInputTargetIdentity
+	) {
+		return captureBindingRejected("collectBinding does not carry one non-empty matching provider lineage and target token");
+	}
+	return {
+		input,
+		binding: { lineageId, targetIdentity: statusTargetIdentity },
+	};
+}
+
+function isSelectedReviewCapture(value: SelectedReviewCapture | Record<string, unknown>): value is SelectedReviewCapture {
+	return "input" in value && "binding" in value;
+}
+
+async function executeReviewCaptureOperation(
+	parametersValue: unknown,
+	sessionCwd: string,
+	nativeReviewCli: NativeReviewCli | null,
+	signal?: AbortSignal,
+	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
+	retainedUntrackedSelections: Map<string, RetainedNativeUntrackedSelection> = new Map(),
+): Promise<Record<string, unknown>> {
+	const parameters = parseReviewCaptureParameters(parametersValue);
+	if (nativeReviewCli === null || nativeReviewCli.targetStatus === undefined) {
+		return {
+			tool: "gentle_review_capture",
+			status: "blocked",
+			outcome: "native-status-unsupported",
+			mutation_performed: false,
+			mutation_outcome: "none",
+		};
+	}
+	retainedUntrackedSelectionsByNativeReviewCli.set(nativeReviewCli, retainedUntrackedSelections);
+	const canonicalBinding = parseCanonicalReviewCaptureBinding(parameters.collectBinding);
+	const cwd = resolveReviewControllerWorkspaceRoot(parameters.workspaceRoot, sessionCwd, candidateViews, parameters.lineageId);
+	let status: ReviewStatusV3;
+	try {
+		const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, {
+			cwd,
+			lineageId: parameters.lineageId,
+			...readRetainedNativeUntrackedSelection(retainedUntrackedSelections, cwd, parameters.lineageId),
+			...(signal === undefined ? {} : { signal }),
+		}, cwd);
+		if (negotiated.transport !== undefined) return hostTransportUnavailable("gentle_review_capture", negotiated.transport);
+		status = negotiated.status!;
+	} catch (error) {
+		return nativeOperationFailure("gentle_review_capture", error);
+	}
+	const selected = selectExactReviewCapture(status, parameters.lineageId, canonicalBinding);
+	if (!isSelectedReviewCapture(selected)) return selected;
+
+	const hostRelaySlots = reviewHostRelaySlots([selected.input]);
+	if (hostRelaySlots.length === 1) {
+		if (parameters.correctionLines !== undefined) return captureBindingRejected("correctionLines is valid only for a correction-plan capture");
+		if (parameters.reviewerRunAcknowledged !== true) {
+			return {
+				tool: "gentle_review_capture",
+				status: "blocked",
+				outcome: "reviewer-model-run-forecast",
+				cost_forecast: {
+					transport: "pi_host_relay",
+					model_runs: 1,
+					lenses: hostRelaySlots[0]!.lens === undefined ? [] : [hostRelaySlots[0]!.lens],
+				},
+				mutation_performed: false,
+				mutation_outcome: "none",
+			};
+		}
+		return await executeReviewHostRelayCapture(hostRelaySlots[0]!, nativeReviewCli, cwd, selected.binding, signal);
+	}
+
+	if (selected.input.captureOperation === "review.capture-correction-plan") {
+		if (parameters.reviewerRunAcknowledged !== undefined) return captureBindingRejected("reviewerRunAcknowledged is valid only for a materialize reviewer capture");
+		const submission = selected.input.submission;
+		const value = submission?.values.length === 1 ? submission.values[0] : undefined;
+		if (submission === undefined || value?.slot !== "correction_lines") return captureBindingRejected("provider correction-plan capture omitted its exact correction-lines binding");
+		if (parameters.correctionLines === undefined) {
+			return {
+				tool: "gentle_review_capture",
+				status: "blocked",
+				outcome: "correction-lines-required",
+				minimum: value.minimum ?? 1,
+				maximum: value.maximum ?? 200,
+				mutation_performed: false,
+				mutation_outcome: "none",
+			};
+		}
+		if ((value.minimum !== undefined && parameters.correctionLines < value.minimum) || (value.maximum !== undefined && parameters.correctionLines > value.maximum)) {
+			return captureBindingRejected("correctionLines is outside the exact provider-issued correction-plan bounds");
+		}
+		if (nativeReviewCli.captureCorrectionPlan === undefined) return captureBindingRejected("native correction-plan capture is unavailable");
+		try {
+			const closure = await nativeReviewCli.captureCorrectionPlan({
+				argumentTokens: submission.argumentTokens,
+				correctionLines: parameters.correctionLines,
+				cwd,
+				...(signal === undefined ? {} : { signal }),
+			});
+			return mapLastEventClosure(closure, selected.binding);
+		} catch (error) {
+			return await reconcileUnknownReviewCaptureFailure(error, nativeReviewCli, cwd, selected.binding);
+		}
+	}
+
+	const providerRoleSlots = reviewProviderRoleVectorSlots([selected.input]);
+	if (providerRoleSlots.length === 1) {
+		if (parameters.reviewerRunAcknowledged !== undefined || parameters.correctionLines !== undefined) {
+			return captureBindingRejected("reviewerRunAcknowledged and correctionLines are not valid for a provider role capture");
+		}
+		return await executeProviderRoleVectorCapture(providerRoleSlots[0]!, nativeReviewCli, cwd, selected.binding, signal);
+	}
+	return captureBindingRejected(`unsupported provider capture operation: ${selected.input.captureOperation}`);
 }
 
 type DispatchHydrationOutcome =
@@ -4195,7 +4197,6 @@ async function executeReviewControllerOperation(
 	signal?: AbortSignal,
 	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
 	context?: ExtensionContext,
-	correctionEvidenceByLineage: Map<string, CorrectionEvidence> = new Map(),
 	retainedUntrackedSelections: Map<string, RetainedNativeUntrackedSelection> = new Map(),
 	pendingReviewConsentRegistry: PendingReviewConsentRegistry = processPendingReviewConsentRegistry,
 	pendingReviewConsentFallbackKey: symbol = Symbol("pending-review-consent-fallback"),
@@ -4204,16 +4205,6 @@ async function executeReviewControllerOperation(
 	reviewConsentScheduleTimer: (callback: () => void, delayMs: number) => { unref: () => void } = setTimeout,
 ): Promise<Record<string, unknown>> {
 	const parameters = parseReviewControllerParameters(parametersValue);
-	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.VALIDATE) {
-		return {
-			operation: parameters.operation,
-			status: "informational",
-			outcome: "delivery-validation-retired",
-			reason: "RDD review outcomes are informational. Delivery commands follow ordinary repository policy and are never authorized or blocked by this controller.",
-			mutation_performed: false,
-			mutation_outcome: "none",
-		};
-	}
 	if (nativeReviewCli !== null) retainedUntrackedSelectionsByNativeReviewCli.set(nativeReviewCli, retainedUntrackedSelections);
 	const defaultCwd = resolveReviewControllerWorkspaceRoot(parameters.workspaceRoot, sessionCwd, candidateViews, parameters.lineageId);
 	const pendingReviewConsentSession = pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey);
@@ -4246,8 +4237,17 @@ async function executeReviewControllerOperation(
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.INSPECT && nativeReviewCli !== null) {
 		try {
 			if (nativeReviewCli.targetStatus !== undefined) {
-				const status = await nativeReviewCli.targetStatus({ cwd: defaultCwd, ...(signal === undefined ? {} : { signal }) });
-				return { ...mapNativeTargetStatus(parameters.operation, status, undefined, defaultCwd), ...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}) };
+				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, {
+					cwd: defaultCwd,
+					...(signal === undefined ? {} : { signal }),
+				}, defaultCwd);
+				if (negotiated.transport !== undefined) {
+					return {
+						...hostTransportUnavailable(parameters.operation, negotiated.transport),
+						...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}),
+					};
+				}
+				return { ...mapNativeTargetStatus(parameters.operation, negotiated.status!, undefined, defaultCwd), ...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}) };
 			}
 			return nativeStatusUnsupported(parameters.operation);
 		} catch (error) {
@@ -4378,60 +4378,6 @@ async function executeReviewControllerOperation(
 		store.repairCurrentAuthority();
 		return { operation: parameters.operation, repaired: true };
 	}
-	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.BIND_SDD) {
-		if (nativeReviewCli === null) return nativeStatusUnsupported(parameters.operation);
-		const input = parseControllerJson(requiredControllerString(parameters, "input"), parameters.operation);
-		if (
-			typeof input.change !== "string" ||
-			typeof input.lineageId !== "string" ||
-			typeof input.expectedBindingRevision !== "string"
-		) throw new Error("Native bind-sdd requires change, lineageId, and expected binding revision");
-		if (!/^[a-z0-9][a-z0-9-]*$/.test(input.change)) throw new Error("Native bind-sdd change name is invalid");
-		if (!NATIVE_BIND_TOKEN_RE.test(input.lineageId)) throw new Error("Native bind-sdd lineageId is invalid");
-		if (input.expectedBindingRevision !== "" && !NATIVE_BIND_TOKEN_RE.test(input.expectedBindingRevision)) throw new Error("Native bind-sdd expected binding revision is invalid");
-		const expectedPath = join("openspec", "changes", input.change);
-		const canonicalCwd = realpathSync(defaultCwd);
-		const absolutePath = resolve(canonicalCwd, expectedPath);
-		if (!existsSync(absolutePath) || !lstatSync(absolutePath).isDirectory()) throw new Error("Native bind-sdd change path is outside or missing from the repository");
-		const canonicalPath = realpathSync(absolutePath);
-		const pathFromRepository = relative(canonicalCwd, canonicalPath);
-		if (pathFromRepository === ".." || pathFromRepository.startsWith(`..${sep}`) || isAbsolute(pathFromRepository)) throw new Error("Native bind-sdd change path is outside or missing from the repository");
-		try {
-			const bound = await nativeReviewCli.bindSdd({
-				cwd: canonicalCwd,
-				change: input.change,
-				lineage: input.lineageId,
-				expectedBindingRevision: input.expectedBindingRevision,
-				...(signal === undefined ? {} : { signal }),
-			});
-			if (
-				bound.change !== input.change ||
-				bound.lineage !== input.lineageId ||
-				typeof bound.revision !== "string" || bound.revision.length === 0 ||
-				typeof bound.authorityRevision !== "string" || bound.authorityRevision.length === 0 ||
-				typeof bound.receiptHash !== "string" || bound.receiptHash.length === 0 ||
-				bound.gateContext.lineageId !== input.lineageId ||
-				bound.gateContext.storeRevision !== bound.authorityRevision ||
-				bound.gateContext.raw.gate !== "post-apply"
-			) throw Object.assign(
-				new Error("Native bind-sdd returned malformed or inconsistent binding evidence"),
-				{ mutationOutcome: "unknown", nextAction: "review.status" },
-			);
-			return { operation: parameters.operation, binding: {
-				revision: bound.revision,
-				change: bound.change,
-				lineage: bound.lineage,
-				authority_revision: bound.authorityRevision,
-				receipt_hash: bound.receiptHash,
-				gate_context: bound.gateContext.raw,
-			} };
-		} catch (error) {
-			return reconcileNativeMutationFailure(parameters.operation, error, nativeReviewCli, {
-				cwd: canonicalCwd,
-				lineageId: input.lineageId,
-			});
-		}
-	}
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.ANSWER_CONSENT) {
 		const input = parseControllerJson(requiredControllerString(parameters, "input"), parameters.operation);
 		if (Object.keys(input).some((key) => key !== "consentBinding" && key !== "answer") || Object.keys(input).length !== 2) throw new Error("Review controller answer-consent input must contain exactly consentBinding and answer");
@@ -4539,13 +4485,15 @@ async function executeReviewControllerOperation(
 			if (nativeReviewCli?.targetStatus === undefined) return nativeStatusUnsupported(parameters.operation);
 			let target: ReviewStatusV3;
 			try {
-				target = await nativeReviewCli.targetStatus({
+				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, {
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(canonicalBaseRef === undefined ? {} : { baseRef: canonicalBaseRef }),
 					...(untrackedSelection.untrackedScope === undefined ? {} : untrackedSelection),
 					...(signal === undefined ? {} : { signal }),
-				});
+				}, defaultCwd);
+				if (negotiated.transport !== undefined) return hostTransportUnavailable(parameters.operation, negotiated.transport);
+				target = negotiated.status!;
 				if (target.nextTransition?.kind === "collect" || target.applicability !== "unrelated" || target.action !== "start") return mapNativeTargetStatus(parameters.operation, target, parameters.lineageId);
 			} catch (error) {
 				return nativeOperationFailure(parameters.operation, error);
@@ -4700,567 +4648,6 @@ async function executeReviewControllerOperation(
 		}
 		return { operation: parameters.operation, result, state };
 	}
-	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.FINALIZE) {
-		const hasInput = parameters.input !== undefined;
-		const hasInputPath = parameters.inputPath !== undefined;
-		if (hasInput === hasInputPath) throw new Error("Review controller finalize requires exactly one of input or inputPath");
-		const raw = parseControllerJson(
-			hasInput
-				? requiredControllerString(parameters, "input")
-				: readRepositoryControllerInput(requiredControllerString(parameters, "inputPath"), defaultCwd),
-			REVIEW_CONTROLLER_OPERATION.FINALIZE,
-		);
-		if (raw.correction_line_forecast !== undefined && (!Number.isSafeInteger(raw.correction_line_forecast) || Number(raw.correction_line_forecast) <= 0)) {
-			throw new Error("Review controller finalize correction_line_forecast must be a positive integer");
-		}
-		if (raw.final_evidence !== undefined && typeof raw.final_evidence !== "string") throw new Error("Review controller finalize final_evidence must be a string");
-		if (raw.final_verification_passed !== undefined && typeof raw.final_verification_passed !== "boolean") throw new Error("Review controller finalize final_verification_passed must be boolean");
-		if (raw.final_verification_outcome !== undefined && (typeof raw.final_verification_outcome !== "string" || !["passed", "verification_failed", "procedural_tooling_failed"].includes(raw.final_verification_outcome))) throw new Error("Review controller finalize final_verification_outcome is unsupported");
-		if (raw.final_evidence !== undefined && raw.final_verification_passed === undefined && raw.final_verification_outcome === undefined) throw new Error("Review controller finalize with final_evidence requires an explicit verification result or outcome");
-		if (nativeReviewCli?.targetStatus !== undefined) {
-			const input = parseNativeCompactFinalizeInput({
-				cwd: defaultCwd,
-				...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
-				...raw,
-			});
-			const retainedUntrackedSelection = parameters.lineageId === undefined
-				? {}
-				: readRetainedNativeUntrackedSelection(retainedUntrackedSelections, defaultCwd, parameters.lineageId);
-			let correctionCompletion = false;
-			let negotiatedStatus: ReviewStatusV3 | undefined;
-			let candidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
-			let provisionalCandidateView: ReturnType<CandidateViewRegistry["create"]> | undefined;
-			let nativeResult: NativeFinalizeResult | undefined;
-			let correctionStep: CorrectionStep | undefined;
-			try {
-				if (parameters.lineageId === undefined) throw new CandidateViewError("Native FINALIZE requires an explicit lineage");
-				correctionCompletion = input.validation !== undefined && input.final_evidence !== undefined;
-				const validationAttempt = input.correction_line_forecast === undefined && input.final_evidence !== undefined;
-				const replayKey = JSON.stringify({ cwd: defaultCwd, lineageId: parameters.lineageId ?? null, input: parameters.input ?? null, inputPath: parameters.inputPath ?? null });
-				if (candidateViews?.hasProjection(parameters.lineageId, defaultCwd)) {
-					candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
-					candidateView = correctionCompletion || validationAttempt
-						? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey)
-						: candidateViews.resolveForFinalize(parameters.lineageId, defaultCwd);
-				} else if (candidateViews) {
-					provisionalCandidateView = candidateViews.createOrReuse({ contributorRoot: defaultCwd, replayKey: `${replayKey}:status-candidate` });
-					candidateView = provisionalCandidateView;
-				}
-				candidateView?.verify();
-				const statusCandidateRoot = useTargetLifecycleRoot ? defaultCwd : candidateView?.root ?? defaultCwd;
-				// Name the required Pi reviewer transport so the provider offers its
-				// materialize-marked relay slot. A typed refusal blocks before any
-				// agent-less STATUS, collect, or FINALIZE lifecycle continuation.
-				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: statusCandidateRoot, lineageId: parameters.lineageId, ...retainedUntrackedSelection, ...(signal === undefined ? {} : { signal }) }, defaultCwd);
-				if (negotiated.transport !== undefined) {
-					if (provisionalCandidateView && candidateViews) {
-						candidateViews.cleanup(provisionalCandidateView.token);
-						provisionalCandidateView = undefined;
-						candidateView = undefined;
-					}
-					return hostTransportUnavailable(parameters.operation, negotiated.transport);
-				}
-				negotiatedStatus = negotiated.status!;
-				if (negotiatedStatus.applicability !== "current_target" || negotiatedStatus.authority?.lineageId !== parameters.lineageId || (negotiatedStatus.action !== "finalize" && negotiatedStatus.action !== "reconcile_finalize")) {
-					if (provisionalCandidateView && candidateViews) {
-						candidateViews.cleanup(provisionalCandidateView.token);
-						provisionalCandidateView = undefined;
-						candidateView = undefined;
-					}
-					return mapNativeTargetStatus(parameters.operation, negotiatedStatus, parameters.lineageId);
-				}
-				if (provisionalCandidateView && candidateViews) {
-					candidateViews.cleanup(provisionalCandidateView.token);
-					provisionalCandidateView = undefined;
-					candidateView = undefined;
-				}
-				// Live smoke root cause (2026-08-16, dev binary 2.4.0-main):
-				// status/v5 mints the opaque --repository-context handle bound to
-				// the STATUS query root, and every rendered payload embeds it. A
-				// context minted from a frozen candidate-view root fails the live
-				// emitter's committed-intent reconciliation on the next lifecycle
-				// operation, so on v5 the lane rebinds its negotiated STATUS to
-				// the workspace root before executing any rendered payload.
-				// Pinned pre-v5 emitters keep the frozen-view status untouched.
-				if (statusCandidateRoot !== defaultCwd && (negotiatedStatus.raw as { schema?: unknown }).schema === "gentle-ai.review-integration.status/v5") {
-					const rebound = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: defaultCwd, lineageId: parameters.lineageId, ...retainedUntrackedSelection, ...(signal === undefined ? {} : { signal }) }, defaultCwd);
-					if (rebound.transport !== undefined) return hostTransportUnavailable(parameters.operation, rebound.transport);
-					const workspaceStatus = rebound.status!;
-					if (workspaceStatus.authority?.lineageId !== parameters.lineageId || workspaceStatus.authority.revision !== negotiatedStatus.authority.revision) {
-						throw new CandidateViewError("workspace-root status no longer matches the negotiated lifecycle authority", "workspace-status-rebind-drift");
-					}
-					negotiatedStatus = workspaceStatus;
-				}
-				// gentle-pi#311 P4: pi-slot capture inputs route through the host
-				// relay ONLY when the provider issued the --materialize token on
-				// the collect input. Every other slot and lane stays untouched.
-				const hostRelaySlots = negotiatedStatus.nextTransition?.kind === "collect"
-					? reviewHostRelaySlots(negotiatedStatus.nextTransition.collect?.inputs ?? [])
-					: [];
-				if (hostRelaySlots.length > 0 && input.final_evidence === undefined && input.correction_line_forecast === undefined) {
-					// One cost/side-effect forecast BEFORE launch, once per
-					// FINALIZE and never per lens: each host-relay slot runs a
-					// real locked-down `pi` reviewer subprocess against the
-					// user's own model, so an unacknowledged finalize would spend
-					// tokens as a silent side effect of what reads like
-					// bookkeeping. Same acknowledgement shape the adapter already
-					// uses for consequential inputs (committedOnly): the caller
-					// states the cost it accepts, which keeps headless callers
-					// working without an interactive prompt.
-					if (input.reviewer_run_acknowledged !== true) {
-						const forecastLenses = hostRelaySlots.map((slot, index) => slot.lens ?? `slot-${index}`);
-						return {
-							operation: parameters.operation,
-							status: "blocked",
-							outcome: "reviewer-model-run-forecast",
-							reason: `Finalize is about to run ${hostRelaySlots.length} real reviewer model run${hostRelaySlots.length === 1 ? "" : "s"} through the pi host relay (${forecastLenses.join(", ")}), one locked-down pi subprocess per outstanding lens, in the foreground. This spends model tokens on your configured model and provider.`,
-							cost_forecast: {
-								transport: "pi_host_relay",
-								model_runs: hostRelaySlots.length,
-								lenses: forecastLenses,
-								side_effects: [
-									"one locked-down pi subprocess per lens, in an empty scratch directory with every discovery surface disabled",
-									"each captured reviewer result is admitted natively into this lineage's authority",
-									"no candidate file, index, or commit is modified",
-								],
-								model_selection: "user-owned: the relay never sets --model, --provider, or --profile",
-							},
-							mutation_performed: false,
-							mutation_outcome: "none",
-							next_action: "Re-run finalize with {\"reviewer_run_acknowledged\": true} to authorize exactly this reviewer work.",
-						};
-					}
-					// The relay itself needs no candidate view (it consumes only
-					// provider-issued tokens), but a session that dispatches a
-					// reviewer by hand on this same lineage does. Hydrate here too
-					// so both routes work; it is best-effort and never fails the
-					// relay.
-					const relayDispatchBinding = hydrateDispatchBindingFromStatus(candidateViews, defaultCwd, negotiatedStatus);
-					const relayResult = await executeReviewHostRelayCollection(parameters.operation, parameters.lineageId, hostRelaySlots, nativeReviewCli, defaultCwd, signal);
-					return relayDispatchBinding === undefined ? relayResult : { ...relayResult, dispatch_binding: relayDispatchBinding };
-				}
-				// gentle-pi#311 P4-roles: the provider renders the non-lens
-				// adversarial roles as self-contained --execute vectors; each is
-				// run exactly as rendered and STATUS is re-queried. Nothing here
-				// authors, parses, or transports role output.
-				const roleVectorSlots = negotiatedStatus.nextTransition?.kind === "collect"
-					? reviewProviderRoleVectorSlots(negotiatedStatus.nextTransition.collect?.inputs ?? [])
-					: [];
-				if (roleVectorSlots.length > 0 && input.final_evidence === undefined && input.correction_line_forecast === undefined && input.validation === undefined) {
-					return await executeProviderRoleVectorCollection(parameters.operation, parameters.lineageId, roleVectorSlots, nativeReviewCli, defaultCwd, signal);
-				}
-				// Live defect (2026-08-16, Engram #12466): FINALIZE on a lineage
-				// still at reviewer_results_required misrouted into the correction
-				// evidence-first-ordering lane and failed. Route strictly from the
-				// provider transition: a collect naming review.capture-result means
-				// reviewer results are still outstanding — no correction-evidence
-				// or targeted-validation lane is ever admissible here, so any
-				// document-carrying FINALIZE stops with the provider-offered step.
-				// A document-free FINALIZE stops too on the live status/v5 lane
-				// (the same v5 keying as the workspace rebind above); the pinned
-				// pre-v5 raw-finalize fallback keeps its native captured-results
-				// discovery unchanged. Materialize-marked pi slots were already
-				// routed through the host relay above.
-				const reviewerResultsOutstanding = negotiatedStatus.nextTransition?.kind === "collect"
-					&& (negotiatedStatus.nextTransition.collect?.inputs ?? []).some((collectInput) => collectInput.captureOperation === "review.capture-result");
-				const finalizeDocumentsPresent = input.final_evidence !== undefined || input.validation !== undefined || input.correction_line_forecast !== undefined;
-				if (reviewerResultsOutstanding && (finalizeDocumentsPresent || (negotiatedStatus.raw as { schema?: unknown }).schema === "gentle-ai.review-integration.status/v5")) {
-					const outstandingReviewerLenses = pendingReviewerLenses(negotiatedStatus);
-					if (candidateView !== undefined && candidateViews && (correctionCompletion || validationAttempt)) candidateViews.cleanup(candidateView.token);
-					// Field report (2026-08-16): this lane is where the reported
-					// flow actually learns reviewer results are outstanding, and
-					// the reviewer dispatch follows it directly. Hydrate the
-					// dispatch binding from the authoritative status just decoded
-					// — against the workspace root, never a frozen view root —
-					// and report the outcome either way.
-					const dispatchBinding = hydrateDispatchBindingFromStatus(candidateViews, defaultCwd, negotiatedStatus);
-					return {
-						operation: parameters.operation,
-						status: "blocked",
-						outcome: "reviewer-results-required",
-						reason: "Capture the reviewer result first; the provider offers review.capture-result. Correction evidence and targeted validation are never admissible while reviewer results are outstanding.",
-						...(outstandingReviewerLenses.length === 0 ? {} : { pending_lenses: outstandingReviewerLenses }),
-						...(dispatchBinding === undefined ? {} : { dispatch_binding: dispatchBinding }),
-						result: negotiatedStatus.raw,
-						mutation_performed: false,
-						mutation_outcome: "none",
-						next_action: "review.capture-result",
-					};
-				}
-				// Ordinary final verification (field defect, 2026-08-16): at
-				// native state `validating` the provider collects one final
-				// `review.capture-evidence` record and then offers exactly one
-				// execute `review.finalize --captured-evidence` transition. This
-				// lane is provider-owned end to end: it is not a correction
-				// transaction, no targeted validation exists in it, and no
-				// candidate view is materialized — the workspace root IS the
-				// unchanged frozen candidate, native FINALIZE validates the live
-				// snapshot itself, and the provider binds its repository-context
-				// effects to the root the lifecycle runs from. The correction
-				// lane keeps its pre-capture state `correction_required` and
-				// stays byte-identical below.
-				const ordinaryFinalVerification = validationAttempt &&
-					negotiatedStatus.authority?.state === "validating" &&
-					negotiatedStatus.validationRequest === undefined &&
-					!(negotiatedStatus.nextTransition?.kind === "collect" && (negotiatedStatus.nextTransition.collect?.inputs ?? []).some(isTargetedValidationCollectInput));
-				if (candidateViews && !ordinaryFinalVerification && !candidateViews.hasProjection(parameters.lineageId, defaultCwd)) {
-					const projection = negotiatedStatus.projection;
-					candidateView = validationAttempt
-						? (candidateViews.restoreProjectionFromNative(parameters.lineageId, defaultCwd, projection), undefined)
-						: candidateViews.restoreForFinalizeFromNative(parameters.lineageId, defaultCwd, projection);
-				}
-				// Fail closed before any native mutation when the frozen projection
-				// belongs to a different worktree than the requested workspace (#169).
-				if (candidateViews && parameters.lineageId && candidateViews.hasProjection(parameters.lineageId, defaultCwd)) candidateViews.resolveProjection(parameters.lineageId, defaultCwd);
-				candidateView ??= candidateViews && parameters.lineageId && !ordinaryFinalVerification ? (correctionCompletion || validationAttempt) ? candidateViews.createCorrected(parameters.lineageId, defaultCwd, replayKey) : candidateViews.resolveForFinalize(parameters.lineageId, defaultCwd) : undefined;
-				// Field defect (Engram #12547): a FINALIZE that merely follows the
-				// provider's own execute transition carries no documents, so
-				// neither correctionCompletion nor validationAttempt holds and the
-				// START-time reviewer view is resolved. After an admitted bounded
-				// correction the candidate identity has legitimately moved, so
-				// that view is compared against the corrected target the provider
-				// itself authorized and every finalize fails as drift — no receipt
-				// is ever minted, while a fresh process finalizes the same lineage
-				// fine because it restores from the native descriptor. Re-derive
-				// the binding from that same descriptor here instead of reading a
-				// retired reviewer view as drift. It is not a relaxation: the
-				// replacement is materialized from Git, must match the provider
-				// descriptor exactly, and is asserted immediately below.
-				if (
-					candidateView !== undefined && candidateViews && parameters.lineageId && !ordinaryFinalVerification &&
-					candidateView.candidateTree !== negotiatedStatus.projection.currentCandidateTree
-				) {
-					candidateView = candidateViews.rebindForFinalizeFromNative(parameters.lineageId, defaultCwd, negotiatedStatus.projection);
-				}
-				if (candidateView !== undefined) assertNativeFinalizeCandidateBinding(candidateView, negotiatedStatus);
-				if (input.validation !== undefined && input.final_evidence === undefined && !ordinaryFinalVerification && parameters.lineageId) {
-					const validationRequest = requireTargetedValidationAfterEvidence(negotiatedStatus);
-					const externalTargetedValidation = negotiatedStatus.nextTransition?.kind === "collect" && (negotiatedStatus.nextTransition.collect?.inputs ?? []).some((collectInput) => collectInput.captureOperation === "external.run_targeted_validation");
-					if (!externalTargetedValidation) throw new CandidateViewError("validation-only finalize requires the provider's external targeted-validation collection", "evidence-first-ordering");
-					if (input.validation.request_hash !== validationRequest.requestHash.replace(/^sha256:/, "") || JSON.stringify([...input.validation.correction_ids].sort()) !== JSON.stringify([...validationRequest.fixFindingIds].sort())) {
-						throw new CandidateViewError("targeted validation document does not match the provider request", "targeted-validation-binding-drift");
-					}
-					const validationSubmission = finalizeSubmissionSlot(negotiatedStatus, "validation");
-					if (validationSubmission === undefined || nativeReviewCli.finalizeSubmission === undefined) {
-						throw new CandidateViewError("native validation submission execution is unavailable", "finalize-transition-binding-drift");
-					}
-					nativeResult = await nativeReviewCli.finalizeSubmission({
-						cwd: defaultCwd,
-						argumentTokens: validationSubmission.argumentTokens,
-						valueSubstitutionLocation: validationSubmission.value.substitutionLocation,
-						valueDocument: JSON.stringify({
-							targeted_validation_request_hash: validationRequest.requestHash,
-							correction_target_identity: validationRequest.correctionTargetIdentity,
-							...toNativeValidatorDocument(input.validation),
-						}),
-						...(signal === undefined ? {} : { signal }),
-					});
-					if (nativeResult.lineageId !== parameters.lineageId) {
-						throw new CandidateViewError("provider finalize submission answered for a different lineage", "finalize-transition-binding-drift");
-					}
-				}
-				if (ordinaryFinalVerification && parameters.lineageId) {
-					// A projection held by this process routes the top-of-try path
-					// through createCorrected before the lane is known; that view
-					// is unused here — the lifecycle runs from the workspace root.
-					if (candidateView !== undefined && candidateViews) {
-						candidateViews.cleanup(candidateView.token);
-						candidateView = undefined;
-					}
-					if (nativeReviewCli.captureEvidence === undefined && nativeReviewCli.captureEvidenceSubmission === undefined) throw new CandidateViewError("native final verification evidence capture is unavailable", "final-verification-provider-owned");
-					const outcome = correctionOutcome(input);
-					if (outcome === undefined || negotiatedStatus.authority === undefined) throw new CandidateViewError("native final verification evidence requires one authoritative outcome-bound status", "final-verification-provider-owned");
-					if (input.validation !== undefined) {
-						throw new CandidateViewError("native final verification is provider-owned; a targeted validation document is not admissible at state validating", "final-verification-provider-owned");
-					}
-					const evidenceSlot = requireEvidenceCollection(negotiatedStatus);
-					const evidenceBinding = resolveEvidenceCaptureBinding(evidenceSlot, negotiatedStatus, parameters.lineageId, outcome);
-					const captured = await captureEvidenceForCollection(nativeReviewCli, evidenceBinding, defaultCwd, parameters.lineageId, outcome, input.final_evidence!, signal);
-					if (
-						captured.lineageId !== parameters.lineageId || captured.authorityRevision !== evidenceBinding.expectedRevision ||
-						captured.targetIdentity !== evidenceBinding.targetIdentity || captured.candidateTree !== negotiatedStatus.projection.currentCandidateTree ||
-						evidencePathsDrift(captured, evidenceBinding, negotiatedStatus) ||
-						captured.outcome !== outcome
-					) {
-						throw new CandidateViewError("captured final verification evidence does not match the requested lineage, target, and outcome", "correction-evidence-binding-drift");
-					}
-					// Follow the provider transition faithfully: re-query
-					// negotiated STATUS and execute only the exact rendered
-					// `review.finalize` transition it offers for the captured
-					// evidence. Never demand targeted validation here and never
-					// substitute the validate gate.
-					const afterEvidence = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...retainedUntrackedSelection, ...(signal === undefined ? {} : { signal }) });
-					clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelections, defaultCwd, afterEvidence.authority?.lineageId, afterEvidence.authority?.state);
-					if (afterEvidence.authority?.lineageId !== parameters.lineageId) throw new CandidateViewError("post-evidence status lost the final-verification lineage", "correction-evidence-binding-drift");
-					if (afterEvidence.validationRequest !== undefined || (afterEvidence.nextTransition?.kind === "collect" && (afterEvidence.nextTransition.collect?.inputs ?? []).some(isTargetedValidationCollectInput))) {
-						throw new CandidateViewError("final verification evidence unexpectedly unlocked targeted validation", "final-verification-provider-owned");
-					}
-					const evidenceTransition = afterEvidence.nextTransition?.kind === "execute" && afterEvidence.nextTransition.execute?.operation === "review.finalize"
-						? afterEvidence.nextTransition.execute
-						: undefined;
-					if (evidenceTransition === undefined || nativeReviewCli.finalizeTransition === undefined) {
-						// Fail closed on an unrecognized transition: report the
-						// committed capture and the provider's own status verbatim.
-						return {
-							...mapNativeTargetStatus(parameters.operation, afterEvidence, parameters.lineageId),
-							outcome: "final-verification-transition-unavailable",
-							verification_evidence: { outcome: captured.outcome, record_digest: captured.recordDigest },
-							mutation_performed: true,
-							mutation_outcome: "committed",
-						};
-					}
-					if (evidenceTransition.binding.lineageId !== undefined && evidenceTransition.binding.lineageId !== parameters.lineageId) {
-						throw new CandidateViewError("provider finalize transition is bound to a different lineage", "finalize-transition-binding-drift");
-					}
-					nativeResult = await nativeReviewCli.finalizeTransition({
-						cwd: defaultCwd,
-						// The exact rendered tokens, verbatim and in provider
-						// order; the hyphenated fallback mirrors the provider's
-						// published rendering rule for older payloads.
-						argumentTokens: providerFinalizeArgumentTokens(afterEvidence, evidenceTransition.arguments),
-						...(signal === undefined ? {} : { signal }),
-					});
-					if (nativeResult.lineageId !== parameters.lineageId) {
-						throw new CandidateViewError("provider finalize transition answered for a different lineage", "finalize-transition-binding-drift");
-					}
-				}
-				if (validationAttempt && !ordinaryFinalVerification && candidateView && parameters.lineageId) {
-					if (nativeReviewCli.captureEvidence === undefined && nativeReviewCli.captureEvidenceSubmission === undefined) throw new CandidateViewError("native correction evidence capture is unavailable", "evidence-first-ordering");
-					const outcome = correctionOutcome(input);
-					if (outcome === undefined || negotiatedStatus.authority === undefined) throw new CandidateViewError("native correction evidence requires one authoritative outcome-bound status", "evidence-first-ordering");
-					const evidenceSlot = requireEvidenceCollection(negotiatedStatus);
-					const evidenceBinding = resolveEvidenceCaptureBinding(evidenceSlot, negotiatedStatus, parameters.lineageId, outcome);
-					const captured = await captureEvidenceForCollection(
-						nativeReviewCli,
-						evidenceBinding,
-						useTargetLifecycleRoot ? defaultCwd : candidateView.root,
-						parameters.lineageId,
-						outcome,
-						input.final_evidence!,
-						signal,
-					);
-					if (
-						captured.lineageId !== parameters.lineageId || captured.authorityRevision !== evidenceBinding.expectedRevision ||
-						captured.targetIdentity !== evidenceBinding.targetIdentity || captured.candidateTree !== negotiatedStatus.projection.currentCandidateTree || captured.candidateTree !== candidateView.candidateTree ||
-						evidencePathsDrift(captured, evidenceBinding, negotiatedStatus) ||
-						captured.outcome !== outcome
-					) {
-						throw new CandidateViewError("captured correction evidence does not match the requested lineage, target, and outcome", "correction-evidence-binding-drift");
-					}
-					const evidence: CorrectionEvidence = {
-						outcome: captured.outcome,
-						evidenceIdentity: captured.recordDigest,
-						recordDigest: captured.recordDigest,
-						candidateTree: captured.candidateTree,
-						rawPayloadSha256: captured.rawPayloadSha256,
-					};
-					const prior = correctionEvidenceByLineage.get(reviewLifecycleStorageKey(defaultCwd, parameters.lineageId));
-					if (prior !== undefined) {
-						try {
-							assertDistinctCorrectionEvidence({ prior, next: evidence, priorStillResolvable: true, priorRecordDigestNow: prior.recordDigest });
-						} catch (error) {
-							throw new CandidateViewError(error instanceof Error ? error.message : "correction evidence was replaced", "correction-evidence-replaced");
-						}
-					}
-					correctionStep = resolveCorrectionStep({
-						lineageId: parameters.lineageId,
-						targetIdentity: evidenceBinding.targetIdentity,
-						authorityRevision: evidenceBinding.expectedRevision,
-						correctionBudget: negotiatedStatus.frozen?.correctionBudget ?? 0,
-						changedLinesCharged: 0,
-					}, evidence);
-					// Workspace-bound like the pre-capture rebind above: rendered
-					// validation payloads embed the context this status mints.
-					const afterEvidence = await nativeReviewCli.targetStatus({ cwd: defaultCwd, lineageId: parameters.lineageId, ...retainedUntrackedSelection, ...(signal === undefined ? {} : { signal }) });
-					clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelections, defaultCwd, afterEvidence.authority?.lineageId, afterEvidence.authority?.state);
-					if (afterEvidence.authority?.lineageId !== parameters.lineageId) throw new CandidateViewError("post-evidence status lost the correction lineage", "correction-evidence-binding-drift");
-					if (correctionStep.kind === "recapture-required") {
-						assertNoTargetedValidation(afterEvidence);
-						if (afterEvidence.authority.state !== "correction_required") throw new CandidateViewError("verification-failed evidence did not keep the correction transaction open", "correction-outcome-drift");
-						correctionEvidenceByLineage.set(reviewLifecycleStorageKey(defaultCwd, parameters.lineageId), Object.freeze(evidence));
-						candidateViews.cleanup(candidateView.token);
-						return { operation: parameters.operation, status: "in-progress", outcome: "verification-failed", correction_step: correctionStep, result: afterEvidence.raw };
-					}
-					if (correctionStep.kind === "terminal-escalation") {
-						assertNoTargetedValidation(afterEvidence);
-						if (afterEvidence.authority.state !== "escalated" || (afterEvidence.action !== "stop" && afterEvidence.action !== "maintainer_action")) throw new CandidateViewError("procedural-tooling-failed evidence did not execute terminal escalation", "correction-outcome-drift");
-						correctionEvidenceByLineage.delete(reviewLifecycleStorageKey(defaultCwd, parameters.lineageId));
-						candidateViews.cleanup(candidateView.token);
-						candidateViews.cleanupTerminal(parameters.lineageId, "escalated", defaultCwd);
-						clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelections, defaultCwd, afterEvidence.authority?.lineageId, afterEvidence.authority?.state);
-						return { operation: parameters.operation, status: "blocked", outcome: "terminal-escalation", correction_step: correctionStep, result: afterEvidence.raw };
-					}
-					const validationRequest = requireTargetedValidationAfterEvidence(afterEvidence);
-					correctionEvidenceByLineage.delete(reviewLifecycleStorageKey(defaultCwd, parameters.lineageId));
-					negotiatedStatus = afterEvidence;
-					// gentle-pi#311 P4-roles: when the provider offers targeted
-					// validation as a self-contained capture-validation vector, the
-					// verdict is Go-owned — a Pi-authored validation document is not
-					// admissible for it, and the next FINALIZE call executes the
-					// vector exactly as rendered.
-					const validationVectors = afterEvidence.nextTransition?.kind === "collect"
-						? reviewProviderRoleVectorSlots(afterEvidence.nextTransition.collect?.inputs ?? [])
-						: [];
-					if (validationVectors.length > 0) {
-						candidateViews.cleanup(candidateView.token);
-						if (input.validation !== undefined) {
-							return {
-								operation: parameters.operation,
-								status: "blocked",
-								outcome: "targeted-validation-is-provider-owned",
-								reason: "The provider rendered targeted validation as a self-contained review.capture-validation vector: Go materializes the validator prompt and runs its own locked-down pi process, so a Pi-authored validation document is not admissible.",
-								correction_step: correctionStep,
-								mutation_performed: true,
-								mutation_outcome: "committed",
-								next_action: "Re-run finalize without validation; the provider-rendered vector executes verbatim and STATUS is re-queried.",
-							};
-						}
-						return { ...mapNativeTargetStatus(parameters.operation, afterEvidence, parameters.lineageId), correction_step: correctionStep };
-					}
-					if (input.validation === undefined) {
-						candidateViews.cleanup(candidateView.token);
-						return { ...mapNativeTargetStatus(parameters.operation, afterEvidence, parameters.lineageId), correction_step: correctionStep };
-					}
-					if (input.validation.request_hash !== validationRequest.requestHash.replace(/^sha256:/, "") || JSON.stringify([...input.validation.correction_ids].sort()) !== JSON.stringify([...validationRequest.fixFindingIds].sort())) {
-						throw new CandidateViewError("targeted validation document does not match the provider request", "targeted-validation-binding-drift");
-					}
-					const validationSubmission = finalizeSubmissionSlot(negotiatedStatus, "validation");
-					if (validationSubmission !== undefined) {
-						if (nativeReviewCli.finalizeSubmission === undefined) throw new CandidateViewError("native finalize submission execution is unavailable", "finalize-transition-binding-drift");
-						nativeResult = await nativeReviewCli.finalizeSubmission({
-							// The rendered tokens are self-contained (the opaque
-							// --repository-context binds the repository); the process
-							// runs from the authority workspace root — a frozen
-							// candidate-view root is a different toplevel of the same
-							// store and fails the live emitter's effect binding.
-							cwd: defaultCwd,
-							argumentTokens: validationSubmission.argumentTokens,
-							valueSubstitutionLocation: validationSubmission.value.substitutionLocation,
-							// The rendered submission consumes the raw validator
-							// artifact, so the request binding rides inside it.
-							valueDocument: JSON.stringify({
-								targeted_validation_request_hash: validationRequest.requestHash,
-								correction_target_identity: validationRequest.correctionTargetIdentity,
-								...toNativeValidatorDocument(input.validation),
-							}),
-							...(signal === undefined ? {} : { signal }),
-						});
-						if (nativeResult.lineageId !== parameters.lineageId) {
-							throw new CandidateViewError("provider finalize submission answered for a different lineage", "finalize-transition-binding-drift");
-						}
-					}
-				}
-				// gentle-pi#311 P5: when the provider's negotiated transition IS a
-				// review.finalize execution (captured_results_ready), run it exactly
-				// as rendered — the provider discovers its own admitted lens and
-				// role slots. Pi never assembles reviewer, refuter, or validator
-				// documents for this lane; the remaining document lanes below
-				// (correction forecast, targeted validation, final evidence) are the
-				// negotiated collection answers the pinned provider still consumes
-				// through --correction-lines/--validation/--evidence.
-				const finalizeTransition = negotiatedStatus.nextTransition?.kind === "execute" && negotiatedStatus.nextTransition.execute?.operation === "review.finalize"
-					? negotiatedStatus.nextTransition.execute
-					: undefined;
-				if (
-					nativeResult === undefined &&
-					finalizeTransition !== undefined && nativeReviewCli.finalizeTransition !== undefined &&
-					input.validation === undefined && input.final_evidence === undefined && input.correction_line_forecast === undefined
-				) {
-					if (finalizeTransition.binding.lineageId !== undefined && finalizeTransition.binding.lineageId !== parameters.lineageId) {
-						throw new CandidateViewError("provider finalize transition is bound to a different lineage", "finalize-transition-binding-drift");
-					}
-					nativeResult = await nativeReviewCli.finalizeTransition({
-						// The provider binds this transition's effects to the root
-						// the lifecycle runs from (live smoke, 2026-08-16): running
-						// the rendered vector from a frozen candidate-view root
-						// records a mismatched repository binding that fails every
-						// later committed-intent reconciliation. The workspace root
-						// IS the frozen candidate here; run from it.
-						cwd: defaultCwd,
-						// The exact rendered tokens, verbatim and in provider order.
-						// The provider tokenizes each argument itself; the hyphenated
-						// fallback mirrors its published rendering rule for older
-						// payloads that omit the token field.
-						argumentTokens: providerFinalizeArgumentTokens(negotiatedStatus, finalizeTransition.arguments),
-						...(signal === undefined ? {} : { signal }),
-					});
-					if (parameters.lineageId !== undefined && nativeResult.lineageId !== parameters.lineageId) {
-						throw new CandidateViewError("provider finalize transition answered for a different lineage", "finalize-transition-binding-drift");
-					}
-				} else if (nativeResult === undefined) {
-					const planSubmission = input.correction_line_forecast === undefined ? undefined : finalizeSubmissionSlot(negotiatedStatus, "correction_lines");
-					if (planSubmission !== undefined) {
-						if (nativeReviewCli.finalizeSubmission === undefined) throw new CandidateViewError("native finalize submission execution is unavailable", "finalize-transition-binding-drift");
-						const forecast = input.correction_line_forecast!;
-						if ((planSubmission.value.minimum !== undefined && forecast < planSubmission.value.minimum) || (planSubmission.value.maximum !== undefined && forecast > planSubmission.value.maximum)) {
-							throw new CandidateViewError(`correction line forecast ${forecast} is outside the provider-rendered bounds`, "correction-forecast-out-of-bounds");
-						}
-						nativeResult = await nativeReviewCli.finalizeSubmission({
-							// Self-contained rendered tokens; run from the authority
-							// workspace root, never a frozen candidate-view root.
-							cwd: defaultCwd,
-							argumentTokens: planSubmission.argumentTokens,
-							valueSubstitutionLocation: planSubmission.value.substitutionLocation,
-							valueLiteral: String(forecast),
-							...(signal === undefined ? {} : { signal }),
-						});
-						if (parameters.lineageId !== undefined && nativeResult.lineageId !== parameters.lineageId) {
-							throw new CandidateViewError("provider finalize submission answered for a different lineage", "finalize-transition-binding-drift");
-						}
-					} else {
-						nativeResult = await nativeReviewCli.finalize({
-							cwd: useTargetLifecycleRoot ? defaultCwd : candidateView?.root ?? defaultCwd,
-							...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
-							...(input.correction_line_forecast === undefined ? {} : { correctionLines: input.correction_line_forecast }),
-							...(input.validation === undefined ? {} : { validationDocument: toNativeValidatorDocument(input.validation) }),
-							...(input.final_evidence === undefined ? {} : { evidenceDocument: input.final_evidence, failed: input.final_verification_passed === false }),
-							...(signal === undefined ? {} : { signal }),
-						});
-					}
-				}
-			} catch (error) {
-				if (provisionalCandidateView && candidateViews) {
-					candidateViews.cleanup(provisionalCandidateView.token);
-					provisionalCandidateView = undefined;
-					candidateView = undefined;
-				}
-				if (correctionCompletion && candidateView && candidateViews && !nativeMutationRequiresStatus(error)) candidateViews.cleanup(candidateView.token);
-				return reconcileNativeMutationFailure(parameters.operation, error, nativeReviewCli, {
-					cwd: useTargetLifecycleRoot ? defaultCwd : candidateView?.root ?? defaultCwd,
-					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
-					...retainedUntrackedSelection,
-					projection: "workspace",
-				}, negotiatedStatus?.authority?.revision, defaultCwd);
-			}
-			try {
-				if (correctionCompletion && candidateViews && parameters.lineageId) candidateViews.promoteCorrected(parameters.lineageId, candidateView!.token, defaultCwd);
-				candidateViews?.cleanupTerminal(nativeResult.lineageId, nativeResult.state, defaultCwd);
-				clearRetainedNativeUntrackedSelectionOnTerminal(retainedUntrackedSelections, defaultCwd, nativeResult.lineageId, nativeResult.state);
-				reconcileFinalizeRerunAttemptsByLineage.delete(reviewLifecycleStorageKey(defaultCwd, nativeResult.lineageId));
-				return { operation: parameters.operation, ...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}), result: mapNativeFinalizeResult(nativeResult), ...(correctionStep === undefined ? {} : { correction_step: correctionStep }) };
-			} catch (error) {
-				const committedFailure = Object.assign(error instanceof Error ? error : new Error(String(error)), {
-					mutationOutcome: "unknown",
-					nextAction: "review.status",
-				});
-				return {
-					...(await reconcileNativeMutationFailure(parameters.operation, committedFailure, nativeReviewCli, {
-						cwd: useTargetLifecycleRoot ? defaultCwd : candidateView?.root ?? defaultCwd,
-						lineageId: nativeResult.lineageId,
-						...retainedUntrackedSelection,
-						projection: "workspace",
-					}, undefined, defaultCwd)),
-					reconciliation_context: "post-native-finalize",
-					mutation_performed: true,
-					mutation_outcome: "committed",
-					lineage_id: nativeResult.lineageId,
-					state: nativeResult.state,
-					store_revision: nativeResult.storeRevision,
-				};
-			}
-		}
-		return nativeStatusUnsupported(parameters.operation);
-	}
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.ADVANCE) {
 		const idempotencyKey = requiredControllerString(parameters, "idempotencyKey");
 		const transitionValue = requiredControllerString(parameters, "transition");
@@ -5310,12 +4697,19 @@ async function executeReviewControllerOperation(
 		const retainedUntrackedSelection = cloneRetainedNativeUntrackedSelection(untrackedSelection);
 		if (nativeReviewCli?.targetStatus !== undefined) {
 			try {
-				const status = await nativeReviewCli.targetStatus({
+				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, {
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(untrackedSelection.untrackedScope === undefined ? {} : untrackedSelection),
 					...(signal === undefined ? {} : { signal }),
-				});
+				}, defaultCwd);
+				if (negotiated.transport !== undefined) {
+					return {
+						...hostTransportUnavailable(parameters.operation, negotiated.transport),
+						...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}),
+					};
+				}
+				const status = negotiated.status!;
 				if (
 					retainedUntrackedSelection !== undefined &&
 					parameters.lineageId !== undefined &&
@@ -5346,6 +4740,7 @@ export const __testing = {
 	buildGentlePrompt,
 	nativeStatusUnsupported,
 	executeReviewControllerOperation,
+	executeReviewCaptureOperation,
 	setReviewHostRelayRunnerForTesting,
 	clearReviewTransportProbeForTesting,
 	renderSddModelPanel: renderSddModelPanelForTesting,
@@ -5436,7 +4831,6 @@ function createGentleAiExtensionForTesting(
 	const pendingReviewConsentRegistry = dependencies.pendingReviewConsentRegistry ?? processPendingReviewConsentRegistry;
 	return function gentleAi(pi: ExtensionAPI): void {
 	const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
-	const correctionEvidenceByLineage = new Map<string, CorrectionEvidence>();
 	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
 
 	pi.on("session_shutdown", (_event, context) => {
@@ -5459,19 +4853,48 @@ function createGentleAiExtensionForTesting(
 	});
 
 	pi.registerTool({
+		name: "gentle_review_capture",
+		label: "Gentle Review Capture",
+		description: "Capture exactly one provider-issued ordinary native review collect slot. This is not a controller operation: it validates one opaque collect binding against current target-scoped STATUS, executes at most one capture, and never follows a transition.",
+		promptSnippet: "Use one exact current STATUS collectBinding for one ordinary native capture; call fresh STATUS before every additional capture.",
+		promptGuidelines: [
+			"Pass only lineageId, the JSON-serialized exact collectBinding from current STATUS, and the route-specific optional acknowledgement or correctionLines value. Never compose provider argument tokens, prompts, results, verdicts, or lens arrays.",
+			"A materialize reviewer slot first forecasts one model run; re-submit that same exact binding with reviewerRunAcknowledged: true to authorize one host relay. Correction-plan slots require correctionLines inside the provider-issued bounds. Refuter and validation vectors execute exactly once as provider-rendered.",
+			"A native terminal closure or nonterminal capture returns directly. Do not expect automatic STATUS, FINALIZE, receipt, delivery, or another capture; call fresh STATUS before any next capture.",
+		],
+		parameters: REVIEW_CAPTURE_PARAMETERS,
+		executionMode: "sequential",
+		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
+			if (signal?.aborted) throw new Error("Review capture was cancelled");
+			const details = await executeReviewCaptureOperation(
+				parameters,
+				ctx.cwd,
+				nativeReviewCli,
+				signal,
+				candidateViews,
+				((sessionKey: PendingReviewConsentSessionKey) => processRetainedUntrackedSelections.get(sessionKey) ?? processRetainedUntrackedSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
+			);
+			return {
+				content: [{ type: "text", text: JSON.stringify(details) }],
+				details,
+			};
+		},
+	});
+
+	pi.registerTool({
 		name: "gentle_review",
 		label: "Gentle Review Controller",
 		description:
-			"Inspect and recover review authority, run new native ordinary review through start and finalize, and preserve legacy compact compatibility reads and graph-v1 Judgment Day. Review outcomes are informational: commit, push, pull-request, and release commands follow ordinary repository policy. Reviewer, refuter, and validator verdicts are never Pi-authored: lens results are admitted natively, and FINALIZE follows the provider's negotiated next_transition. RESET/RECOVER remain destructive and are executed by the audited native CLI. Legacy bundle transport is retired: export/import return a legacy-operation-retired envelope pointing at the native gentle-ai review CLI and the Git common-directory store.",
-		promptSnippet: "Inspect authority, then use native start and finalize for a new ordinary review; use graph-v1 only for explicit Judgment Day",
+			"Inspect and recover review authority and start native ordinary review. Ordinary capture is available only through the separate gentle_review_capture tool. Review outcomes never authorize delivery: commit, push, pull-request, and release commands follow ordinary repository policy. RESET/RECOVER remain destructive and are executed by the audited native CLI.",
+		promptSnippet: "Inspect authority, then start native ordinary review; use gentle_review_capture for one current collect slot",
 		promptGuidelines: [
 			'Call {"operation":"inspect"} before START. New native ordinary START uses a JSON string such as "{\\"mode\\":\\"ordinary\\"}"; an explicit baseRef must be paired with committedOnly: true to request a committed range, while policyPath remains repository-local. policyHash is legacy compact-only. The controller derives lineage, Git/untracked scope, tier, lenses, authored lines, and budget.',
 			"Use RECONCILE_AUTHORITY only to quarantine one invalid native recovery successor. Supply exact predecessorLineage, expectedPredecessorRevision, successorLineage, expectedSuccessorRevision, actor, and reason values; Pi derives and displays the seven-line native authorization binding for fresh UI approval. The predecessor stays untouched, native returns the durable audit record, and Pi never falls back to RESET or RECOVER.",
 			"Use ABANDON or QUARANTINE_LEGACY only after an explicit user decision and with exact native inputs. ABANDON needs lineage, expectedRevision, snapshotIdentity, capturedLensResults, findingsPresent, evidenceRecordsPresent, actor, and reason; QUARANTINE_LEGACY accepts only the published malformed freeze-findings diagnostic/disposition. A dual reconciliation may supply only anomalies `unchanged_target,malformed_recovery_authorization` in that exact order. Use REPAIR_LEGACY_ALIAS only with lineage, actor, and reason: Pi freshly reads native inventory and derives repository, revision, diagnostic, disposition, and the exact eight-line binding before interactive approval. `review dispose-result` is unsupported pending design.",
-			"Lens, refuter, and validator verdicts are admitted natively, never Pi-authored: FINALIZE routes provider --materialize lens slots through the host relay, executes provider-rendered self-contained role vectors verbatim, and runs the provider's own review.finalize transition (captured-results discovery). Call FINALIZE with a JSON string carrying only the negotiated collection answers: correction_line_forecast for the pre-edit forecast, validation for the targeted validation document the exact collection input requests, and final_evidence paired with exactly one of final_verification_passed or final_verification_outcome (passed, verification_failed, procedural_tooling_failed). Correction evidence is captured natively before STATUS can expose targeted validation. When the provider offers host-relay lens slots, FINALIZE first returns a `reviewer-model-run-forecast` naming the lenses and the real model runs it would spend; re-run it with `reviewer_run_acknowledged: true` to authorize exactly that reviewer work. Use ADVANCE only for explicit graph-v1 Judgment Day.",
+			"Lens, refuter, and validator verdicts are admitted natively, never Pi-authored. Use gentle_review_capture with exactly one current provider-owned collectBinding for ordinary native capture; it never follows another transition.",
 			"For blocked-legacy or blocked-mixed, do not call START repeatedly. Explain invalidation, request explicit user authorization, then call RESET or RECOVER only after authorization. RESET and RECOVER_LOCK route to audited native `gentle-ai review reclaim`; only RESET carries the legacy repositoryId, commonDirHash, inventoryHash, and confirmation challenge. RECOVER routes to native `gentle-ai review recover` with exactly six inputs: predecessorLineage, expectedPredecessorRevision, successorLineage, disposition, actor, and reason. Never send RECOVER the reset challenge and never send it a maintainerAuthorization: Pi reads fresh native target status, pins the predecessor lineage, revision, provider-selected disposition, and target identity, derives the exact six-line native authorization binding, displays it for fresh UI approval, and re-reads status before mutating. Negotiated target status supplies the sole accepted recovery disposition, and a caller-supplied substitute is rejected. Treat a native-input-required envelope as a request for exact values, never as permission to invent them. After a committed native recovery record, INSPECT before any fresh ordinary START.",
-			"A consent-required START returns the complete provider envelope and an opaque consent_binding, then stops. The parent presents and localizes that envelope without changing machine tokens, commands, target IDs, or invocations. After one explicit human answer, call answer-consent exactly once with a JSON string containing only consentBinding and answer (`granted` or `declined`). A reported lineage_created false or pre-authority validation error proves no lineage was created. After ambiguous START, answer-consent, or FINALIZE output, the controller calls target-scoped native status first and returns only its declared action. Never infer or prescribe replay unless native explicitly reports exact_replay_safe for the same canonical request and required lineage.",
-			"Use gentle_review for bounded review authority operations. VALIDATE is informational only; never derive or authorize a delivery command or pass review state to Bash.",
+			"A consent-required START returns the complete provider envelope and an opaque consent_binding, then stops. The parent presents and localizes that envelope without changing machine tokens, commands, target IDs, or invocations. After one explicit human answer, call answer-consent exactly once with a JSON string containing only consentBinding and answer (`granted` or `declined`). A reported lineage_created false or pre-authority validation error proves no lineage was created. After ambiguous START output, the controller calls target-scoped native status once and returns only its declared action. An ambiguous gentle_review_capture outcome independently reconciles once and never replays the capture.",
+			"Use gentle_review only for native review authority operations; delivery commands follow ordinary repository policy.",
 		],
 		parameters: REVIEW_CONTROLLER_PARAMETERS,
 		executionMode: "sequential",
@@ -5485,7 +4908,6 @@ function createGentleAiExtensionForTesting(
 				signal,
 				candidateViews,
 				ctx,
-				correctionEvidenceByLineage,
 				((sessionKey: PendingReviewConsentSessionKey) => processRetainedUntrackedSelections.get(sessionKey) ?? processRetainedUntrackedSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
 				pendingReviewConsentRegistry,
 				pendingReviewConsentFallbackKey,

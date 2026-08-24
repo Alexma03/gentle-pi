@@ -7,13 +7,9 @@ import {
 	NativeReviewCliV216,
 	NativeReviewConsentBindingError,
 	NativeReviewConsentRequiredError,
-	clearNativeReviewCapabilitiesCacheForTesting,
 	type ExecFileAdapter,
 } from "../lib/native-review-cli.ts";
-import {
-	NativeReviewCliV216 as RuntimeNativeReviewCliV216,
-	clearNativeReviewCapabilitiesCacheForTesting as clearRuntimeNativeReviewCapabilitiesCacheForTesting,
-} from "../runtime/native-review-cli.mjs";
+import { NativeReviewCliV216 as RuntimeNativeReviewCliV216 } from "../runtime/native-review-cli.mjs";
 import type { ReviewConsentV2 } from "../lib/review-integration-v2.ts";
 
 const fixtureRoot = join(process.cwd(), "contracts", "review-integration", "v2", "fixtures");
@@ -29,7 +25,7 @@ function capabilities(): Record<string, unknown> {
 function unrelatedStatus(targetIdentity: string): Record<string, unknown> {
 	const status = fixture<Record<string, unknown>>("status.fixture.json");
 	status.applicability = "unrelated";
-	status.receipt = { status: "not_applicable" };
+	delete status.receipt;
 	status.action = "start";
 	status.replayability = "not_replayable";
 	status.target_identity = targetIdentity;
@@ -74,7 +70,10 @@ function executableStartStatus(targetIdentity: string): Record<string, unknown> 
 }
 
 function queuedAdapter(outputs: readonly Record<string, unknown>[]): { adapter: ExecFileAdapter; calls: Array<readonly string[]> } {
-	const queue = [...outputs];
+	// V216 no longer probes capabilities before negotiated STATUS. Keep the
+	// historical queue construction below, but discard only its obsolete probe
+	// response so every remaining entry binds the current invocation.
+	const queue = outputs.filter((body) => body.schema !== "gentle-ai.review-integration.capabilities/v2");
 	const calls: Array<readonly string[]> = [];
 	return {
 		calls,
@@ -88,12 +87,10 @@ function queuedAdapter(outputs: readonly Record<string, unknown>[]): { adapter: 
 }
 
 function client(adapter: ExecFileAdapter): NativeReviewCliV216 {
-	clearNativeReviewCapabilitiesCacheForTesting();
 	return new NativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => executableDigest);
 }
 
 function runtimeClient(adapter: ExecFileAdapter): RuntimeNativeReviewCliV216 {
-	clearRuntimeNativeReviewCapabilitiesCacheForTesting();
 	return new RuntimeNativeReviewCliV216(adapter, "/package/.gentle-ai/gentle-ai", 30_000, 1024 * 1024, async () => undefined, () => executableDigest);
 }
 
@@ -114,7 +111,6 @@ test("negotiated ordinary START executes the complete STATUS-rendered relay vect
 			},
 		);
 		assert.deepEqual(queue.calls, [
-			["review", "capabilities", "--contract", "gentle-ai.review-integration/v2"],
 			["review", "status", "--contract", "gentle-ai.review-integration/v2", "--cwd", "/repo", "--projection", "workspace", "--agent", "pi", "--next-transition"],
 			["review", "start", ...tokens],
 		]);

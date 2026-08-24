@@ -128,58 +128,6 @@ async function runController(parameters: Record<string, unknown>, cwd: string, n
 	) as Record<string, unknown>;
 }
 
-test("FINALIZE hydrates the dispatch binding for an externally recovered successor in a dirty linked worktree", async (t) => {
-	const cwd = linkedDirtyWorktree(t);
-	const lineageId = "recovered-dirty-successor";
-	const registry = new CandidateViewRegistry();
-	const native = statusNative(successorStatus(lineageId, liveProjection(cwd)));
-
-	// The maintainer's flow: FINALIZE first (correctly blocked since #340),
-	// then a reviewer dispatch. FINALIZE never went through the STATUS
-	// controller operation, so nothing had hydrated the registry.
-	const finalize = await runController({ operation: "finalize", lineageId, input: JSON.stringify({}) }, cwd, native, registry);
-	assert.equal(finalize.outcome, "reviewer-results-required");
-	assert.equal(registry.hasCurrentBinding(), true, "FINALIZE must hydrate the dispatch binding from the status it decoded");
-	assert.deepEqual(finalize.dispatch_binding, { hydrated: true, lineage_id: lineageId, lenses: ["review-reliability"] });
-
-	try {
-		const dispatch: Record<string, unknown> = { agent: "review-reliability", task: "review the recovered successor", mode: "task" };
-		assert.doesNotThrow(() => injectReviewCandidateView(dispatch, registry));
-		assert.match(String(dispatch.task), new RegExp(lineageId));
-	} finally {
-		registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);
-	}
-});
-
-test("a swallowed hydration failure becomes an observable typed dispatch refusal", async (t) => {
-	const cwd = linkedDirtyWorktree(t);
-	const lineageId = "drifted-successor";
-	const registry = new CandidateViewRegistry();
-	// Realistic drift: the frozen candidate names the pristine HEAD tree while
-	// the live worktree carries the uncommitted modification. Hydration
-	// legitimately fails, and that failure must stop being invisible.
-	const live = liveProjection(cwd);
-	const drifted = { ...live, currentCandidateTree: live.baseTree };
-	const finalize = await runController({ operation: "finalize", lineageId, input: JSON.stringify({}) }, cwd, statusNative(successorStatus(lineageId, drifted)), registry);
-
-	assert.equal(finalize.outcome, "reviewer-results-required");
-	assert.equal(registry.hasCurrentBinding(), false);
-	const binding = finalize.dispatch_binding as { hydrated: boolean; lineage_id: string; reason: string; message: string };
-	assert.equal(binding.hydrated, false, "a failed hydration must be reported, never swallowed");
-	assert.equal(binding.lineage_id, lineageId);
-	assert.ok(typeof binding.reason === "string" && binding.reason.length > 0, "the failure carries a typed reason");
-	assert.match(binding.message, /projection|live candidate/i);
-
-	// The dispatch refusal must now admit that hydration was attempted.
-	assert.throws(
-		() => injectReviewCandidateView({ agent: "review-reliability", task: "review", mode: "task" }, registry),
-		(error: unknown) => error instanceof CandidateViewError
-			&& error.reason === "current-binding-hydration-failed"
-			&& /hydrat/i.test(error.message)
-			&& error.message.includes(lineageId),
-	);
-});
-
 test("STATUS keeps hydrating and stays read-only when hydration fails", async (t) => {
 	const cwd = linkedDirtyWorktree(t);
 	const lineageId = "status-drifted-successor";

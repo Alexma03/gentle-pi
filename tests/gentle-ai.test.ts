@@ -10,6 +10,8 @@ import type {
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
+import type { NativeReviewCli } from "../lib/native-review-cli.ts";
+import type { ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 
 function writeMarkdown(path: string, content: string): void {
@@ -138,20 +140,83 @@ test("runtime guidance keeps review policy out of the static orchestrator", () =
 	}
 });
 
-test("controller VALIDATE is informational and does not require a delivery command", async () => {
-	const result = await __testing.executeReviewControllerOperation(
-		{ operation: "validate" },
-		process.cwd(),
-		null,
-	);
-	assert.deepEqual(result, {
-		operation: "validate",
-		status: "informational",
-		outcome: "delivery-validation-retired",
-		reason: "RDD review outcomes are informational. Delivery commands follow ordinary repository policy and are never authorized or blocked by this controller.",
-		mutation_performed: false,
-		mutation_outcome: "none",
+test("ordinary native capture exposes a registered schema and STATUS binding copied unchanged to one slot", async (t) => {
+	const tools = new Map<string, { name: string; parameters: { required?: readonly string[] } }>();
+	const pi = {
+		on() {},
+		registerCommand() {},
+		registerTool(tool: { name: string; parameters: { required?: readonly string[] } }) {
+			tools.set(tool.name, tool);
+		},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null })(pi);
+
+	assert.ok(tools.has("gentle_review_capture"));
+	assert.deepEqual(tools.get("gentle_review_capture")?.parameters.required, ["lineageId", "collectBinding"]);
+
+	const sha = `sha256:${"a".repeat(64)}`;
+	const lineageId = "ordinary-capture";
+	const collectInput: ReviewCollectInputV3 = {
+		name: "reviewer_result",
+		schema: "https://gentle-ai.dev/schema/review/reviewer/v1",
+		captureOperation: "review.capture-result",
+		arguments: [
+			{ name: "lineage", value: lineageId, token: `--lineage=${lineageId}` },
+			{ name: "target", value: sha, token: `--target=${sha}` },
+			{ name: "agent", value: "pi", token: "--agent=pi" },
+			{ name: "materialize", value: "true", token: "--materialize=true" },
+		],
+		submission: {
+			operationToken: "capture-result",
+			argumentTokens: ["--lineage=ordinary-capture", `--target=${sha}`, "--agent=pi", "--materialize=true", "--input={{value}}"],
+			values: [{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitutionLocation: 4 }],
+		},
+	};
+	const currentStatus = {
+		contract: "gentle-ai.review-integration/v2",
+		applicability: "current_target",
+		authority: { version: "compact-v2", lineageId, state: "reviewing", generation: 1, revision: sha },
+		action: "stop",
+		replayability: "not_replayable",
+		targetIdentity: sha,
+		projection: {
+			schema: "gentle-ai.review-candidate-projection/v1",
+			kind: "current-changes",
+			projection: "workspace",
+			baseTree: "b".repeat(40),
+			initialReviewTree: "b".repeat(40),
+			currentCandidateTree: "b".repeat(40),
+			pathsDigest: sha,
+			paths: ["app.ts"],
+			intendedUntracked: [],
+			intendedUntrackedProof: sha,
+			initialSnapshotIdentity: sha,
+			currentSnapshotIdentity: sha,
+		},
+		candidates: [],
+		nextTransition: { kind: "collect", reasonCode: "capture_required", collect: { inputs: [collectInput] } },
+		raw: { schema: "gentle-ai.review-integration.status/v5" },
+	} as unknown as ReviewStatusV3;
+	const native = { targetStatus: async () => currentStatus } as unknown as NativeReviewCli;
+
+	const publicStatus = await __testing.executeReviewControllerOperation({ operation: "status" }, process.cwd(), native);
+	const bindings = publicStatus.collectBindings as readonly { collectBinding: unknown }[];
+	assert.equal(bindings.length, 1);
+	assert.equal(typeof bindings[0]?.collectBinding, "string");
+
+	let launches = 0;
+	t.after(() => __testing.setReviewHostRelayRunnerForTesting());
+	__testing.setReviewHostRelayRunnerForTesting(async () => {
+		launches += 1;
+		return { promptByteLength: 1, resultByteLength: 1, submission: "{}" };
 	});
+	const captured = await __testing.executeReviewCaptureOperation({
+		lineageId,
+		collectBinding: bindings[0]!.collectBinding,
+		reviewerRunAcknowledged: true,
+	}, process.cwd(), native);
+	assert.equal(captured.status, "captured");
+	assert.equal(launches, 1);
 });
 
 test("agent model discovery prioritizes SDD and Judgment Day agents", (t) => {
