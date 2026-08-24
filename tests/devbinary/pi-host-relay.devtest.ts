@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
@@ -44,9 +44,21 @@ function git(cwd: string, ...arguments_: string[]): string {
 	return execFileSync("git", arguments_, { cwd, encoding: "utf8" }).trim();
 }
 
+function makeTreeWritable(path: string): void {
+	chmodSync(path, 0o700);
+	for (const entry of readdirSync(path, { withFileTypes: true })) {
+		const entryPath = join(path, entry.name);
+		if (entry.isDirectory()) makeTreeWritable(entryPath);
+		else chmodSync(entryPath, 0o600);
+	}
+}
+
 function repository(t: test.TestContext, prefix: string): string {
 	const cwd = mkdtempSync(join(tmpdir(), prefix));
-	t.after(() => rmSync(cwd, { recursive: true, force: true }));
+	t.after(() => {
+		makeTreeWritable(cwd);
+		rmSync(cwd, { recursive: true, force: true });
+	});
 	git(cwd, "init", "-b", "main");
 	git(cwd, "config", "user.email", "relay-devtest@example.invalid");
 	git(cwd, "config", "user.name", "Pi Host Relay Devtest");
@@ -110,7 +122,12 @@ function runRenderedInvocation(binary: string, sessionCwd: string, command: stri
 	return candidateJson(binary, sessionCwd, words.slice(1), environment);
 }
 
-function controllerForNative(nativeReviewCli: NativeReviewCli): RegisteredTool {
+interface RegisteredReviewTools {
+	controller: RegisteredTool;
+	capture: RegisteredTool;
+}
+
+function reviewToolsForNative(nativeReviewCli: NativeReviewCli): RegisteredReviewTools {
 	const tools = new Map<string, RegisteredTool>();
 	createGentleAiExtension({ nativeReviewCli } as unknown as Parameters<typeof createGentleAiExtension>[0])({
 		on() {},
@@ -118,8 +135,61 @@ function controllerForNative(nativeReviewCli: NativeReviewCli): RegisteredTool {
 		registerCommand() {},
 	} as unknown as ExtensionAPI);
 	const controller = tools.get("gentle_review");
+	const capture = tools.get("gentle_review_capture");
 	assert.ok(controller, "gentle_review controller must be registered");
-	return controller!;
+	assert.ok(capture, "gentle_review_capture must be registered");
+	return { controller: controller!, capture: capture! };
+}
+
+function controllerForNative(nativeReviewCli: NativeReviewCli): RegisteredTool {
+	return reviewToolsForNative(nativeReviewCli).controller;
+}
+
+function parsedCollectBinding(binding: string): Record<string, unknown> {
+	return record(JSON.parse(binding) as unknown, "public collectBinding");
+}
+
+function collectBindingsFor(details: unknown, captureOperation: string): readonly string[] {
+	const bindings = record(details, "public STATUS details").collectBindings;
+	assert.ok(Array.isArray(bindings), `public STATUS must publish collectBindings: ${JSON.stringify(details)}`);
+	return bindings
+		.map((value) => stringValue(record(value, "public collectBinding entry").collectBinding, "public collectBinding"))
+		.filter((binding) => parsedCollectBinding(binding).captureOperation === captureOperation);
+}
+
+function collectBindingFor(details: unknown, captureOperation: string): string {
+	const matches = collectBindingsFor(details, captureOperation);
+	assert.equal(matches.length, 1, `public STATUS must publish exactly one ${captureOperation} binding`);
+	return matches[0]!;
+}
+
+function collectBindingArgument(binding: string, name: string): string {
+	const arguments_ = parsedCollectBinding(binding).arguments;
+	assert.ok(Array.isArray(arguments_), "public collectBinding must carry arguments");
+	const matches = arguments_
+		.map((value) => record(value, "public collectBinding argument"))
+		.filter((argument) => argument.name === name)
+		.map((argument) => stringValue(argument.value, `public collectBinding ${name}`));
+	assert.equal(matches.length, 1, `public collectBinding must carry exactly one ${name} argument`);
+	return matches[0]!;
+}
+
+function collectBindingArgumentTokens(binding: string): readonly string[] {
+	const arguments_ = parsedCollectBinding(binding).arguments;
+	assert.ok(Array.isArray(arguments_), "public collectBinding must carry arguments");
+	return arguments_.map((value) => {
+		const argument = record(value, "public collectBinding argument");
+		const token = argument.token;
+		return typeof token === "string" ? token : `--${stringValue(argument.name, "public collectBinding argument name")}=${stringValue(argument.value, "public collectBinding argument value")}`;
+	});
+}
+
+function publicStatusProjectionPaths(details: unknown): readonly string[] {
+	const result = record(details, "public STATUS details").result;
+	const projection = record(record(result, "public STATUS result").projection, "public STATUS projection");
+	const paths = projection.paths;
+	assert.ok(Array.isArray(paths), "public STATUS projection must carry paths");
+	return paths.map((path) => stringValue(path, "public STATUS projection path"));
 }
 
 function crossRepositoryController(binary: string, sessionCwd: string, environment: NodeJS.ProcessEnv): RegisteredTool {
@@ -132,6 +202,7 @@ function crossRepositoryController(binary: string, sessionCwd: string, environme
 interface NativeProcessCall {
 	arguments: readonly string[];
 	cwd: string;
+	stdout?: string;
 }
 
 function processText(value: unknown): string {
@@ -141,16 +212,17 @@ function processText(value: unknown): string {
 
 function devNativeCli(binary: string, environment: NodeJS.ProcessEnv, calls: NativeProcessCall[]): NativeReviewCliV216 {
 	const adapter: ExecFileAdapter = async (request) => {
-		calls.push({ arguments: [...request.arguments], cwd: request.cwd });
 		try {
+			const stdout = execFileSync(request.file, request.arguments, {
+				cwd: request.cwd,
+				encoding: "utf8",
+				env: environment,
+				timeout: request.timeoutMs,
+				maxBuffer: request.maxBufferBytes,
+			});
+			calls.push({ arguments: [...request.arguments], cwd: request.cwd, stdout });
 			return {
-				stdout: execFileSync(request.file, request.arguments, {
-					cwd: request.cwd,
-					encoding: "utf8",
-					env: environment,
-					timeout: request.timeoutMs,
-					maxBuffer: request.maxBufferBytes,
-				}),
+				stdout,
 				stderr: "",
 				exitCode: 0,
 				signal: null,
@@ -158,6 +230,7 @@ function devNativeCli(binary: string, environment: NodeJS.ProcessEnv, calls: Nat
 				outputLimitExceeded: false,
 			};
 		} catch (error) {
+			calls.push({ arguments: [...request.arguments], cwd: request.cwd });
 			const failure = error as NodeJS.ErrnoException & {
 				stdout?: string | Buffer;
 				stderr?: string | Buffer;
@@ -192,7 +265,7 @@ function grantedConsentInvocation(value: unknown): string {
 }
 
 const FAKE_POSIX_PI = `#!/usr/bin/env node
-const fs = require("node:fs");
+import fs from "node:fs";
 const expectedArgv = JSON.parse(process.env.OPAQUE_PI_REVIEWER_ARGV);
 const expectedPaths = JSON.parse(process.env.OPAQUE_PI_REVIEWER_PATHS);
 const chunks = [];
@@ -238,7 +311,7 @@ process.stdin.on("end", () => {
 // This A -> B journey deliberately stops immediately after one Go-admitted
 // reviewer capture. It proves real Pi relay transport and root continuity, but
 // does not manufacture the remaining reviewer, refuter, validator, or approval
-// transitions required to burn an actual receipt.
+// transitions.
 test("dev-binary: POSIX Pi host relay captures one real B-target slot from an A-session without reoffering it", { skip: !RUNNABLE }, async (t) => {
 	const sessionA = repository(t, "gentle-pi-relay-session-a-");
 	const targetB = repository(t, "gentle-pi-relay-target-b-");
@@ -351,7 +424,7 @@ test("dev-binary: POSIX Pi host relay captures one real B-target slot from an A-
 	);
 	assert.equal(reoffered, false, "the captured Pi slot must advance and never be reoffered");
 	assert.equal(advanced.authority?.state, "reviewing", "this devtest must not finalize, approve, or burn the review");
-	assert.notEqual(advanced.receipt.status, "available", "this devtest stops before any approval receipt exists");
+	assert.equal("receipt" in advanced, false, "last-event STATUS no longer exposes receipt state");
 	t.diagnostic(`captured Pi slot: lineage=${lineage}; subject_hash=${slot.subjectHash}; admission=completed; reoffered=false; authority=${advanced.authority?.state}`);
 
 	const sessionStatus = candidateStatus(RELAY_DEV_BINARY!, sessionA, sessionA, environment);
@@ -409,7 +482,7 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 
 	const nativeCalls: NativeProcessCall[] = [];
 	const native = devNativeCli(RELAY_DEV_BINARY!, environment, nativeCalls);
-	const controller = controllerForNative(native);
+	const { controller, capture } = reviewToolsForNative(native);
 	const inspected = await controller.execute(
 		"combined-inspect-target-b",
 		{ operation: "inspect", workspaceRoot: nestedTarget },
@@ -480,187 +553,194 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 		});
 	});
 
-	const captured = await controller.execute(
-		"combined-capture-reviewer",
-		{ operation: "finalize", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify({ reviewer_run_acknowledged: true }) },
-		undefined,
-		undefined,
-		sessionContext(sessionA),
-	);
-	assert.equal(record(captured.details, "combined reviewer capture").host_relay !== undefined, true);
-	assert.ok(relayTargetRoots.length > 0);
-	assert.ok(relayTargetRoots.every((root) => root === canonicalB), "every relay leg must stay bound to B");
-	const combinedFakePiLog = record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "combined fake Pi log");
-	assert.ok(Array.isArray(combinedFakePiLog.calls), "combined fake Pi log must record its subprocess calls");
-	assert.ok(combinedFakePiLog.calls.length > 0, "the fake reviewer must receive every provider-bound reviewer call");
-	for (const call of combinedFakePiLog.calls) {
-		const fakePiResult = record(call, "combined fake Pi result");
-		assert.equal(fakePiResult.subject_hash === undefined, false, "the fake reviewer must receive one provider-bound subject");
-		assert.deepEqual(fakePiResult.argv, OPAQUE_PI_REVIEWER_ARGV);
-	}
-
-	const findingsFinalized = await controller.execute(
-		"combined-finalize-findings",
-		{ operation: "finalize", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify({}) },
-		undefined,
-		undefined,
-		sessionContext(sessionA),
-	);
-	assert.equal(record(record(findingsFinalized.details, "combined findings finalize").result, "combined findings result").state, "correction_required");
-
-	const planned = await controller.execute(
-		"combined-correction-plan",
-		{ operation: "finalize", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify({ correction_line_forecast: 1 }) },
-		undefined,
-		undefined,
-		sessionContext(sessionA),
-	);
-	assert.equal(record(planned.details, "combined correction plan").workspace_root, canonicalB);
-	writeFileSync(join(targetB, "selected.txt"), "selected relay input corrected\n");
-
-	const evidenceCaptured = await controller.execute(
-		"combined-correction-evidence",
-		{ operation: "finalize", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify({ final_evidence: "selected relay input corrected and focused proof passed", final_verification_outcome: "passed" }) },
-		undefined,
-		undefined,
-		sessionContext(sessionA),
-	);
-	assert.equal(record(evidenceCaptured.details, "combined correction evidence").correction_step !== undefined, true, "correction evidence and validation must be separate FINALIZE calls");
-
-	const validationStatus = await native.targetStatus!({ cwd: canonicalB, lineageId: lineage, agent: "pi", ...selection });
-	const validationRequest = validationStatus.validationRequest;
-	assert.ok(validationRequest, "passed correction evidence must yield a targeted validation request");
-	assert.ok(validationRequest!.correctionPaths.length > 0, "correction paths must be non-empty");
-	assert.ok(validationRequest!.correctionPaths.every((path) => validationStatus.projection.paths.includes(path)), "correction paths must stay inside B's frozen projection");
-	assert.equal(validationRequest!.correctionPaths.includes("excluded.txt"), false, "an untracked path outside B's projection must not become a correction path");
-	assert.ok(validationRequest!.policyContent.length > 0, "the native validator request must retain policy_content");
-	assert.ok(validationRequest!.fixFindings.length > 0, "the native validator request must retain fix_findings");
-	assert.ok(validationRequest!.fixClassifications.length > 0, "the native validator request must retain fix_classifications");
-
-	const nativeValidatorInput = validationStatus.nextTransition?.collect?.inputs.find((input) => input.name === "provider_targeted_validator");
-	assert.ok(nativeValidatorInput, "actual Pi STATUS must publish the targeted-validator input");
-	assert.equal(nativeValidatorInput!.captureOperation, "review.capture-validation");
-	assert.equal(nativeValidatorInput!.submissionDescriptor, undefined, "the self-contained Pi validator vector must not accept an external submission descriptor");
-	assert.equal(nativeValidatorInput!.submission, undefined, "the self-contained Pi validator vector must not expose a relayed result submission");
-	assert.deepEqual(nativeValidatorInput!.validationRequest, validationRequest, "STATUS must bind the provider validator slot to the exact native request");
-	const validatorArgumentTokens = nativeValidatorInput!.arguments.map((argument) => argument.token ?? `--${argument.name}=${argument.value}`);
-	assert.ok(validatorArgumentTokens.includes(`--request-hash=${validationRequest!.requestHash}`), "the self-contained validator vector must retain the native request hash");
-	assert.ok(validatorArgumentTokens.includes("--agent=pi"), "the self-contained validator vector must retain the Pi binding");
-	assert.ok(validatorArgumentTokens.includes("--execute=true"), "the self-contained validator vector must retain the Go-owned execution flag");
-
-	const validationInput = {
-		request_hash: validationRequest!.requestHash.replace(/^sha256:/, ""),
-		correction_ids: validationRequest!.fixFindingIds,
-		original_criteria: { passed: true, evidence: ["focused acceptance proof passed"] },
-		correction_regression: { passed: true, evidence: ["focused regression proof passed"] },
-		fix_caused_findings: [],
-		follow_ups: [],
-	};
-	const finalizeCallsBeforeOutOfProjectionCheck = nativeCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "finalize").length;
-	await assert.rejects(
-		controller.execute(
-			"combined-out-of-projection-validation",
-			{ operation: "finalize", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify({ validation: { ...validationInput, correction_paths: ["excluded.txt"] } }) },
+	const reviewerSubjects = new Set<string>();
+	let reviewerCaptureCount = 0;
+	let correctionOpened = false;
+	for (let attempt = 0; attempt < 4; attempt += 1) {
+		const reviewerStatus = await controller.execute(
+			`combined-reviewer-status-${attempt}`,
+			{ operation: "status", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify(selection) },
 			undefined,
 			undefined,
 			sessionContext(sessionA),
-		),
+		);
+		const reviewerStatusDetails = record(reviewerStatus.details, "combined reviewer STATUS");
+		const reviewerBindings = collectBindingsFor(reviewerStatusDetails, "review.capture-result");
+		assert.ok(reviewerBindings.length > 0, "current public STATUS must publish a reviewer capture binding before correction opens");
+		const reviewerBinding = reviewerBindings[0]!;
+		assert.equal(reviewerSubjects.has(reviewerBinding), false, "each reviewer capture must use a fresh public STATUS binding");
+		reviewerSubjects.add(reviewerBinding);
+		const reviewerInput = parsedCollectBinding(reviewerBinding);
+		const reviewerPaths = reviewerInput.changedPathManifest;
+		assert.ok(Array.isArray(reviewerPaths), "the reviewer binding must carry its frozen changed-path manifest");
+		const manifestPaths = reviewerPaths.map((entry) => stringValue(record(entry, "reviewer manifest entry").path, "reviewer manifest path"));
+		assert.ok(manifestPaths.includes("selected.txt"), "the selected untracked file must remain in every reviewer binding");
+		assert.equal(manifestPaths.includes("excluded.txt"), false, "the excluded untracked file must remain outside every reviewer binding");
+		assert.ok(publicStatusProjectionPaths(reviewerStatusDetails).includes("selected.txt"), "public STATUS must retain the selected path in B's projection");
+		assert.equal(publicStatusProjectionPaths(reviewerStatusDetails).includes("excluded.txt"), false, "public STATUS must retain the excluded path outside B's projection");
+
+		const fakeCallsBeforeForecast = existsSync(fakePiLog)
+			? record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "reviewer fake Pi forecast log").calls
+			: [];
+		assert.ok(Array.isArray(fakeCallsBeforeForecast), "reviewer fake Pi forecast log must carry calls when present");
+		const reviewerForecast = await capture.execute(
+			`combined-reviewer-forecast-${attempt}`,
+			{ lineageId: lineage, workspaceRoot: nestedTarget, collectBinding: reviewerBinding },
+			undefined,
+			undefined,
+			sessionContext(sessionA),
+		);
+		const reviewerForecastDetails = record(reviewerForecast.details, "combined reviewer forecast");
+		assert.equal(reviewerForecastDetails.status, "blocked");
+		assert.equal(reviewerForecastDetails.outcome, "reviewer-model-run-forecast");
+		const fakeCallsAfterForecast = existsSync(fakePiLog)
+			? record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "reviewer fake Pi forecast result").calls
+			: [];
+		assert.ok(Array.isArray(fakeCallsAfterForecast), "reviewer fake Pi forecast result must carry calls when present");
+		assert.equal(fakeCallsAfterForecast.length, fakeCallsBeforeForecast.length, "forecast acknowledgement must not launch a reviewer capture");
+
+		const reviewerCapture = await capture.execute(
+			`combined-reviewer-capture-${attempt}`,
+			{ lineageId: lineage, workspaceRoot: nestedTarget, collectBinding: reviewerBinding, reviewerRunAcknowledged: true },
+			undefined,
+			undefined,
+			sessionContext(sessionA),
+		);
+		const reviewerCaptureDetails = record(reviewerCapture.details, "combined reviewer capture");
+		assert.ok(["captured", "closed"].includes(stringValue(reviewerCaptureDetails.status, "combined reviewer capture status")), "one acknowledged binding must perform exactly one native reviewer capture");
+		const fakeCallsAfterCapture = record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "reviewer fake Pi capture result").calls;
+		assert.ok(Array.isArray(fakeCallsAfterCapture), "reviewer fake Pi capture result must carry calls");
+		assert.equal(fakeCallsAfterCapture.length, fakeCallsBeforeForecast.length + 1, "one acknowledged binding must launch exactly one reviewer capture");
+		reviewerCaptureCount += 1;
+		const closure = reviewerCaptureDetails.closure;
+		if (closure !== undefined) {
+			const reviewerClosure = record(closure, "reviewer last-event closure");
+			assert.equal(reviewerClosure.schema, "gentle-ai.review-last-event-closure/v1");
+			assert.equal(reviewerClosure.operation, "review/capture-result");
+			assert.equal(reviewerClosure.state, "correction_required", "the deterministic reviewer finding must open correction_required");
+			correctionOpened = true;
+			break;
+		}
+	}
+	assert.equal(correctionOpened, true, "the provider must close the final reviewer capture as correction_required");
+	assert.ok(reviewerCaptureCount > 0);
+	assert.ok(relayTargetRoots.length === reviewerCaptureCount);
+	assert.ok(relayTargetRoots.every((root) => root === canonicalB), "every reviewer relay leg must stay bound to B");
+	const combinedFakePiLog = record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "combined fake Pi log");
+	assert.ok(Array.isArray(combinedFakePiLog.calls), "combined fake Pi log must record reviewer subprocess calls");
+	const reviewerCalls = combinedFakePiLog.calls.map((call) => record(call, "combined fake Pi reviewer call")).filter((call) => call.role === "reviewer");
+	assert.equal(reviewerCalls.length, reviewerCaptureCount);
+	for (const call of reviewerCalls) {
+		assert.equal(call.subject_hash === undefined, false, "the fake reviewer must receive one provider-bound subject");
+		assert.deepEqual(call.argv, OPAQUE_PI_REVIEWER_ARGV);
+		assert.deepEqual(call.entries, [], "the reviewer must run from an empty isolated sandbox");
+		assert.notEqual(call.cwd, canonicalB, "the reviewer subprocess must not run in B");
+		assert.notEqual(call.cwd, sessionA, "the reviewer subprocess must not run in A");
+		assert.equal(existsSync(stringValue(call.cwd, "reviewer fake Pi scratch cwd")), false, "the reviewer sandbox must be removed after the subprocess exits");
+	}
+
+	const correctionStatus = await controller.execute(
+		"combined-correction-plan-status",
+		{ operation: "status", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify(selection) },
+		undefined,
+		undefined,
+		sessionContext(sessionA),
 	);
-	assert.equal(nativeCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "finalize").length, finalizeCallsBeforeOutOfProjectionCheck, "a caller-authored out-of-projection correction path must be rejected before native FINALIZE");
+	const correctionBinding = collectBindingFor(correctionStatus.details, "review.capture-correction-plan");
+	const correctionInput = parsedCollectBinding(correctionBinding);
+	assert.equal(correctionInput.captureOperation, "review.capture-correction-plan");
+	assert.ok(publicStatusProjectionPaths(correctionStatus.details).includes("selected.txt"), "the correction plan STATUS must remain bound to selected.txt");
+	assert.equal(publicStatusProjectionPaths(correctionStatus.details).includes("excluded.txt"), false, "the correction plan STATUS must remain outside excluded.txt");
+	const correctionPlan = await capture.execute(
+		"combined-correction-plan",
+		{ lineageId: lineage, workspaceRoot: nestedTarget, collectBinding: correctionBinding, correctionLines: 1 },
+		undefined,
+		undefined,
+		sessionContext(sessionA),
+	);
+	const correctionPlanClosure = record(record(correctionPlan.details, "combined correction plan").closure, "correction plan closure");
+	assert.equal(correctionPlanClosure.schema, "gentle-ai.review-last-event-closure/v1");
+	assert.equal(correctionPlanClosure.operation, "review.capture-correction-plan");
+	assert.equal(correctionPlanClosure.state, "correction_required");
+	assert.equal(correctionPlanClosure.correction_lines, 1);
+	writeFileSync(join(targetB, "selected.txt"), "selected relay input corrected\n");
+
+	const validationStatus = await controller.execute(
+		"combined-targeted-validator-status",
+		{ operation: "status", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify(selection) },
+		undefined,
+		undefined,
+		sessionContext(sessionA),
+	);
+	if (!("collectBindings" in record(validationStatus.details, "combined targeted-validator STATUS"))) {
+		t.diagnostic(`targeted-validator raw STATUS: ${nativeCalls.at(-1)?.stdout ?? "unavailable"}`);
+	}
+	const validatorBinding = collectBindingFor(validationStatus.details, "review.capture-validation");
+	const validatorInput = parsedCollectBinding(validatorBinding);
+	assert.equal(validatorInput.captureOperation, "review.capture-validation");
+	assert.equal(validatorInput.submission, undefined, "the Go-owned targeted-validator vector must not accept a caller-authored submission");
+	const validationRequest = record(validatorInput.validationRequest, "targeted-validator validation request");
+	const validatorArgumentTokens = collectBindingArgumentTokens(validatorBinding);
+	const validatorRequestHash = collectBindingArgument(validatorBinding, "request-hash");
+	const validatorTargetIdentity = collectBindingArgument(validatorBinding, "target");
+	assert.equal(validationRequest.schema, "gentle-ai.review-targeted-validation-request/v1");
+	assert.equal(validationRequest.requestHash, validatorRequestHash, "the public targeted-validator request must retain Go's exact request hash");
+	assert.equal(validationRequest.correctionTargetIdentity, validatorTargetIdentity, "the public targeted-validator request must retain Go's correction target");
+	assert.deepEqual(validationRequest.correctionPaths, ["selected.txt"], "the public targeted-validator request must retain Go's correction paths");
+	assert.equal(typeof validationRequest.policyContent, "string");
+	assert.ok(stringValue(validationRequest.policyContent, "targeted-validator policy content").length > 0, "the public targeted-validator request must retain Go's policy content");
+	assert.ok(Array.isArray(validationRequest.fixFindings) && validationRequest.fixFindings.length > 0, "the public targeted-validator request must retain Go's findings");
+	assert.ok(Array.isArray(validationRequest.fixClassifications) && validationRequest.fixClassifications.length > 0, "the public targeted-validator request must retain Go's classifications");
+	assert.ok(validatorArgumentTokens.includes(`--request-hash=${validatorRequestHash}`), "the public targeted-validator vector must retain its request hash");
+	assert.ok(validatorArgumentTokens.includes("--agent=pi"), "the public targeted-validator vector must retain the Pi binding");
+	assert.ok(validatorArgumentTokens.includes("--execute=true"), "the public targeted-validator vector must retain Go-owned execution");
+	assert.ok(publicStatusProjectionPaths(validationStatus.details).includes("selected.txt"), "the targeted-validator STATUS must remain bound to selected.txt");
+	assert.equal(publicStatusProjectionPaths(validationStatus.details).includes("excluded.txt"), false, "the targeted-validator STATUS must remain outside excluded.txt");
 
 	environment.OPAQUE_PI_TARGETED_VALIDATOR_RESULT = JSON.stringify({
-		targeted_validation_request_hash: validationRequest!.requestHash,
-		correction_target_identity: validationRequest!.correctionTargetIdentity,
+		targeted_validation_request_hash: validatorRequestHash,
+		correction_target_identity: validatorTargetIdentity,
 		original_criteria: { passed: true, evidence: ["focused acceptance proof passed"] },
 		correction_regression: { passed: true, evidence: ["focused regression proof passed"] },
 		follow_ups: [],
 	});
-	const statusCallsBeforeValidator = nativeCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "status").length;
-	const providerValidation = await controller.execute(
+	const providerValidation = await capture.execute(
 		"combined-provider-targeted-validation",
-		{ operation: "finalize", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify({}) },
+		{ lineageId: lineage, workspaceRoot: nestedTarget, collectBinding: validatorBinding },
 		undefined,
 		undefined,
 		sessionContext(sessionA),
 	);
 	const providerValidationDetails = record(providerValidation.details, "combined provider targeted validation");
-	const providerRoles = record(providerValidationDetails.provider_roles, "provider role capture");
-	assert.equal(providerRoles.transport, "go_owned_pi_process");
-	assert.equal(nativeCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "status").length, statusCallsBeforeValidator + 2, "the document-free controller FINALIZE must query STATUS before and after the Go-owned validator capture");
+	if (providerValidationDetails.status !== "closed") t.diagnostic(`targeted-validator capture result: ${JSON.stringify(providerValidationDetails)}`);
+	assert.equal(providerValidationDetails.status, "closed");
+	assert.equal(providerValidationDetails.outcome, "native-last-event-closure");
+	const validationClosure = record(providerValidationDetails.closure, "targeted-validator last-event closure");
+	assert.equal(validationClosure.schema, "gentle-ai.review-last-event-closure/v1");
+	assert.equal(validationClosure.operation, "review/capture-validation");
+	assert.equal(validationClosure.state, "approved");
 	const validationCaptureCalls = nativeCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "capture-validation");
-	assert.equal(validationCaptureCalls.length, 1, "the real native validator must be captured exactly once");
+	assert.equal(validationCaptureCalls.length, 1, "the Go-owned targeted validator must capture exactly once");
 	assert.equal(validationCaptureCalls[0]!.cwd, canonicalB);
-	assert.deepEqual(validationCaptureCalls[0]!.arguments.slice(2), validatorArgumentTokens, "the real native validator must receive the provider-rendered self-contained vector verbatim");
-	assert.equal(nativeCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "finalize").length, finalizeCallsBeforeOutOfProjectionCheck, "validator capture and receipt finalization must stay separate native calls");
+	assert.deepEqual(validationCaptureCalls[0]!.arguments.slice(2), validatorArgumentTokens, "the Go-owned targeted validator must receive the exact public vector");
 
 	const validatorPiLog = record(JSON.parse(readFileSync(fakePiLog, "utf8")) as unknown, "validator fake Pi log");
 	assert.ok(Array.isArray(validatorPiLog.calls), "validator fake Pi log must record the Go-owned subprocess");
 	const validatorCall = validatorPiLog.calls.map((call) => record(call, "validator fake Pi call")).find((call) => call.role === "targeted-validator");
 	assert.ok(validatorCall, "the fake Pi log must contain the Go-owned targeted-validator subprocess");
-	assert.ok(Array.isArray(validatorCall!.argv), "the captured targeted-validator argv must be an array");
 	assert.deepEqual(validatorCall!.entries, [], "the Go-owned validator must run from an empty isolated sandbox");
 	assert.notEqual(validatorCall!.cwd, canonicalB, "the Go-owned validator subprocess must not run in B");
 	assert.notEqual(validatorCall!.cwd, sessionA, "the Go-owned validator subprocess must not run in A");
 	assert.equal(existsSync(stringValue(validatorCall!.cwd, "validator fake Pi scratch cwd")), false, "the Go-owned validator sandbox must be removed after the subprocess exits");
 	const validatorPrompt = stringValue(validatorCall!.prompt, "validator fake Pi prompt");
-	assert.ok(validatorPrompt.includes(validationRequest!.policyContent), "the Go-owned validator prompt must preserve the exact immutable policy_content");
-	assert.ok(validatorPrompt.includes(validationRequest!.requestHash), "the Go-owned validator prompt must preserve the exact request hash");
-	for (const finding of validationRequest!.fixFindings) {
-		for (const value of [finding.id, finding.lens, finding.location, finding.severity, finding.claim, ...(finding.proofRefs ?? []), finding.evidenceClass, finding.causalDisposition]) {
-			if (value !== undefined) assert.ok(validatorPrompt.includes(value), `the Go-owned validator prompt must preserve exact fix finding content: ${value}`);
-		}
-	}
-	for (const classification of validationRequest!.fixClassifications) {
-		for (const value of [classification.findingId, classification.severity, classification.class, classification.causalDisposition, classification.proof]) {
-			if (value !== undefined) assert.ok(validatorPrompt.includes(value), `the Go-owned validator prompt must preserve exact fix classification content: ${value}`);
-		}
-	}
-
-	const capturedValidatorStatus = decodeReviewStatusV3(providerValidationDetails.result);
-	const finalizeTransition = capturedValidatorStatus.nextTransition?.kind === "execute" && capturedValidatorStatus.nextTransition.execute?.operation === "review.finalize"
-		? capturedValidatorStatus.nextTransition.execute
-		: undefined;
-	assert.ok(finalizeTransition, "admitted targeted validation must reoffer the provider-rendered FINALIZE transition");
-	const finalizeArgumentTokens = finalizeTransition!.arguments.map((argument) => {
-		if (typeof argument.token !== "string" || argument.token.trim().length === 0) throw new Error(`status/v5 FINALIZE argument ${argument.name} must carry its exact provider-rendered token`);
-		return argument.token;
-	});
-	assert.ok(finalizeArgumentTokens.includes("--captured-evidence=true"), "the provider-rendered FINALIZE transition must carry captured evidence");
-	assert.ok(finalizeArgumentTokens.includes(`--lineage=${lineage}`), "the provider-rendered FINALIZE transition must retain the lineage binding");
-	assert.ok(finalizeArgumentTokens.includes(`--expected-revision=${capturedValidatorStatus.authority!.revision}`), "the provider-rendered FINALIZE transition must retain the revision binding");
-	assert.ok(finalizeArgumentTokens.includes(`--target=${finalizeTransition!.binding.targetIdentity}`), "the provider-rendered FINALIZE transition must retain the target binding");
-	assert.ok(finalizeArgumentTokens.includes(`--repository-context=${capturedValidatorStatus.repositoryContext!.handle}`), "the provider-rendered FINALIZE transition must retain the repository-context binding");
-	assert.ok(finalizeArgumentTokens.includes(`--request-hash=${validationRequest!.requestHash}`), "the provider-rendered FINALIZE transition must retain the validator request hash");
-
-	assert.ok(native instanceof NativeReviewCliV216, "the terminal leg must use the real native client without a lifecycle method override");
-	const finalized = await controller.execute(
-		"combined-finalize-admitted-validation",
-		{ operation: "finalize", lineageId: lineage, workspaceRoot: nestedTarget, input: JSON.stringify({}) },
-		undefined,
-		undefined,
-		sessionContext(sessionA),
-	);
-	const finalizedDetails = record(finalized.details, "combined finalized validation");
-	assert.ok(finalizedDetails.result, `the fresh provider FINALIZE transition must produce a native result: ${JSON.stringify(finalizedDetails)}`);
-	assert.equal(record(finalizedDetails.result, "combined finalized validation result").state, "approved");
-	const nativeFinalizeCalls = nativeCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "finalize");
-	assert.equal(nativeFinalizeCalls.length, finalizeCallsBeforeOutOfProjectionCheck + 1, "only the terminal controller FINALIZE may add a native review.finalize call after validator admission");
-	const terminalFinalizeCall = nativeFinalizeCalls[nativeFinalizeCalls.length - 1]!;
-	const validationCaptureIndex = nativeCalls.indexOf(validationCaptureCalls[0]!);
-	const terminalFinalizeIndex = nativeCalls.lastIndexOf(terminalFinalizeCall);
-	assert.ok(validationCaptureIndex >= 0 && terminalFinalizeIndex > validationCaptureIndex, "the real capture-validation must precede terminal FINALIZE");
-	const statusesAfterValidationBeforeFinalize = nativeCalls.slice(validationCaptureIndex + 1, terminalFinalizeIndex).filter((call) => call.arguments[0] === "review" && call.arguments[1] === "status");
-	assert.ok(statusesAfterValidationBeforeFinalize.length >= 2, "capture-validation and the following document-free FINALIZE must each obtain real native STATUS before installed-binary FINALIZE");
-	assert.ok(statusesAfterValidationBeforeFinalize.every((call) => call.cwd === canonicalB), "the post-validation STATUS queries must remain bound to B");
-	assert.equal(terminalFinalizeCall.cwd, canonicalB);
-	assert.deepEqual(terminalFinalizeCall.arguments.slice(2), finalizeArgumentTokens, "the installed binary must execute the fresh provider-rendered captured-evidence FINALIZE vector verbatim");
-	assert.ok(terminalFinalizeCall.arguments.includes("--captured-evidence=true"), "the installed binary must execute --captured-evidence=true, not merely observe it");
+	assert.ok(validatorPrompt.length > 0, "the Go-owned validator must receive a provider-rendered prompt");
+	assert.ok(validatorPrompt.includes(validatorRequestHash), "the Go-owned validator prompt must retain the provider request hash");
 
 	const terminal = await native.targetStatus!({ cwd: canonicalB, lineageId: lineage, agent: "pi", ...selection });
 	assert.equal(terminal.authority, undefined, "terminal approval must burn the sandbox review authority");
-	assert.equal(terminal.validationRequest, undefined, "terminal approval must burn the sandbox validation evidence request");
-	assert.equal("evidence" in terminal.raw, false, "terminal STATUS must not retain sandbox validation evidence");
-	assert.equal("staging" in terminal.raw, false, "terminal STATUS must not retain sandbox staging state");
+	assert.equal("evidence" in terminal.raw, false, "terminal STATUS must not retain validation evidence");
+	assert.equal("staging" in terminal.raw, false, "terminal STATUS must not retain staging state");
+	assert.equal("receipt" in terminal.raw, false, "terminal STATUS must not retain a receipt after last-event approval");
 	assert.equal(git(canonicalB, "diff", "--cached", "--name-only"), "", "terminal approval must leave no sandbox staging entries");
 	assert.deepEqual(candidateJson(RELAY_DEV_BINARY!, sessionA, ["review", "mode", "status", "--cwd", canonicalB, "--json"], environment), isolatedModeAfterSetup, "approval must not change the isolated global or clone-local RDD mode");
 

@@ -10,7 +10,6 @@ import {
 	NativeReviewCliV216,
 	NativeReviewConsentRequiredError,
 	createNodeExecFileAdapter,
-	setNativeCliContractForTesting,
 	type ExecFileAdapter,
 } from "../../lib/native-review-cli.ts";
 import { requireDevBinary } from "../support/native-binary-gate.ts";
@@ -33,19 +32,12 @@ const DEV_HOME = mkdtempSync(join(tmpdir(), "gentle-pi-dev-binary-home-"));
 const ORIGINAL_HOME = process.env.HOME;
 const ORIGINAL_USERPROFILE = process.env.USERPROFILE;
 
-// The mode client retains the legacy version probe. The candidate's negotiated
-// capability document remains real; only this obsolete version text is bridged.
-const BRIDGE_VERSION = "9.8.7";
-
 type NativeCall = readonly string[];
 
 function bridgeAdapter(binary: string, calls: NativeCall[]): ExecFileAdapter {
 	const real = createNodeExecFileAdapter();
 	return async (request) => {
 		calls.push([...request.arguments]);
-		if (request.arguments[0] === "version") {
-			return { stdout: `gentle-ai ${BRIDGE_VERSION}\n`, stderr: "", exitCode: 0, signal: null, timedOut: false, outputLimitExceeded: false };
-		}
 		return real({ ...request, file: binary });
 	};
 }
@@ -182,7 +174,7 @@ test("dev-binary: declined consent executes its exact candidate-bound invocation
 	assert.deepEqual(consentAnswerCall(calls, "declined"), declinedChoice.invocation.split(" ").slice(1));
 	const after = await native.targetStatus({ cwd, agent: "pi" });
 	assert.equal(after.authority, undefined);
-	assert.equal(after.receipt.status, "not_applicable");
+	assert.equal("receipt" in after, false, "last-event STATUS no longer exposes receipt state");
 });
 
 // ---------------------------------------------------------------------------
@@ -209,37 +201,28 @@ test("dev-binary: an empty candidate exposes the current STATUS refusal and neve
 	assert.equal(calls.filter((arguments_) => arguments_.at(0) === "review" && arguments_.at(1) === "start").length, 0);
 });
 
-test("dev-binary: VALIDATE decodes the current disabled/unmanaged gate-only payload", { skip: !RUNNABLE }, async (t) => {
+test("dev-binary: a low-risk START closes the review with no receipt or follow-up capture", { skip: !RUNNABLE }, async (t) => {
 	const cwd = repository(t);
-	writeFileSync(join(cwd, "app.ts"), "export const value = 1;\n");
-	git(cwd, "add", ".");
-	git(cwd, "commit", "-qm", "initial");
-	writeFileSync(join(cwd, "app.ts"), "export const value = 2;\n");
-	git(cwd, "add", "--", "app.ts");
+	writeFileSync(join(cwd, "guide.md"), "# Guide\n\nBase\n");
+	git(cwd, "add", "guide.md");
+	git(cwd, "commit", "-qm", "docs: base guide");
+	writeFileSync(join(cwd, "guide.md"), "# Guide\n\nBase\n\nPassive update\n");
 
 	const { native } = journeyNative(DEV_BINARY!);
-	await native.reviewMode({ cwd, operation: "disable" });
-	const result = await native.validate({ cwd, gate: "pre-commit" });
-	assert.equal(result.delivery, "disabled/unmanaged");
-	assert.equal(result.allowed, false);
-	assert.equal(result.result, "invalidated");
-	assert.equal(result.action, "repository-policy");
-	assert.deepEqual(result.gateContext.raw, { gate: "pre-commit" });
+	await enableReview(native, cwd);
+	const status = await native.targetStatus({ cwd, agent: "pi" });
+	const started = await native.start({ cwd, targetIdentity: status.targetIdentity });
+	assert.equal(started.action, "closed");
+	assert.equal(started.state, "approved");
+	assert.deepEqual(started.selectedLenses, []);
+	assert.equal(started.lensesRequired, false);
 });
 
 test.before(() => {
 	process.env.HOME = DEV_HOME;
 	process.env.USERPROFILE = DEV_HOME;
-	if (RUNNABLE) {
-		setNativeCliContractForTesting(BRIDGE_VERSION, {
-			start: true, finalize: true, validate: true, bindSdd: true, sddStatus: true, status: true, inventory: true,
-			reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true,
-			mode: true, riskEvidence: true, hint: true, delivery: true,
-		});
-	}
 });
 test.after(() => {
-	if (RUNNABLE) setNativeCliContractForTesting(BRIDGE_VERSION, undefined);
 	if (ORIGINAL_HOME === undefined) delete process.env.HOME;
 	else process.env.HOME = ORIGINAL_HOME;
 	if (ORIGINAL_USERPROFILE === undefined) delete process.env.USERPROFILE;
