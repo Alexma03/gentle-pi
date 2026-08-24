@@ -106,10 +106,11 @@ function isGitCommand(args: Record<string, unknown> | undefined): boolean {
 
 export type GentleAiRoutineCommand = "sdd-status" | "sdd-continue" | "sdd-attempt" | "review";
 
-const SHELL_COMMAND_PREFIX = String.raw`(?:env\s+\S+=\S+\s+|command(?:\s+--)?\s+|\w+=\S+\s+)*`;
+const SHELL_COMMAND_ASSIGNMENT = String.raw`\w+=(?:'[^']*'|"[^"]*"|\S+)`;
+const SHELL_COMMAND_PREFIX = String.raw`(?:env\s+(?:${SHELL_COMMAND_ASSIGNMENT}\s+)?|command(?:\s+--)?\s+|${SHELL_COMMAND_ASSIGNMENT}\s+)*`;
 const GENTLE_AI_EXECUTABLE = String.raw`(?:gentle-ai(?:\.exe)?|'gentle-ai(?:\.exe)?'|"gentle-ai(?:\.exe)?"|gentle\\-ai(?:\.exe|\\\.exe)?|(?:\.{1,2}[\\/]|(?:[A-Za-z]:)?(?:[\\/][^\\/\s]+)*[\\/])\.gentle-ai[\\/]v\d+\.\d+\.\d+[\\/]gentle-ai(?:\.exe)?)`;
 const GENTLE_AI_COMMAND_ARGUMENTS = new RegExp(String.raw`^${SHELL_COMMAND_PREFIX}${GENTLE_AI_EXECUTABLE}(?:\s+(.*))?$`);
-const SHELL_EXPANSION_OR_COMPOSITION = /[;&|`<>\r\n$]/;
+const SHELL_EXPANSION_OR_COMPOSITION = /[;&|`<>\r\n$#]/;
 const SDD_ATTEMPT_VERBS = new Set(["acquire", "settle", "grant"]);
 
 const REVIEW_DIRECT_OPERATIONS = new Set([

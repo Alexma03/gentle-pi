@@ -451,6 +451,11 @@ test("quiet tool rendering recognizes exact quoted, escaped, Windows, and comman
 		"gentle\\-ai\\.exe version",
 		"command -- gentle-ai version",
 		"command -- 'gentle-ai.exe' version",
+		"env gentle-ai version",
+		"FOO='a b' gentle-ai version",
+		'FOO="a b" gentle-ai version',
+		"env FOO='a b' gentle-ai version",
+		'env FOO="a b" gentle-ai version',
 	] as const;
 
 	for (const command of routineCommands) {
@@ -551,6 +556,7 @@ test("quiet tool rendering keeps shell compositions, expansions, and lookalikes 
 		"gentle-ai version | tee output",
 		"gentle-ai version $HOME",
 		"gentle-ai version $(printf nested)",
+		"gentle-ai sdd-attempt grant --change secret-change # ignored comment",
 		"/package/.gentle-ai/v2.2.0/gentle-ai-copy version",
 		"echo gentle-ai version",
 	];
