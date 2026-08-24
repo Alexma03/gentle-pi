@@ -352,7 +352,7 @@ test("an explicit nested foreign workspace root canonically owns inspect, status
 	const statusDetails = status.details as { status?: string; result?: { authority?: { state?: string } } };
 	assert.equal(statusDetails.status, "blocked");
 	assert.equal(statusDetails.result?.authority?.state, "correction_required");
-	assert.deepEqual(targetStatusRequests[1], { cwd: root, lineageId: "cross-root-lineage", untrackedScope: "select", expectedUntrackedInventory: digest, intendedUntracked });
+	assert.deepEqual(targetStatusRequests[1], { cwd: root, lineageId: "cross-root-lineage", untrackedScope: "select", expectedUntrackedInventory: digest, intendedUntracked, agent: "pi" });
 	assert.ok(targetStatusCwds.every((cwd) => cwd === root), JSON.stringify(targetStatusCwds));
 	assert.deepEqual(startCwds, [root]);
 	candidateViews.cleanup(candidateViews.resolveForLens("cross-root-lineage", "review-reliability").token);
@@ -371,7 +371,7 @@ test("STATUS relays exclude selection and rejects malformed input before native 
 	const digest = `sha256:${"c".repeat(64)}`;
 	const excluded = await controller.execute("status-exclude", { operation: "status", lineageId: "excluded-lineage", input: JSON.stringify({ untrackedScope: "exclude", expectedUntrackedInventory: digest, intendedUntracked: [] }) }, undefined, undefined, context(cwd));
 	assert.equal((excluded.details as { status?: string }).status, "blocked");
-	assert.deepEqual(requests, [{ cwd, lineageId: "excluded-lineage", untrackedScope: "exclude", expectedUntrackedInventory: digest, intendedUntracked: [] }]);
+	assert.deepEqual(requests, [{ cwd, lineageId: "excluded-lineage", untrackedScope: "exclude", expectedUntrackedInventory: digest, intendedUntracked: [], agent: "pi" }]);
 
 	for (const [input, reason] of [
 		[{}, "untracked-selection-invalid"],

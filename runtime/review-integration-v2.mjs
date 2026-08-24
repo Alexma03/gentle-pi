@@ -465,7 +465,46 @@ export const REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS = Object.freeze(Object.valu
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 	                      
+
+
 
 
 
@@ -1255,6 +1294,57 @@ function decodeCorrectionPlanRequestV1(value         , label        )           
 	};
 }
 
+export function decodeReviewTargetedValidationRequestV1(value         , label = "targeted_validation_request")                                    {
+	const body = exactRecord(value, label, [
+		"schema", "request_hash", "lineage_id", "expected_revision", "target_identity", "fix_finding_ids", "policy_content", "fix_findings", "fix_classifications",
+		"projection", "correction_candidate_tree", "correction_target_identity", "correction_paths", "correction_paths_digest",
+	]);
+	if (body.schema !== "gentle-ai.review-targeted-validation-request/v1") throw new TypeError(`${label}.schema must be gentle-ai.review-targeted-validation-request/v1`);
+	const fixFindingIds = stringArray(body.fix_finding_ids, `${label}.fix_finding_ids`, { minimum: 1, unique: true });
+	const fixFindings = array(body.fix_findings, `${label}.fix_findings`, (entry, entryLabel)                                    => {
+		const finding = exactRecord(entry, entryLabel, ["id", "lens", "location", "severity", "claim", "proof_refs", "evidence_class", "causal_disposition"]);
+		return {
+			id: nonempty(finding.id, `${entryLabel}.id`),
+			lens: enumeration(finding.lens, ["risk", "resilience", "readability", "reliability"]         , `${entryLabel}.lens`),
+			location: nonempty(finding.location, `${entryLabel}.location`),
+			severity: enumeration(finding.severity, ["BLOCKER", "CRITICAL"]         , `${entryLabel}.severity`),
+			claim: nonempty(finding.claim, `${entryLabel}.claim`),
+			proofRefs: stringArray(finding.proof_refs, `${entryLabel}.proof_refs`, { minimum: 1 }),
+			evidenceClass: enumeration(finding.evidence_class, ["deterministic", "inferential"]         , `${entryLabel}.evidence_class`),
+			causalDisposition: enumeration(finding.causal_disposition, ["introduced", "behavior-activated", "worsened"]         , `${entryLabel}.causal_disposition`),
+		};
+	}, { minimum: 1 });
+	const fixClassifications = array(body.fix_classifications, `${label}.fix_classifications`, (entry, entryLabel)                                           => {
+		const classification = exactRecord(entry, entryLabel, ["finding_id", "class", "causal_disposition", "proof"]);
+		return {
+			findingId: nonempty(classification.finding_id, `${entryLabel}.finding_id`),
+			class: enumeration(classification.class, ["deterministic", "inferential"]         , `${entryLabel}.class`),
+			causalDisposition: enumeration(classification.causal_disposition, ["introduced", "behavior-activated", "worsened"]         , `${entryLabel}.causal_disposition`),
+			proof: nonempty(classification.proof, `${entryLabel}.proof`),
+		};
+	}, { minimum: 1 });
+	const findingIds = fixFindings.map((finding) => finding.id);
+	const classificationFindingIds = fixClassifications.map((classification) => classification.findingId);
+	assertExactSet(findingIds, fixFindingIds, `${label}.fix_findings`);
+	assertExactSet(classificationFindingIds, fixFindingIds, `${label}.fix_classifications`);
+	return {
+		schema: "gentle-ai.review-targeted-validation-request/v1",
+		requestHash: sha256(body.request_hash, `${label}.request_hash`),
+		lineageId: lineage(body.lineage_id, `${label}.lineage_id`),
+		expectedRevision: sha256(body.expected_revision, `${label}.expected_revision`),
+		targetIdentity: sha256(body.target_identity, `${label}.target_identity`),
+		fixFindingIds,
+		policyContent: nonempty(body.policy_content, `${label}.policy_content`),
+		fixFindings,
+		fixClassifications,
+		projection: enumeration(body.projection, REQUIRED_PROJECTIONS, `${label}.projection`),
+		correctionCandidateTree: gitTree(body.correction_candidate_tree, `${label}.correction_candidate_tree`),
+		correctionTargetIdentity: sha256(body.correction_target_identity, `${label}.correction_target_identity`),
+		correctionPaths: stringArray(body.correction_paths, `${label}.correction_paths`, { minimum: 1, unique: true }),
+		correctionPathsDigest: sha256(body.correction_paths_digest, `${label}.correction_paths_digest`),
+	};
+}
+
 export function decodeReviewForecastV1(value         , label = "status.forecast")                   {
 	const body = exactRecord(value, label, ["horizon", "steps"]);
 	const horizon = enumeration(body.horizon, ["partial", "terminal"]         , `${label}.horizon`);
@@ -1281,7 +1371,7 @@ const CORRECTION_REQUEST_REASON_CODES = Object.freeze(["correction_plan_required
 const V5_SUBMISSION_CAPTURE_OPERATIONS = Object.freeze(["review.capture-correction-plan"]         );
 
 function decodeCollectInput(value         , label        , v5         )                       {
-	const input = exactRecord(value, label, ["name", "schema", "capture_operation", "arguments"], ["artifact_subject", "base_tree", "candidate_tree", "changed_path_manifest", "submission", ...(v5 ? ["provider_task"] : [])]);
+	const input = exactRecord(value, label, ["name", "schema", "capture_operation", "arguments"], ["artifact_subject", "base_tree", "candidate_tree", "changed_path_manifest", "submission", ...(v5 ? ["provider_task", "validation_request"] : [])]);
 	const name = text(input.name, `${label}.name`, { minimum: 1, pattern: /^[a-z0-9_]+$/ });
 	const schema = nonempty(input.schema, `${label}.schema`);
 	const captureOperation = nonempty(input.capture_operation, `${label}.capture_operation`);
@@ -1314,6 +1404,30 @@ function decodeCollectInput(value         , label        , v5         )         
 	}
 	if (captureOperation === REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_VALIDATION && schema !== "https://gentle-ai.dev/schema/review/validator/v1") {
 		throw new TypeError(`${label}.schema must be https://gentle-ai.dev/schema/review/validator/v1`);
+	}
+	const targetedValidatorInput = v5
+		&& name === "provider_targeted_validator"
+		&& captureOperation === REVIEW_PROVIDER_ROLE_CAPTURE_OPERATION.CAPTURE_VALIDATION
+		&& schema === "https://gentle-ai.dev/schema/review/validator/v1";
+	if (input.validation_request !== undefined && !targetedValidatorInput) {
+		throw new TypeError(`${label}.validation_request is only valid for the v5 provider-targeted-validator capture input`);
+	}
+	if (targetedValidatorInput && input.validation_request === undefined) {
+		throw new TypeError(`${label}.validation_request is required for the v5 provider-targeted-validator capture input`);
+	}
+	const validationRequest = input.validation_request === undefined
+		? undefined
+		: decodeReviewTargetedValidationRequestV1(input.validation_request, `${label}.validation_request`);
+	if (validationRequest !== undefined) {
+		const providerArgument = (argumentName        )         => {
+			const matches = argumentsList.filter((argument) => argument.name === argumentName);
+			if (matches.length !== 1) throw new TypeError(`${label}.arguments must carry exactly one ${argumentName} binding`);
+			return matches[0] .value;
+		};
+		if (providerArgument("lineage") !== validationRequest.lineageId) throw new TypeError(`${label}.arguments lineage must bind validation_request.lineage_id`);
+		if (providerArgument("expected-revision") !== validationRequest.expectedRevision) throw new TypeError(`${label}.arguments expected-revision must bind validation_request.expected_revision`);
+		if (providerArgument("target") !== validationRequest.correctionTargetIdentity) throw new TypeError(`${label}.arguments target must bind validation_request.correction_target_identity`);
+		if (providerArgument("request-hash") !== validationRequest.requestHash) throw new TypeError(`${label}.arguments request-hash must bind validation_request.request_hash`);
 	}
 	if (input.submission !== undefined && (REVIEW_PROVIDER_ROLE_CAPTURE_OPERATIONS                     ).includes(captureOperation)) {
 		throw new TypeError(`${label}.submission is not allowed on the self-contained ${captureOperation} vector`);
@@ -1349,6 +1463,7 @@ function decodeCollectInput(value         , label        , v5         )         
 		...(input.changed_path_manifest === undefined ? {} : { changedPathManifest: array(input.changed_path_manifest, `${label}.changed_path_manifest`, decodeChangedPathEntry, { unique: true }) }),
 		...(submission === undefined ? {} : { submission }),
 		...(v5 && input.provider_task !== undefined ? { providerTask: decodeProviderTask(input.provider_task, `${label}.provider_task`) } : {}),
+		...(validationRequest === undefined ? {} : { validationRequest }),
 	};
 }
 
@@ -1455,7 +1570,7 @@ export function decodeReviewStatusV3(value         )                 {
 	const v5 = typeof value === "object" && value !== null && (value                           ).schema === "gentle-ai.review-integration.status/v5";
 	const body = exactRecord(value, "status", [
 		"schema", "contract", "operation", "applicability", "action", "replayability", "target_identity", "projection", "repair", "candidates",
-	], ["authority", "frozen", "action_disposition", "eligibility", "next_transition", "authority_target_identity", ...(v5 ? ["forecast", "repository_context"] : [])]);
+	], ["authority", "frozen", "action_disposition", "eligibility", "next_transition", "authority_target_identity", ...(v5 ? ["forecast", "repository_context", "validation_request"] : [])]);
 	requireIdentity(body, v5 ? "gentle-ai.review-integration.status/v5" : "gentle-ai.review-integration.status/v3", REVIEW_INTEGRATION_OPERATION.STATUS);
 
 	const applicability = enumeration(body.applicability, ["current_target", "unrelated", "ambiguous", "corrupted"]         , "status.applicability");
@@ -1493,6 +1608,16 @@ export function decodeReviewStatusV3(value         )                 {
 	if (action !== "recover" && actionDisposition !== undefined) throw new TypeError("status.action_disposition is only valid for the recover action");
 	if (body.eligibility !== undefined) decodeEligibility(body.eligibility, "status.eligibility");
 	const nextTransition = body.next_transition === undefined ? undefined : decodeReviewNextTransitionV3(body.next_transition, { v5 });
+	const validationRequest = v5 && body.validation_request !== undefined
+		? decodeReviewTargetedValidationRequestV1(body.validation_request, "status.validation_request")
+		: undefined;
+	if (validationRequest !== undefined) {
+		const collectInputs = nextTransition?.kind === "collect" ? nextTransition.collect?.inputs ?? [] : [];
+		const matchingInputs = collectInputs.filter((input) => input.validationRequest !== undefined);
+		if (matchingInputs.length !== 1 || canonicalJson(matchingInputs[0] .validationRequest) !== canonicalJson(validationRequest)) {
+			throw new TypeError("status.validation_request must exactly match the provider-targeted-validator collect input");
+		}
+	}
 	// status/v5 dependentRequired: a forecast previews the transition head, so
 	// it can only accompany an actual next_transition.
 	const forecast = v5 && body.forecast !== undefined ? decodeReviewForecastV1(body.forecast) : undefined;
@@ -1533,6 +1658,7 @@ export function decodeReviewStatusV3(value         )                 {
 		...(nextTransition === undefined ? {} : { nextTransition }),
 		...(forecast === undefined ? {} : { forecast }),
 		...(repositoryContext === undefined ? {} : { repositoryContext }),
+		...(validationRequest === undefined ? {} : { validationRequest }),
 		raw: body,
 	};
 }

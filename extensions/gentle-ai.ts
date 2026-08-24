@@ -4052,11 +4052,15 @@ function selectExactReviewCapture(
 	const input = matches[0]!;
 	const inputLineageId = exactCollectArgument(input, "lineage");
 	const inputTargetIdentity = exactCollectArgument(input, "target");
+	// Go's targeted-validator vector binds its capture target to the correction
+	// target from the provider-owned validation request, rather than STATUS's
+	// current candidate identity. All other captures remain bound to STATUS.
+	const expectedInputTargetIdentity = input.validationRequest?.correctionTargetIdentity ?? statusTargetIdentity;
 	if (
 		!isCanonicalProcessString(inputLineageId) ||
 		!isCanonicalProcessString(inputTargetIdentity) ||
 		inputLineageId !== lineageId ||
-		inputTargetIdentity !== statusTargetIdentity
+		inputTargetIdentity !== expectedInputTargetIdentity
 	) {
 		return captureBindingRejected("collectBinding does not carry one non-empty matching provider lineage and target token");
 	}
@@ -4244,8 +4248,17 @@ async function executeReviewControllerOperation(
 	if (parameters.operation === REVIEW_CONTROLLER_OPERATION.INSPECT && nativeReviewCli !== null) {
 		try {
 			if (nativeReviewCli.targetStatus !== undefined) {
-				const status = await nativeReviewCli.targetStatus({ cwd: defaultCwd, ...(signal === undefined ? {} : { signal }) });
-				return { ...mapNativeTargetStatus(parameters.operation, status, undefined, defaultCwd), ...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}) };
+				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, {
+					cwd: defaultCwd,
+					...(signal === undefined ? {} : { signal }),
+				}, defaultCwd);
+				if (negotiated.transport !== undefined) {
+					return {
+						...hostTransportUnavailable(parameters.operation, negotiated.transport),
+						...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}),
+					};
+				}
+				return { ...mapNativeTargetStatus(parameters.operation, negotiated.status!, undefined, defaultCwd), ...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}) };
 			}
 			return nativeStatusUnsupported(parameters.operation);
 		} catch (error) {
@@ -4483,13 +4496,15 @@ async function executeReviewControllerOperation(
 			if (nativeReviewCli?.targetStatus === undefined) return nativeStatusUnsupported(parameters.operation);
 			let target: ReviewStatusV3;
 			try {
-				target = await nativeReviewCli.targetStatus({
+				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, {
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(canonicalBaseRef === undefined ? {} : { baseRef: canonicalBaseRef }),
 					...(untrackedSelection.untrackedScope === undefined ? {} : untrackedSelection),
 					...(signal === undefined ? {} : { signal }),
-				});
+				}, defaultCwd);
+				if (negotiated.transport !== undefined) return hostTransportUnavailable(parameters.operation, negotiated.transport);
+				target = negotiated.status!;
 				if (target.nextTransition?.kind === "collect" || target.applicability !== "unrelated" || target.action !== "start") return mapNativeTargetStatus(parameters.operation, target, parameters.lineageId);
 			} catch (error) {
 				return nativeOperationFailure(parameters.operation, error);
@@ -4693,12 +4708,19 @@ async function executeReviewControllerOperation(
 		const retainedUntrackedSelection = cloneRetainedNativeUntrackedSelection(untrackedSelection);
 		if (nativeReviewCli?.targetStatus !== undefined) {
 			try {
-				const status = await nativeReviewCli.targetStatus({
+				const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, {
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
 					...(untrackedSelection.untrackedScope === undefined ? {} : untrackedSelection),
 					...(signal === undefined ? {} : { signal }),
-				});
+				}, defaultCwd);
+				if (negotiated.transport !== undefined) {
+					return {
+						...hostTransportUnavailable(parameters.operation, negotiated.transport),
+						...(includeWorkspaceRoot ? { workspace_root: defaultCwd } : {}),
+					};
+				}
+				const status = negotiated.status!;
 				if (
 					retainedUntrackedSelection !== undefined &&
 					parameters.lineageId !== undefined &&

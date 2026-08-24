@@ -197,10 +197,10 @@ test("registered gentle_review surfaces the package-pinned Pi transport refusal 
 	t.diagnostic(JSON.stringify({ returned: returned?.details, error, nativeStartReached }));
 	assert.equal(thrown, undefined, "the Pi transport refusal must be returned, not thrown");
 	const result = returned?.details as Record<string, unknown> | undefined;
-	const diagnostics = result?.diagnostics as Record<string, unknown> | undefined;
+	const relayTransport = result?.relay_transport as Record<string, unknown> | undefined;
 	assert.equal(result?.status, "blocked");
-	assert.equal(result?.outcome, "native-operation-failed");
-	assert.equal(diagnostics?.error_code, "schema-incompatible");
+	assert.equal(result?.outcome, "pi-host-relay-transport-unavailable");
+	assert.equal(relayTransport?.code, "immutable_review_transport_unsupported");
 	assert.equal(result?.mutation_performed, false);
 	assert.equal(result?.mutation_outcome, "none");
 	if (result !== undefined && "lineage_created" in result) assert.equal(result.lineage_created, false);

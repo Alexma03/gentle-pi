@@ -284,10 +284,10 @@ test("typed status errors outside the Pi transport refusal set remain native err
 	assert.equal(result.relay_transport, undefined);
 });
 
-test("ordinary non-lifecycle STATUS inspection remains agent-less", async (t) => {
+test("ordinary STATUS inspection uses the Pi public collect-binding route", async (t) => {
 	const cwd = repository(t);
 	const { native, agents } = transportAwareNative();
 	const result = await runStatus(cwd, native, "ordinary-status-lineage");
-	assert.deepEqual(agents, [undefined], "ordinary STATUS must retain its public agent-less route");
+	assert.deepEqual(agents, ["pi"], "ordinary STATUS must request the Pi public collect-binding route");
 	assert.equal(result.operation, "status");
 });

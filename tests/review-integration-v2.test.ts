@@ -551,14 +551,115 @@ test("next_transition decodes the self-contained provider role capture vectors s
 	);
 
 	const validator = roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1");
-	const decodedValidator = decodeRoleTransition(validator);
-	assert.equal(decodedValidator.collect?.inputs[0]?.captureOperation, "review.capture-validation");
-	assert.equal(decodedValidator.collect?.inputs[0]?.arguments.at(-1)?.token, "--execute=true");
+	assert.throws(
+		() => decodeRoleTransition(validator),
+		/validation_request is required/,
+	);
 
 	assert.throws(
 		() => decodeRoleTransition(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/refuter/v1")),
 		/schema must be https:\/\/gentle-ai\.dev\/schema\/review\/validator\/v1/,
 	);
+});
+
+test("v5 targeted-validator collect inputs carry the exact provider-owned validation request", () => {
+	const requestHash = `sha256:${"a".repeat(64)}`;
+	const expectedRevision = `sha256:${"b".repeat(64)}`;
+	const targetIdentity = `sha256:${"c".repeat(64)}`;
+	const correctionTargetIdentity = `sha256:${"d".repeat(64)}`;
+	const correctionPathsDigest = `sha256:${"e".repeat(64)}`;
+	const validationRequest = {
+		schema: "gentle-ai.review-targeted-validation-request/v1",
+		request_hash: requestHash,
+		lineage_id: "review-fixture",
+		expected_revision: expectedRevision,
+		target_identity: targetIdentity,
+		fix_finding_ids: ["R1-001"],
+		policy_content: "Gentle AI native bounded review policy.",
+		fix_findings: [{
+			id: "R1-001",
+			lens: "risk",
+			location: "selected.txt:1",
+			severity: "BLOCKER",
+			claim: "the selected relay input must be corrected before delivery",
+			proof_refs: ["selected.txt:1"],
+			evidence_class: "deterministic",
+			causal_disposition: "introduced",
+		}],
+		fix_classifications: [{
+			finding_id: "R1-001",
+			class: "deterministic",
+			causal_disposition: "introduced",
+			proof: "selected.txt:1",
+		}],
+		projection: "workspace",
+		correction_candidate_tree: "f".repeat(40),
+		correction_target_identity: correctionTargetIdentity,
+		correction_paths: ["selected.txt"],
+		correction_paths_digest: correctionPathsDigest,
+	};
+	const input = {
+		name: "provider_targeted_validator",
+		schema: "https://gentle-ai.dev/schema/review/validator/v1",
+		capture_operation: "review.capture-validation",
+		arguments: [
+			{ name: "lineage", value: "review-fixture", token: "--lineage=review-fixture" },
+			{ name: "expected-revision", value: expectedRevision, token: `--expected-revision=${expectedRevision}` },
+			{ name: "target", value: correctionTargetIdentity, token: `--target=${correctionTargetIdentity}` },
+			{ name: "repository-context", value: `rctx1_${"f".repeat(64)}`, token: `--repository-context=rctx1_${"f".repeat(64)}` },
+			{ name: "request-hash", value: requestHash, token: `--request-hash=${requestHash}` },
+			{ name: "agent", value: "pi", token: "--agent=pi" },
+			{ name: "execute", value: "true", token: "--execute=true" },
+		],
+		validation_request: validationRequest,
+	};
+	const transition = { kind: "collect" as const, reason_code: "targeted_validation_required", collect: { inputs: [input] } };
+	const decoded = decodeReviewNextTransitionV3(transition, { v5: true });
+	const decodedRequest = decoded.collect?.inputs[0]?.validationRequest;
+	assert.equal(decodedRequest?.requestHash, requestHash);
+	assert.equal(decodedRequest?.correctionTargetIdentity, correctionTargetIdentity);
+	assert.deepEqual(decodedRequest?.correctionPaths, ["selected.txt"]);
+	assert.equal(decodedRequest?.policyContent, validationRequest.policy_content);
+	assert.deepEqual(decodedRequest?.fixFindings, [{
+		id: "R1-001",
+		lens: "risk",
+		location: "selected.txt:1",
+		severity: "BLOCKER",
+		claim: "the selected relay input must be corrected before delivery",
+		proofRefs: ["selected.txt:1"],
+		evidenceClass: "deterministic",
+		causalDisposition: "introduced",
+	}]);
+	assert.deepEqual(decodedRequest?.fixClassifications, [{
+		findingId: "R1-001",
+		class: "deterministic",
+		causalDisposition: "introduced",
+		proof: "selected.txt:1",
+	}]);
+	assert.deepEqual(decoded.collect?.inputs[0]?.arguments, input.arguments, "provider-rendered arguments must remain unchanged");
+
+	const missingRequest = clone(transition);
+	delete (missingRequest.collect.inputs[0] as JsonObject).validation_request;
+	assert.throws(() => decodeReviewNextTransitionV3(missingRequest, { v5: true }), /validation_request is required/);
+
+	const mismatchedRequestHash = clone(transition);
+	((mismatchedRequestHash.collect.inputs[0] as JsonObject).validation_request as JsonObject).request_hash = `sha256:${"0".repeat(64)}`;
+	assert.throws(() => decodeReviewNextTransitionV3(mismatchedRequestHash, { v5: true }), /request-hash/);
+
+	const refuter = clone(transition);
+	const refuterInput = refuter.collect.inputs[0] as JsonObject;
+	refuterInput.name = "provider_refuter";
+	refuterInput.schema = "https://gentle-ai.dev/schema/review/refuter/v1";
+	refuterInput.capture_operation = "review.capture-refuter";
+	assert.throws(() => decodeReviewNextTransitionV3(refuter, { v5: true }), /validation_request.*targeted-validator/);
+
+	const malformedRequest = clone(transition);
+	((malformedRequest.collect.inputs[0] as JsonObject).validation_request as JsonObject).unadvertised = true;
+	assert.throws(() => decodeReviewNextTransitionV3(malformedRequest, { v5: true }), /not allowed/);
+
+	const weakenedRequest = clone(transition);
+	((weakenedRequest.collect.inputs[0] as JsonObject).validation_request as JsonObject).policy_content = "";
+	assert.throws(() => decodeReviewNextTransitionV3(weakenedRequest, { v5: true }), /policy_content/);
 });
 
 test("status enforces authority/frozen/receipt conditionals and decodes the required repair field", () => {

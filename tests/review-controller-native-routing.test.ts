@@ -83,9 +83,10 @@ test("public STATUS exposes one opaque current collect binding without advancing
 	const lineageId = "public-status-lineage";
 	let statusCalls = 0;
 	const native = {
-		targetStatus: async (request: { lineageId?: string }) => {
+		targetStatus: async (request: { lineageId?: string; agent?: string }) => {
 			statusCalls += 1;
 			assert.equal(request.lineageId, lineageId);
+			assert.equal(request.agent, "pi");
 			return status(lineageId);
 		},
 	} as unknown as NativeReviewCli;
@@ -99,6 +100,81 @@ test("public STATUS exposes one opaque current collect binding without advancing
 	const collectBindings = result.collectBindings as readonly { collectBinding: string }[];
 	assert.equal(collectBindings.length, 1);
 	assert.deepEqual(JSON.parse(collectBindings[0]!.collectBinding), collectInput(lineageId));
+});
+
+test("public INSPECT and STATUS publish the exact pi-bound binding that capture revalidates", async () => {
+	const lineageId = "pi-bound-public-binding";
+	const agentlessInput = collectInput(lineageId);
+	const piBoundInput: ReviewCollectInputV3 = {
+		...agentlessInput,
+		arguments: [
+			...agentlessInput.arguments,
+			{ name: "agent", value: "pi", token: "--agent=pi" },
+			{ name: "materialize", value: "true", token: "--materialize=true" },
+		],
+		submission: {
+			...agentlessInput.submission!,
+			argumentTokens: [
+				...agentlessInput.submission!.argumentTokens.slice(0, -1),
+				"--agent=pi",
+				"--materialize=true",
+				"--input={{value}}",
+			],
+			values: [{ slot: "reviewer_result", domain: "artifact_path_or_stdin", substitutionLocation: 9 }],
+		},
+	};
+	const agentlessStatus = status(lineageId);
+	agentlessStatus.nextTransition = {
+		kind: "collect",
+		reasonCode: "capture_required",
+		collect: { inputs: [agentlessInput] },
+	};
+	const piBoundStatus = status(lineageId);
+	piBoundStatus.nextTransition = {
+		kind: "collect",
+		reasonCode: "capture_required",
+		collect: { inputs: [piBoundInput] },
+	};
+	const requests: Array<{ agent?: string; lineageId?: string }> = [];
+	const native = {
+		targetStatus: async (request: { agent?: string; lineageId?: string }) => {
+			requests.push(request);
+			return request.agent === "pi" ? piBoundStatus : agentlessStatus;
+		},
+	} as unknown as NativeReviewCli;
+
+	const publicStatus = await __testing.executeReviewControllerOperation(
+		{ operation: "status", lineageId },
+		process.cwd(),
+		native,
+	);
+	const statusBinding = (publicStatus.collectBindings as readonly { collectBinding: string }[])[0]!.collectBinding;
+	assert.deepEqual(JSON.parse(statusBinding), piBoundInput);
+
+	const publicInspect = await __testing.executeReviewControllerOperation(
+		{ operation: "inspect" },
+		process.cwd(),
+		native,
+	);
+	const inspectBinding = (publicInspect.collectBindings as readonly { collectBinding: string }[])[0]!.collectBinding;
+	assert.deepEqual(JSON.parse(inspectBinding), piBoundInput);
+
+	const publicStart = await __testing.executeReviewControllerOperation(
+		{ operation: "start", input: JSON.stringify({ mode: "ordinary" }) },
+		process.cwd(),
+		native,
+	);
+	const startBinding = (publicStart.collectBindings as readonly { collectBinding: string }[])[0]!.collectBinding;
+	assert.deepEqual(JSON.parse(startBinding), piBoundInput);
+
+	const forecast = await __testing.executeReviewCaptureOperation(
+		{ lineageId, collectBinding: statusBinding },
+		process.cwd(),
+		native,
+	);
+	assert.equal(forecast.outcome, "reviewer-model-run-forecast");
+	assert.deepEqual(requests.map((request) => request.agent), ["pi", "pi", "pi", "pi"]);
+	assert.deepEqual(requests.map((request) => request.lineageId), [lineageId, undefined, undefined, lineageId]);
 });
 
 function repository(t: test.TestContext): string {
