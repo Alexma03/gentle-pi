@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { gzipSync } from "node:zlib";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -18,6 +20,113 @@ function writeMarkdown(path: string, content: string): void {
 	mkdirSync(dirname(path), { recursive: true });
 	writeFileSync(path, content);
 }
+
+const lifecycleTheme = {
+	bold(value: string): string {
+		return value;
+	},
+	fg(color: string, value: string): string {
+		return `<${color}>${value}</${color}>`;
+	},
+};
+
+function renderComponent(component: { render(width: number): string[] }): string {
+	return component.render(120).map((line) => line.replace(/[ \t]+$/g, "")).join("\n");
+}
+
+function registeredGentleTools(): Map<string, any> {
+	const tools = new Map<string, any>();
+	const pi = {
+		on() {},
+		registerCommand() {},
+		registerTool(tool: { name: string }) {
+			tools.set(tool.name, tool);
+		},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	return tools;
+}
+
+function lifecycleContext(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		executionStarted: false,
+		isPartial: true,
+		isError: false,
+		lastComponent: undefined,
+		...overrides,
+	};
+}
+
+test("registered Gentle Review tools render reusable rose lifecycle call rows", () => {
+	const tools = registeredGentleTools();
+	const cases = [
+		["gentle_review", { operation: "status" }, "review status"],
+		["gentle_review", { operation: "future-operation", secret: "/private" }, "review"],
+		["gentle_review_scope", {}, "review scope"],
+	] as const;
+
+	for (const [name, args, operationPath] of cases) {
+		const tool = tools.get(name);
+		assert.ok(tool, `missing ${name}`);
+		const initial = tool.renderCall(args, lifecycleTheme, lifecycleContext());
+		const initialText = renderComponent(initial);
+		const running = tool.renderCall(
+			args,
+			lifecycleTheme,
+			lifecycleContext({ executionStarted: true, lastComponent: initial }),
+		);
+		const runningText = renderComponent(running);
+		const completed = tool.renderCall(
+			args,
+			lifecycleTheme,
+			lifecycleContext({ executionStarted: true, isPartial: false, lastComponent: running }),
+		);
+		const completedText = renderComponent(completed);
+		const failed = tool.renderCall(
+			args,
+			lifecycleTheme,
+			lifecycleContext({ executionStarted: true, isPartial: false, isError: true, lastComponent: completed }),
+		);
+		const failedText = renderComponent(failed);
+
+		assert.strictEqual(initial, running);
+		assert.strictEqual(running, completed);
+		assert.strictEqual(completed, failed);
+		assert.equal(initialText, `<warning>🌹︎ Gentle AI · running · ${operationPath}</warning>`);
+		assert.equal(runningText, `<warning>🌹︎ Gentle AI · running · ${operationPath}</warning>`);
+		assert.equal(completedText, `<success>🌹︎ Gentle AI · completed · ${operationPath}</success>`);
+		assert.equal(failedText, `<error>🌹︎ Gentle AI · failed · ${operationPath}</error>`);
+		assert.doesNotMatch(renderComponent(failed), /future-operation|secret|private/);
+	}
+});
+
+test("registered Gentle Review tools preserve result envelopes and default result visibility", async () => {
+	const tools = registeredGentleTools();
+	const scope = tools.get("gentle_review_scope");
+	const manifest = { version: 1, scopeByMode: { "100644": ["src/file.ts"] }, gitlinks: {} };
+	const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
+	const encoded = gzipSync(bytes, { mtime: 0 }).toString("base64url");
+	const sha256 = createHash("sha256").update(bytes).digest("hex");
+
+	const result = await scope.execute(
+		"scope-call",
+		{ manifest: encoded, sha256, cursor: 0 },
+		undefined,
+		undefined,
+		{ cwd: process.cwd() } as ExtensionContext,
+	);
+	const visibleEnvelope = JSON.parse(result.content[0].text);
+	assert.deepEqual(visibleEnvelope, {
+		version: 1,
+		sha256,
+		cursor: 0,
+		totalPaths: 1,
+		entries: [{ path: "src/file.ts", mode: "100644" }],
+	});
+	assert.deepEqual(result.details, visibleEnvelope);
+	assert.equal(tools.get("gentle_review")?.renderResult, undefined);
+	assert.equal(scope.renderResult, undefined);
+});
 
 test("agent discovery skips skills directories", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "gentle-pi-agents-"));

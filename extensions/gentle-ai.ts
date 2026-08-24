@@ -95,6 +95,7 @@ import {
 	type ReviewMode,
 	type ReviewProjectionV1,
 } from "../lib/review-snapshot.ts";
+import { renderGentleAiLifecycleCall, type GentleAiRenderContext } from "../lib/gentle-ai-renderer.ts";
 import { sanitizeTerminalText, stripAnsi } from "../lib/terminal-theme.ts";
 import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
 import {
@@ -2366,6 +2367,17 @@ const REVIEW_CONTROLLER_OPERATION = {
 
 type ReviewControllerOperation =
 	(typeof REVIEW_CONTROLLER_OPERATION)[keyof typeof REVIEW_CONTROLLER_OPERATION];
+
+function reviewToolOperationPath(args: unknown): string {
+	const operation = isRecord(args) ? args.operation : undefined;
+	if (
+		typeof operation !== "string" ||
+		!Object.values(REVIEW_CONTROLLER_OPERATION).includes(operation as ReviewControllerOperation)
+	) {
+		return "review";
+	}
+	return `review ${operation.replaceAll("-", " ")}`;
+}
 
 const REVIEW_CONTROLLER_PARAMETERS = {
 	type: "object",
@@ -4841,6 +4853,13 @@ function createGentleAiExtensionForTesting(
 		description: "Read one bounded, integrity-checked page of the controller-owned frozen changed scope. This read-only tool never inspects the ambient or candidate tree.",
 		parameters: REVIEW_SCOPE_PARAMETERS,
 		executionMode: "parallel",
+		renderCall(_args, theme, context) {
+			return renderGentleAiLifecycleCall(
+				"review scope",
+				theme,
+				context as GentleAiRenderContext | undefined,
+			);
+		},
 		async execute(_toolCallId, parameters) {
 			const input = parameters as ReviewScopeParameters;
 			const details = readCandidateContextManifestPage(input.manifest, input.sha256, input.cursor ?? 0);
@@ -4894,6 +4913,13 @@ function createGentleAiExtensionForTesting(
 		],
 		parameters: REVIEW_CONTROLLER_PARAMETERS,
 		executionMode: "sequential",
+		renderCall(args, theme, context) {
+			return renderGentleAiLifecycleCall(
+				reviewToolOperationPath(args),
+				theme,
+				context as GentleAiRenderContext | undefined,
+			);
+		},
 		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw new Error("Review controller operation was cancelled");
 			await authorizeDestructiveReviewOperation(parameters, ctx);
