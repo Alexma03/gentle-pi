@@ -384,10 +384,13 @@ async function run() {
 		assert.doesNotMatch(promptResult.systemPrompt, /default\s*\|\s*sonnet\s*\|\s*Non-SDD general delegation/);
 		assert.match(promptResult.systemPrompt, /openspec\/config\.yaml.*not session preflight/s);
 		assert.match(promptResult.systemPrompt, /Do not mark SDD preflight complete/);
-		assert.match(
-			promptResult.systemPrompt,
-			new RegExp(`${ROOT.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*assets.*sdd-orchestrator-workflow\\.md`),
+		assert.ok(
+			promptResult.systemPrompt.includes(
+				`Package assets root: \`${join(ROOT, "assets")}\`. Lazy asset paths below are relative to this root.`,
+			),
+			"parent prompt must declare the one absolute root for relative lazy asset paths",
 		);
+		assert.match(promptResult.systemPrompt, /`sdd-orchestrator-workflow\.md`/);
 		assert.doesNotMatch(
 			promptResult.systemPrompt,
 			new RegExp(ambientTestAssetsDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
