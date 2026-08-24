@@ -63,7 +63,23 @@ test("registered Gentle Review tools render reusable rose lifecycle call rows", 
 		["gentle_review", { operation: "status" }, "review status"],
 		["gentle_review", { operation: "future-operation", secret: "/private" }, "review"],
 		["gentle_review_scope", {}, "review scope"],
+		[
+			"gentle_review_capture",
+			{
+				lineageId: "lineage-id",
+				collectBinding: "binding-id",
+				sha256: "sha256:hash-value",
+				secret: "secret-value",
+				arbitrary: "arbitrary-value",
+			},
+			"review capture",
+		],
 	] as const;
+
+	assert.deepEqual(
+		[...new Set(cases.map(([name]) => name))].sort(),
+		[...tools.keys()].filter((name) => name.startsWith("gentle_")).sort(),
+	);
 
 	for (const [name, args, operationPath] of cases) {
 		const tool = tools.get(name);
@@ -97,6 +113,9 @@ test("registered Gentle Review tools render reusable rose lifecycle call rows", 
 		assert.equal(completedText, `<success>🌹︎ Gentle AI · completed · ${operationPath}</success>`);
 		assert.equal(failedText, `<error>🌹︎ Gentle AI · failed · ${operationPath}</error>`);
 		assert.doesNotMatch(renderComponent(failed), /future-operation|secret|private/);
+		for (const forbiddenValue of ["lineage-id", "binding-id", "sha256:hash-value", "secret-value", "arbitrary-value"]) {
+			assert.doesNotMatch(failedText, new RegExp(forbiddenValue));
+		}
 	}
 });
 
@@ -126,6 +145,7 @@ test("registered Gentle Review tools preserve result envelopes and default resul
 	assert.deepEqual(result.details, visibleEnvelope);
 	assert.equal(tools.get("gentle_review")?.renderResult, undefined);
 	assert.equal(scope.renderResult, undefined);
+	assert.equal(tools.get("gentle_review_capture")?.renderResult, undefined);
 });
 
 test("agent discovery skips skills directories", async (t) => {

@@ -4879,6 +4879,13 @@ function createGentleAiExtensionForTesting(
 		],
 		parameters: REVIEW_CAPTURE_PARAMETERS,
 		executionMode: "sequential",
+		renderCall(_args, theme, context) {
+			return renderGentleAiLifecycleCall(
+				"review capture",
+				theme,
+				context as GentleAiRenderContext | undefined,
+			);
+		},
 		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw new Error("Review capture was cancelled");
 			const details = await executeReviewCaptureOperation(
