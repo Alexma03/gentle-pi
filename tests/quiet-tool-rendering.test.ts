@@ -437,6 +437,34 @@ test("quiet tool rendering covers version and future standalone Gentle AI comman
 	}
 });
 
+test("quiet tool rendering recognizes exact quoted, escaped, Windows, and command-prefixed Gentle AI executables", () => {
+	const { pi, tools } = createPi();
+	withEnv({ GENTLE_PI_QUIET_TOOLS: undefined }, () => quietTools(pi as any));
+	const tool = tools.get("bash");
+	const routineCommands = [
+		"gentle-ai.exe version",
+		"'gentle-ai' version",
+		'"gentle-ai" version',
+		"'gentle-ai.exe' version",
+		'"gentle-ai.exe" version',
+		"gentle\\-ai version",
+		"gentle\\-ai\\.exe version",
+		"command -- gentle-ai version",
+		"command -- 'gentle-ai.exe' version",
+	] as const;
+
+	for (const command of routineCommands) {
+		const call = renderToString(tool.renderCall({ command }, passthroughTheme, { args: { command } }));
+		assert.equal(call.trimEnd(), "🌹︎ Gentle AI · running · version", command);
+	}
+
+	for (const command of ["'gentle-ai-copy' version", '"gentle-ai-copy.exe" version', "'gentle-ai' version && echo done"] as const) {
+		const call = renderToString(tool.renderCall({ command }, passthroughTheme, { args: { command } }));
+		assert.equal(call.trimEnd(), `$ ${command}`);
+		assert.doesNotMatch(call, /🌹︎ Gentle AI/);
+	}
+});
+
 test("quiet tool rendering hides the routine partial result because the header owns state", () => {
 	const { pi, tools } = createPi();
 	withEnv({ GENTLE_PI_QUIET_TOOLS: undefined }, () => quietTools(pi as any));
