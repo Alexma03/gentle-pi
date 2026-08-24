@@ -775,11 +775,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Auto-detect project stack and bootstrap openspec/config.yaml for SDD.",
 		handler: async (_args: unknown, ctx: any) => {
-			const prefs = await ensureSddPreflight(ctx, {
-				pi,
-				installAssets: (cwd) => installSddAssets(cwd, false),
-				applyModelConfig: () => applySavedModelConfig(ctx),
-			});
+			const prefs = await ensureSddPreflight(ctx, { pi, installAssets: (cwd) => installSddAssets(cwd, false), applyModelConfig: () => applySavedModelConfig(ctx) }, { promptFields: [] });
 
 			const detection = detectProject(ctx.cwd);
 			const testSummary = detection.testCommand

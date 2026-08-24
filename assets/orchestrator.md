@@ -67,7 +67,7 @@ The detailed SDD workflow is intentionally not embedded in this always-on parent
 
 That lazy surface contains the SDD phases, native dispatcher rules, status contract, preflight/init guards, artifact-store policy, execution mode, Strict TDD forwarding, phase result contract, and review workload guard.
 
-Hard preflight invariant: `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named "preflight" are not session preflight. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has either an injected `## SDD Session Preflight` block or an explicit user answer covering the preflight choices.
+Hard preflight invariant: `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named "preflight" are not session preflight. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has an injected `## SDD Session Preflight` block or a canonical-authority resolution. Defaults and capability constraints may resolve fields without confirmation prompts; preserve unresolved-choice and safety gates.
 
 ## Memory Contract
 
