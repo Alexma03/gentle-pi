@@ -17,7 +17,7 @@ import {
 	unregisterGentleAiDevBinary,
 	type GentleAiDevBinaryEnvironment,
 } from "../lib/gentle-ai-binary.ts";
-import { NativeReviewCliV213, createNativeReviewCli, type ExecFileAdapter } from "../lib/native-review-cli.ts";
+import { NativeReviewCliV216, createNativeReviewCli, type ExecFileAdapter } from "../lib/native-review-cli.ts";
 import { GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM, resolveGentleAiReleaseAsset } from "../scripts/gentle-ai-installer.mjs";
 import { requireNativeBinary } from "./support/native-binary-gate.ts";
 
@@ -192,7 +192,7 @@ test("runtime rejects an unverified binary, a symlinked manifest, and ambient ex
 	await writeFile(manifestTarget, `${JSON.stringify({ version: GENTLE_AI_VERSION, asset: `gentle-ai_${GENTLE_AI_VERSION}_${process.platform}_${process.arch === "x64" ? "amd64" : process.arch}.tar.gz`, assetSha256: "a".repeat(64), binarySha256 })}\n`);
 	await symlink(manifestTarget, manifestPath);
 	assert.throws(() => resolveGentleAiBinary(packageRoot, process.platform), /package-local-binary-missing/);
-	assert.throws(() => new NativeReviewCliV213(async () => VERSION, "gentle-ai"), /absolute package-local executable/);
+	assert.throws(() => new NativeReviewCliV216(async () => VERSION, "gentle-ai"), /absolute package-local executable/);
 });
 
 verifiedBinaryTest("runtime rejects malformed, unknown, wrong, and symlinked integrity paths", async () => {
@@ -292,16 +292,18 @@ verifiedBinaryTest("production native client never invokes a global gentle-ai ex
 	const calls: string[] = [];
 	const adapter: ExecFileAdapter = async (request) => {
 		calls.push(request.file);
-		if (request.arguments[0] === "version") return VERSION;
 		return {
 			...VERSION,
-			stdout: JSON.stringify({ operation: "review/start", lineage_id: "lineage", state: "reviewing", risk_level: "low", selected_lenses: [], changed_files: 0, changed_lines: 0, correction_budget: 0, action: "created", lenses_required: false, projection: "workspace" }),
+			stdout: readFileSync(join(import.meta.dirname, "..", "contracts", "review-integration", "v2", "fixtures", "status.fixture.json"), "utf8"),
 		};
 	};
 
-	await createNativeReviewCli(adapter, () => resolveGentleAiBinary(packageRoot, process.platform)).start({ cwd: packageRoot });
-	assert.deepEqual(calls, [binaryPath, binaryPath]);
+	await assert.rejects(
+		() => createNativeReviewCli(adapter, () => resolveGentleAiBinary(packageRoot, process.platform)).targetStatus!({ cwd: packageRoot, lineageId: "review-status-fixture" }),
+		/schema incompatible/,
+	);
+	assert.deepEqual(calls, [binaryPath]);
 	assert.ok(calls.every((file) => file !== "gentle-ai"));
-	assert.throws(() => new NativeReviewCliV213(adapter, "gentle-ai"), /absolute package-local executable/);
-	assert.throws(() => new NativeReviewCliV213(adapter, "./gentle-ai"), /absolute package-local executable/);
+	assert.throws(() => new NativeReviewCliV216(adapter, "gentle-ai"), /absolute package-local executable/);
+	assert.throws(() => new NativeReviewCliV216(adapter, "./gentle-ai"), /absolute package-local executable/);
 });

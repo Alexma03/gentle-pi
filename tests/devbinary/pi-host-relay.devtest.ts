@@ -192,7 +192,7 @@ function grantedConsentInvocation(value: unknown): string {
 }
 
 const FAKE_POSIX_PI = `#!/usr/bin/env node
-const fs = require("node:fs");
+import fs from "node:fs";
 const expectedArgv = JSON.parse(process.env.OPAQUE_PI_REVIEWER_ARGV);
 const expectedPaths = JSON.parse(process.env.OPAQUE_PI_REVIEWER_PATHS);
 const chunks = [];
@@ -351,7 +351,7 @@ test("dev-binary: POSIX Pi host relay captures one real B-target slot from an A-
 	);
 	assert.equal(reoffered, false, "the captured Pi slot must advance and never be reoffered");
 	assert.equal(advanced.authority?.state, "reviewing", "this devtest must not finalize, approve, or burn the review");
-	assert.notEqual(advanced.receipt.status, "available", "this devtest stops before any approval receipt exists");
+	assert.equal("receipt" in advanced, false, "last-event STATUS no longer exposes receipt state");
 	t.diagnostic(`captured Pi slot: lineage=${lineage}; subject_hash=${slot.subjectHash}; admission=completed; reoffered=false; authority=${advanced.authority?.state}`);
 
 	const sessionStatus = candidateStatus(RELAY_DEV_BINARY!, sessionA, sessionA, environment);
@@ -362,7 +362,7 @@ test("dev-binary: POSIX Pi host relay captures one real B-target slot from an A-
 // This completes the same organic A -> B path through correction evidence,
 // Go-owned targeted validation, and terminal approval. The only reviewer is the
 // fixed fake Pi executable below; no model, provider, or profile is selected.
-test("dev-binary: Pi controller keeps an explicit B root and selected-untracked binding through Go-owned validation approval", { skip: !RUNNABLE }, async (t) => {
+test.skip("dev-binary: Pi controller keeps an explicit B root and selected-untracked binding through Go-owned validation approval", { skip: "retired: capture-validation is now a native last-event closure, not a finalize lifecycle" }, async (t) => {
 	const sessionA = repository(t, "gentle-pi-combined-session-a-");
 	const targetB = repository(t, "gentle-pi-combined-target-b-");
 	const nestedTarget = join(targetB, "nested", "target");

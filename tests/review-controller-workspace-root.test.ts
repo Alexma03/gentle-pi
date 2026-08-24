@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createGentleAiExtension } from "../extensions/gentle-ai.ts";
+import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
 import { CandidateViewRegistry } from "../lib/review-candidate-view.ts";
 import type { AuthorityRepairAssessmentV1, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
@@ -83,14 +83,11 @@ function addWorktree(t: test.TestContext, cwd: string, branch: string): string {
 function fakeNative(overrides: Partial<NativeReviewCli> = {}): NativeReviewCli {
 	return {
 		start: async () => ({ lineageId: "native-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 7, correctionBudget: 4, action: "created", lensesRequired: true }),
-		finalize: async () => ({ lineageId: "native-lineage", state: "approved", action: "approved", storeRevision: "r1", receiptPath: "/opaque/receipt" }),
-		validate: async () => { throw new Error("validate is not expected in workspace-root tests"); },
-		bindSdd: async () => { throw new Error("bind-sdd is not expected in workspace-root tests"); },
 		sddStatus: async () => ({ ready: false }),
 		reviewStatus: async () => ({ schema: "gentle-ai.review-authority-status/v1", repository: "/repo", complete: true, authoritative: true, status: "clean", entries: [], locks: [], diagnostics: [], raw: { schema: "gentle-ai.review-authority-status/v1", operation: "review/status", repository: "/repo", complete: true, authoritative: true, status: "clean", entries: [], locks: [], diagnostics: [] } }),
 		targetStatus: async (request) => request.lineageId === undefined
 			? candidateStartTargetStatus(request)
-			: candidateFinalizeTargetStatus(request, request.lineageId),
+			: candidateTargetStatus(request, request.lineageId),
 		...overrides,
 	};
 }
@@ -114,8 +111,7 @@ function targetStatusFixture(options: {
 	intendedUntracked?: readonly string[];
 } = {}): ReviewStatusV3 {
 	const applicability = options.applicability ?? "current_target";
-	const action = options.action ?? (applicability === "current_target" ? "finalize" : "start");
-	const lineageId = options.lineageId ?? "native-lineage";
+	const action = options.action ?? (applicability === "current_target" ? "stop" : "start");	const lineageId = options.lineageId ?? "native-lineage";
 	const authorityState = options.authorityState ?? "reviewing";
 	const sha = `sha256:${"a".repeat(64)}`;
 	const tree = options.currentCandidateTree ?? "b".repeat(40);
@@ -213,7 +209,7 @@ function candidateStartTargetStatus(request: Parameters<NonNullable<NativeReview
 	}
 }
 
-function candidateFinalizeTargetStatus(request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0], lineageId: string): ReviewStatusV3 {
+function candidateTargetStatus(request: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0], lineageId: string): ReviewStatusV3 {
 	let candidate: ReturnType<CandidateViewRegistry["create"]> | undefined;
 	try {
 		candidate = new CandidateViewRegistry().create({ contributorRoot: request.cwd });
@@ -227,42 +223,6 @@ function candidateFinalizeTargetStatus(request: Parameters<NonNullable<NativeRev
 		candidate?.cleanup();
 	}
 }
-
-test("same-session registrations retain START selection for validation-only FINALIZE", async (t) => {
-	const cwd = repository(t);
-	writeFileSync(join(cwd, "selected.ts"), "export const selected = true;\n");
-	const selection = { untrackedScope: "select" as const, expectedUntrackedInventory: `sha256:${"e".repeat(64)}`, intendedUntracked: ["selected.ts"] };
-	const frozen = new CandidateViewRegistry().create({ contributorRoot: cwd, intendedUntracked: selection.intendedUntracked });
-	const target = targetStatusFixture({
-		lineageId: "retained-untracked",
-		authorityState: "correction_required",
-		baseTree: frozen.baseTree,
-		currentCandidateTree: frozen.candidateTree,
-		paths: frozen.paths,
-		intendedUntracked: selection.intendedUntracked,
-	});
-	frozen.cleanup();
-	const request = { schema: "gentle-ai.review-targeted-validation-request/v1" as const, requestHash: `sha256:${"9".repeat(64)}`, lineageId: target.authority!.lineageId, expectedRevision: target.authority!.revision, targetIdentity: target.targetIdentity, fixFindingIds: [], projection: "workspace" as const, correctionCandidateTree: target.projection.currentCandidateTree, correctionTargetIdentity: target.targetIdentity, correctionPaths: target.projection.paths, correctionPathsDigest: target.projection.pathsDigest };
-	target.validationRequest = request;
-	target.nextTransition = { kind: "collect", reasonCode: "targeted_validation_required", collect: { inputs: [{ name: "targeted_validation", schema: request.schema, captureOperation: "external.run_targeted_validation", arguments: [], validationRequest: request }] } };
-	const calls: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
-	const targetStatus: NonNullable<NativeReviewCli["targetStatus"]> = async (status) => {
-		calls.push(status);
-		return status.lineageId === undefined ? candidateStartTargetStatus(status) : target;
-	};
-	const sessionId = "cross-registration-untracked-selection";
-	const ctx = { ...context(cwd), sessionManager: { getSessionId: () => sessionId } } as ExtensionContext;
-	const { controller: start } = runtime(fakeNative({
-		targetStatus,
-		start: async () => ({ lineageId: "retained-untracked", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 2, changedLines: 2, correctionBudget: 1, action: "created", lensesRequired: true }),
-	}));
-	const { controller: finalize } = runtime(fakeNative({ targetStatus }));
-	const started = await start.execute("retained-start", { operation: "start", input: JSON.stringify({ mode: "ordinary", ...selection }) }, undefined, undefined, ctx);
-	assert.equal((started.details as { result: { lineage_id: string } }).result.lineage_id, "retained-untracked");
-	const completed = await finalize.execute("retained-finalize", { operation: "finalize", lineageId: "retained-untracked", input: JSON.stringify({ validation: { request_hash: request.requestHash.slice(7), correction_ids: [], original_criteria: { passed: true, evidence: ["acceptance passes"] }, correction_regression: { passed: true, evidence: ["regression passes"] }, fix_caused_findings: [], follow_ups: [] } }) }, undefined, undefined, ctx);
-	assert.doesNotMatch(JSON.stringify(completed.details), /evidence-first-ordering/);
-	assert.ok(calls.length > 1 && calls.every(({ untrackedScope, expectedUntrackedInventory, intendedUntracked }) => untrackedScope === selection.untrackedScope && expectedUntrackedInventory === selection.expectedUntrackedInventory && JSON.stringify(intendedUntracked) === JSON.stringify(selection.intendedUntracked)));
-});
 
 test("INSPECT and STATUS operate on the explicit workspace root while the session cwd stays elsewhere", async (t) => {
 	const sessionCwd = repository(t);
@@ -317,7 +277,7 @@ test("START freezes the candidate from the explicit workspace root and returns t
 	candidateViews.cleanup(view.token);
 });
 
-test("an omitted workspaceRoot canonicalizes a nested same-worktree session before every lifecycle operation", async (t) => {
+test("an omitted workspaceRoot canonicalizes a nested same-worktree session before supported operations", async (t) => {
 	const root = repository(t);
 	const sessionCwd = join(root, "nested");
 	mkdirSync(sessionCwd);
@@ -325,14 +285,12 @@ test("an omitted workspaceRoot canonicalizes a nested same-worktree session befo
 	const candidateViews = new CandidateViewRegistry();
 	const targetStatusCwds: string[] = [];
 	const startRequests: Parameters<NativeReviewCli["start"]>[0][] = [];
-	const finalizeCwds: string[] = [];
 	const { controller } = runtime(fakeNative({
-		targetStatus: async (request) => { targetStatusCwds.push(request.cwd); return request.lineageId === undefined ? candidateStartTargetStatus(request) : candidateFinalizeTargetStatus(request, request.lineageId); },
+		targetStatus: async (request) => { targetStatusCwds.push(request.cwd); return request.lineageId === undefined ? candidateStartTargetStatus(request) : candidateTargetStatus(request, request.lineageId); },
 		start: async (request) => {
 			startRequests.push(request);
 			return { lineageId: "session-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
 		},
-		finalize: async (request) => { finalizeCwds.push(request.cwd); return { lineageId: "session-lineage", state: "approved", action: "approved", storeRevision: "r1" }; },
 	}), candidateViews);
 	const ctx = context(sessionCwd);
 	await controller.execute("inspect-session", { operation: "inspect" }, undefined, undefined, ctx);
@@ -346,13 +304,11 @@ test("an omitted workspaceRoot canonicalizes a nested same-worktree session befo
 	assert.deepEqual(startRequests, [{ cwd: root, targetIdentity: `sha256:${"a".repeat(64)}`, projection: "workspace" }]);
 	const view = candidateViews.resolveForLens("session-lineage", "review-reliability");
 	assert.equal(details.actor_binding.candidate_root, view.root);
-	const finalized = await controller.execute("finalize-session", { operation: "finalize", lineageId: "session-lineage", input: JSON.stringify({}) }, undefined, undefined, ctx);
-	assert.equal((finalized.details as { workspace_root: string }).workspace_root, root);
 	assert.ok(targetStatusCwds.every((cwd) => cwd === root), JSON.stringify(targetStatusCwds));
-	assert.deepEqual(finalizeCwds, [root]);
+	candidateViews.cleanup(view.token);
 });
 
-test("an explicit nested foreign workspace root canonically owns inspect, status, START, and omitted-root FINALIZE", async (t) => {
+test("an explicit nested foreign workspace root canonically owns inspect, status, and START", async (t) => {
 	const sessionCwd = repository(t, "gentle-pi-session-a-");
 	const target = repository(t, "gentle-pi-target-b-");
 	const nested = join(target, "nested");
@@ -362,7 +318,6 @@ test("an explicit nested foreign workspace root canonically owns inspect, status
 	const targetStatusCwds: string[] = [];
 	const targetStatusRequests: Parameters<NonNullable<NativeReviewCli["targetStatus"]>>[0][] = [];
 	const startCwds: string[] = [];
-	const finalizeCwds: string[] = [];
 	const candidateViews = new CandidateViewRegistry();
 	let initialCrossRootStatus = true;
 	const { controller } = runtime(fakeNative({
@@ -377,15 +332,11 @@ test("an explicit nested foreign workspace root canonically owns inspect, status
 			}
 			return request.lineageId === undefined
 				? candidateStartTargetStatus(request)
-				: candidateFinalizeTargetStatus(request, request.lineageId);
+				: candidateTargetStatus(request, request.lineageId);
 		},
 		start: async (request) => {
 			startCwds.push(request.cwd);
 			return { lineageId: "cross-root-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true };
-		},
-		finalize: async (request) => {
-			finalizeCwds.push(request.cwd);
-			return { lineageId: "cross-root-lineage", state: "approved", action: "approved", storeRevision: "r1" };
 		},
 	}), candidateViews);
 
@@ -394,19 +345,17 @@ test("an explicit nested foreign workspace root canonically owns inspect, status
 	const inspect = await controller.execute("inspect-target-b", { operation: "inspect", workspaceRoot: nested }, undefined, undefined, context(sessionCwd));
 	const status = await controller.execute("status-target-b", { operation: "status", lineageId: "cross-root-lineage", workspaceRoot: nested, input: JSON.stringify({ untrackedScope: "select", expectedUntrackedInventory: digest, intendedUntracked }) }, undefined, undefined, context(sessionCwd));
 	const started = await controller.execute("start-target-b", { operation: "start", workspaceRoot: nested, input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(sessionCwd));
-	const finalized = await controller.execute("finalize-target-b", { operation: "finalize", lineageId: "cross-root-lineage", input: JSON.stringify({}) }, undefined, undefined, context(sessionCwd));
 
-	for (const result of [inspect, status, started, finalized]) {
+	for (const result of [inspect, status, started]) {
 		assert.equal((result.details as { workspace_root?: string }).workspace_root, root);
 	}
 	const statusDetails = status.details as { status?: string; result?: { authority?: { state?: string } } };
-	assert.equal(statusDetails.status, "in-progress");
+	assert.equal(statusDetails.status, "blocked");
 	assert.equal(statusDetails.result?.authority?.state, "correction_required");
 	assert.deepEqual(targetStatusRequests[1], { cwd: root, lineageId: "cross-root-lineage", untrackedScope: "select", expectedUntrackedInventory: digest, intendedUntracked });
-	assert.deepEqual(targetStatusRequests[3], { cwd: root, lineageId: "cross-root-lineage", agent: "pi", untrackedScope: "select", expectedUntrackedInventory: digest, intendedUntracked });
 	assert.ok(targetStatusCwds.every((cwd) => cwd === root), JSON.stringify(targetStatusCwds));
 	assert.deepEqual(startCwds, [root]);
-	assert.deepEqual(finalizeCwds, [root]);
+	candidateViews.cleanup(candidateViews.resolveForLens("cross-root-lineage", "review-reliability").token);
 });
 
 
@@ -421,7 +370,7 @@ test("STATUS relays exclude selection and rejects malformed input before native 
 	}));
 	const digest = `sha256:${"c".repeat(64)}`;
 	const excluded = await controller.execute("status-exclude", { operation: "status", lineageId: "excluded-lineage", input: JSON.stringify({ untrackedScope: "exclude", expectedUntrackedInventory: digest, intendedUntracked: [] }) }, undefined, undefined, context(cwd));
-	assert.equal((excluded.details as { status?: string }).status, "in-progress");
+	assert.equal((excluded.details as { status?: string }).status, "blocked");
 	assert.deepEqual(requests, [{ cwd, lineageId: "excluded-lineage", untrackedScope: "exclude", expectedUntrackedInventory: digest, intendedUntracked: [] }]);
 
 	for (const [input, reason] of [
@@ -517,27 +466,62 @@ test("workspaceRoot fails closed before any native call for invalid target paths
 	assert.equal(nativeCalls, 0);
 });
 
-test("FINALIZE gives an explicit linked-worktree workspaceRoot precedence over the candidate view", async (t) => {
+function providerRoleBinding(lineageId: string) {
+	return {
+		name: "provider_targeted_validator",
+		schema: "https://gentle-ai.dev/schema/review/targeted-validator/v1",
+		captureOperation: "review.capture-validation",
+		arguments: [
+			{ name: "lineage", value: lineageId, token: `--lineage=${lineageId}` },
+			{ name: "target", value: `sha256:${"a".repeat(64)}`, token: `--target=sha256:${"a".repeat(64)}` },
+			{ name: "agent", value: "pi", token: "--agent=pi" },
+			{ name: "execute", value: "true", token: "--execute=true" },
+		],
+	};
+}
+
+test("same-session START binding migrates to one validation capture without a FINALIZE operation", async (t) => {
 	const sessionCwd = repository(t);
-	const worktree = addWorktree(t, sessionCwd, "feat-finalize");
-	writeFileSync(join(worktree, "app.ts"), "export const value = 4;\n");
+	const worktree = addWorktree(t, sessionCwd, "feat-last-event");
+	writeFileSync(join(worktree, "app.ts"), "export const value = 2;\n");
 	const candidateViews = new CandidateViewRegistry();
-	const finalizeCwds: string[] = [];
-	const { controller } = runtime(fakeNative({
-		start: async () => ({ lineageId: "finalize-lineage", state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true }),
-		finalize: async (request) => {
-			finalizeCwds.push(request.cwd);
-			return { lineageId: "finalize-lineage", state: "approved", action: "approved", storeRevision: "r1" };
+	const lineageId = "workspace-last-event";
+	const binding = providerRoleBinding(lineageId);
+	let captureCalls = 0;
+	const native = fakeNative({
+		targetStatus: async (request) => request.lineageId === undefined
+			? candidateStartTargetStatus(request)
+			: ({ ...candidateTargetStatus(request, lineageId), nextTransition: { kind: "collect", reasonCode: "provider_role_required", collect: { inputs: [binding] } } } as unknown as ReviewStatusV3),
+		start: async () => ({ lineageId, state: "reviewing", riskLevel: "medium", selectedLenses: ["review-reliability"], changedFiles: 1, changedLines: 1, correctionBudget: 1, action: "created", lensesRequired: true }),
+		captureProviderRole: async (request) => {
+			captureCalls += 1;
+			assert.equal(request.captureOperation, "review.capture-validation");
+			return { schema: "gentle-ai.review-last-event-closure/v1", operation: "review.capture-validation", lineageId, state: "approved", storeRevision: `sha256:${"a".repeat(64)}` };
 		},
-	}), candidateViews);
-	await controller.execute("start-finalize-b", { operation: "start", workspaceRoot: worktree, input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(sessionCwd));
-	const candidateRoot = candidateViews.resolveForLens("finalize-lineage", "review-reliability").root;
-	const input = JSON.stringify({});
-	const finalized = await controller.execute("finalize-explicit-root", { operation: "finalize", lineageId: "finalize-lineage", workspaceRoot: worktree, input }, undefined, undefined, context(sessionCwd));
-	const root = realpathSync(worktree);
-	assert.equal((finalized.details as { workspace_root?: string }).workspace_root, root);
-	assert.equal((finalized.details as { result?: { state?: string } }).result?.state, "approved");
-	assert.deepEqual(finalizeCwds, [root]);
-	assert.notEqual(finalizeCwds[0], candidateRoot);
-	assert.notEqual(finalizeCwds[0], sessionCwd);
+	});
+	const { controller } = runtime(native, candidateViews);
+	await controller.execute("start", { operation: "start", workspaceRoot: worktree, input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, context(sessionCwd));
+	const captured = await __testing.executeReviewCaptureOperation({ lineageId, workspaceRoot: worktree, collectBinding: JSON.stringify(binding) }, sessionCwd, native, undefined, candidateViews);
+	assert.equal(captured.outcome, "native-last-event-closure");
+	assert.equal(captured.status, "closed");
+	assert.equal(captureCalls, 1);
+	candidateViews.cleanupTerminal(lineageId, "approved", realpathSync(worktree));
+});
+
+test("an explicit linked-worktree root owns STATUS collect capture over the session candidate root", async (t) => {
+	const sessionCwd = repository(t);
+	const worktree = addWorktree(t, sessionCwd, "feat-explicit-capture");
+	const lineageId = "explicit-worktree-capture";
+	const binding = providerRoleBinding(lineageId);
+	const observedRoots: string[] = [];
+	const native = {
+		targetStatus: async (request: { cwd: string }) => {
+			observedRoots.push(request.cwd);
+			return { ...targetStatusFixture({ lineageId }), nextTransition: { kind: "collect", reasonCode: "provider_role_required", collect: { inputs: [binding] } } } as unknown as ReviewStatusV3;
+		},
+		captureProviderRole: async () => ({ schema: "gentle-ai.review-last-event-closure/v1", operation: "review.capture-validation", lineageId, state: "approved", storeRevision: `sha256:${"a".repeat(64)}` }),
+	} as unknown as NativeReviewCli;
+	const result = await __testing.executeReviewCaptureOperation({ lineageId, workspaceRoot: worktree, collectBinding: JSON.stringify(binding) }, sessionCwd, native);
+	assert.equal(result.outcome, "native-last-event-closure");
+	assert.deepEqual(observedRoots, [realpathSync(worktree)]);
 });

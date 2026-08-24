@@ -11,16 +11,16 @@ import {
 	decodeReviewConsentV2,
 	decodeReviewFailureV2,
 	decodeReviewNextTransitionV3,
-	decodeReviewOperationV2,
 	decodeReviewProjectionV1,
 	decodeReviewRepairV2,
 	decodeReviewStartV3,
 	decodeReviewStatusV3,
 } from "../lib/review-integration-v2.ts";
-import { decodeReviewOperationV2 as decodeRuntimeReviewOperationV2 } from "../runtime/review-integration-v2.mjs";
 
 const fixtureRoot = join(process.cwd(), "contracts", "review-integration", "v2", "fixtures");
+const devFixtureRoot = join(process.cwd(), "tests", "fixtures", "devbinary");
 const fixture = <T = unknown>(name: string): T => JSON.parse(readFileSync(join(fixtureRoot, name), "utf8")) as T;
+const devFixture = <T = unknown>(name: string): T => JSON.parse(readFileSync(join(devFixtureRoot, name), "utf8")) as T;
 const executableDigest = "dcc846103b16d365eaeeb9d7f289c23fc4f2897f23def1cb3fe7f05557b64705";
 const digest = `sha256:${"a".repeat(64)}`;
 
@@ -57,10 +57,9 @@ function assertAdditionalProperty(decoder: Decoder, source: JsonObject, path: re
 	assert.throws(() => decoder(candidate), /not allowed/, path.length === 0 ? "top-level" : path.join("."));
 }
 
-test("every published review integration v2 fixture decodes", () => {
+test("current review integration fixtures decode", () => {
 	assert.equal(decodeReviewCapabilitiesV2(fixture("capabilities.fixture.json"), executableDigest).contract, REVIEW_INTEGRATION_CONTRACT);
 	assert.equal(decodeReviewStartV3(fixture("start.fixture.json")).riskLevel, "high");
-	assert.equal(decodeReviewStatusV3(fixture("status.fixture.json")).contract, REVIEW_INTEGRATION_CONTRACT);
 	assert.equal(decodeReviewConsentV2(fixture("consent.fixture.json")).action, "consent_required");
 });
 
@@ -108,10 +107,52 @@ test("START enforces required, exact, and enum-bounded payloads", () => {
 	}
 });
 
-test("status enforces required properties and rejects additional keys", () => {
-	const source = fixture<JsonObject>("status.fixture.json");
-	assertRequired(decodeReviewStatusV3, source, ["schema", "contract", "operation", "applicability", "receipt", "action", "replayability", "target_identity", "projection", "repair", "candidates"]);
-	assertAdditionalProperty(decodeReviewStatusV3, source);
+test("start/v3 transports the published selected_lenses wire contract without Pi-owned risk policy", () => {
+	const captured = devFixture<JsonObject>("start-v3-zero-lens-closed.captured.json");
+	const decoded = decodeReviewStartV3(captured);
+	assert.equal(decoded.action, "closed");
+	assert.equal(decoded.lensesRequired, false);
+	assert.deepEqual(decoded.selectedLenses, []);
+
+	for (const riskLevel of ["medium", "high"] as const) {
+		const noLens = clone(captured);
+		noLens.risk_level = riskLevel;
+		assert.doesNotThrow(() => decodeReviewStartV3(noLens));
+	}
+
+	const nullLenses = clone(captured);
+	nullLenses.selected_lenses = null;
+	assert.throws(() => decodeReviewStartV3(nullLenses), /selected_lenses.*invalid length/);
+
+	const unknownLens = clone(captured);
+	unknownLens.selected_lenses = ["review-future"];
+	assert.throws(() => decodeReviewStartV3(unknownLens), /selected_lenses.*unsupported/);
+
+	const tooManyLenses = clone(captured);
+	tooManyLenses.selected_lenses = ["review-risk", "review-resilience", "review-readability", "review-reliability", "review-future"];
+	assert.throws(() => decodeReviewStartV3(tooManyLenses), /selected_lenses.*invalid length/);
+
+	const duplicateLenses = clone(captured);
+	duplicateLenses.selected_lenses = ["review-risk", "review-risk"];
+	assert.throws(() => decodeReviewStartV3(duplicateLenses), /selected_lenses.*duplicates/);
+
+	const wrongSchema = clone(captured);
+	wrongSchema.schema = "gentle-ai.review-integration.start/v2";
+	assert.throws(() => decodeReviewStartV3(wrongSchema), /schema/);
+
+	const invalidAction = clone(captured);
+	invalidAction.action = "dispatch-locally";
+	assert.throws(() => decodeReviewStartV3(invalidAction), /action.*unsupported/);
+
+	const invalidLensesRequired = clone(captured);
+	invalidLensesRequired.lenses_required = "false";
+	assert.throws(() => decodeReviewStartV3(invalidLensesRequired), /lenses_required/);
+});
+
+test("historical status fixture with a receipt is rejected after receipt retirement", () => {
+	// This archived fixture is pinned for schema-rejection coverage only. Its
+	// bytes retain the retired receipt surface and must never regain authority.
+	assert.throws(() => decodeReviewStatusV3(fixture("status.fixture.json")), /receipt.*not allowed/);
 });
 
 test("projection enforces every required property and rejects additional keys", () => {
@@ -124,7 +165,7 @@ test("failure enforces exact keys, enums, and identifiers", () => {
 	const source: JsonObject = {
 		schema: "gentle-ai.review-integration.failure/v2",
 		contract: REVIEW_INTEGRATION_CONTRACT,
-		operation: "review.finalize",
+		operation: "review.capture-result",
 		phase: "pre_native",
 		code: "gate_scope_changed",
 		message: "the target scope changed since START",
@@ -141,86 +182,6 @@ test("failure enforces exact keys, enums, and identifiers", () => {
 	const badCode = clone(source);
 	badCode.code = "Bad-Code";
 	assert.throws(() => decodeReviewFailureV2(badCode), /code/);
-});
-
-function finalizeEnvelope(): JsonObject {
-	return {
-		schema: "gentle-ai.review-integration.operation/v2",
-		contract: REVIEW_INTEGRATION_CONTRACT,
-		operation: "review.finalize",
-		result: {
-			operation: "review/finalize",
-			lineage_id: "review-fixture",
-			state: "approved",
-			action: "publish",
-			store_revision: digest,
-		},
-	};
-}
-
-test("operation envelopes strictly bind the outer operation to one exact result variant", () => {
-	const envelope = finalizeEnvelope();
-	assert.equal(decodeReviewOperationV2(envelope).operation, "review.finalize");
-	assertAdditionalProperty(decodeReviewOperationV2, envelope);
-	assertNestedRequired(decodeReviewOperationV2, envelope, ["result"], ["operation", "lineage_id", "state", "action", "store_revision"]);
-});
-
-function advisoryFindings(): JsonObject {
-	return {
-		statement: "Approval stands; these findings require no correction.",
-		findings: [{
-			id: "review-advisory-001",
-			lens: "review-reliability",
-			location: "lib/review.ts:12",
-			severity: "WARNING",
-			disposition: "informational",
-		}],
-	};
-}
-
-test("operation finalize accepts published advisory_findings and rejects malformed advisory rows", () => {
-	const decoders: readonly Decoder[] = [decodeReviewOperationV2, decodeRuntimeReviewOperationV2];
-	for (const decoder of decoders) {
-		const accepted = finalizeEnvelope();
-		(accepted.result as JsonObject).advisory_findings = advisoryFindings();
-		const decoded = decoder(accepted) as { advisoryFindings?: unknown };
-		assert.deepEqual(decoded.advisoryFindings, advisoryFindings());
-
-		for (const mutate of [
-			(value: JsonObject) => { ((value.findings as JsonObject[])[0]!).severity = "NOTICE"; },
-			(value: JsonObject) => { ((value.findings as JsonObject[])[0]!).disposition = "corrected"; },
-			(value: JsonObject) => { ((value.findings as JsonObject[])[0]!).id = 1; },
-			(value: JsonObject) => { ((value.findings as JsonObject[])[0]!).unadvertised = true; },
-			(value: JsonObject) => { value.findings = []; },
-		] as const) {
-			const malformed = finalizeEnvelope();
-			const findings = advisoryFindings();
-			mutate(findings);
-			(malformed.result as JsonObject).advisory_findings = findings;
-			assert.throws(() => decoder(malformed));
-		}
-
-		const wrongState = finalizeEnvelope();
-		(wrongState.result as JsonObject).state = "reviewing";
-		(wrongState.result as JsonObject).advisory_findings = advisoryFindings();
-		assert.throws(() => decoder(wrongState), /approved/);
-
-		const wrongOperation: JsonObject = {
-			schema: "gentle-ai.review-integration.operation/v2",
-			contract: REVIEW_INTEGRATION_CONTRACT,
-			operation: "review.validate",
-			result: {
-				schema: "gentle-ai.review-gate-result/v1",
-				result: "allow",
-				allowed: true,
-				action: "continue",
-				reason: "receipt matches",
-				context: { gate: "pre-commit" },
-				advisory_findings: advisoryFindings(),
-			},
-		};
-		assert.throws(() => decoder(wrongOperation), /advisory_findings.*not allowed/);
-	}
 });
 
 test("net-new decoders: consent, next-transition, and artifact-subject reject malformed payloads", () => {
@@ -374,97 +335,11 @@ test("START independently binds base/candidate tree and the target-mode overlay 
 	assert.throws(() => decodeReviewStartV3(manifestWithoutTrees), /changed_path_manifest/);
 });
 
-test("status enforces authority/frozen/receipt conditionals and decodes the required repair field", () => {
-	const current = fixture<JsonObject>("status.fixture.json");
-	const decoded = decodeReviewStatusV3(current);
-	assert.equal(decoded.repair.status, "unsupported");
-	assert.equal(decoded.repair.counts.eligibleCandidates, 0);
-
-	const missingAuthority = clone(current);
-	delete missingAuthority.authority;
-	assert.throws(() => decodeReviewStatusV3(missingAuthority), /requires authority/);
-
-	const compactMissingFrozen = clone(current);
-	delete compactMissingFrozen.frozen;
-	assert.throws(() => decodeReviewStatusV3(compactMissingFrozen), /requires frozen/);
-
-	const legacyWithFrozen = clone(current);
-	(legacyWithFrozen.authority as JsonObject).version = "legacy-v1";
-	(legacyWithFrozen.receipt as JsonObject).status = "expected_missing";
-	assert.throws(() => decodeReviewStatusV3(legacyWithFrozen), /legacy status cannot expose frozen/);
-});
-
-test("status validation_request and retry_final_verification require their exact authority preconditions", () => {
-	const current = fixture<JsonObject>("status.fixture.json");
-	const withValidationRequest = clone(current);
-	withValidationRequest.validation_request = {
-		schema: "gentle-ai.review-targeted-validation-request/v1",
-		request_hash: digest,
-		lineage_id: "review-status-fixture",
-		expected_revision: digest,
-		target_identity: (current.target_identity as string),
-		fix_finding_ids: ["finding-1"],
-		projection: "workspace",
-		correction_candidate_tree: "a".repeat(40),
-		correction_target_identity: digest,
-		correction_paths: ["tracked.txt"],
-		correction_paths_digest: digest,
-	};
-	// authority.state is "reviewing" in the fixture, not correction_required.
-	assert.throws(() => decodeReviewStatusV3(withValidationRequest), /correction_required/);
-
-	const retryWithoutIncident = clone(current);
-	retryWithoutIncident.action = "retry_final_verification";
-	retryWithoutIncident.action_disposition = "final_verification_retry";
-	(retryWithoutIncident.authority as JsonObject).state = "escalated";
-	assert.throws(() => decodeReviewStatusV3(retryWithoutIncident), /requires final_verification_retry/);
-});
-
-test("operation envelopes decode validate, bind_sdd, and retry_final_verification result variants", () => {
-	const validateEnvelope: JsonObject = {
-		schema: "gentle-ai.review-integration.operation/v2",
-		contract: REVIEW_INTEGRATION_CONTRACT,
-		operation: "review.validate",
-		result: { schema: "gentle-ai.review-gate-result/v1", result: "allow", allowed: true, action: "publish", reason: "receipt matches", context: { gate: "pre-pr" } },
-	};
-	assert.equal(decodeReviewOperationV2(validateEnvelope).operation, "review.validate");
-
-	const bindSddEnvelope: JsonObject = {
-		schema: "gentle-ai.review-integration.operation/v2",
-		contract: REVIEW_INTEGRATION_CONTRACT,
-		operation: "review.bind_sdd",
-		result: { schema: "gentle-ai.sdd-review-binding/v1", revision: digest, change: "migrate-review-integration-v2", lineage: "review-fixture", authority_revision: digest, receipt_hash: digest, gate_context: { gate: "post-apply" } },
-	};
-	assert.equal(decodeReviewOperationV2(bindSddEnvelope).operation, "review.bind_sdd");
-
-	const retryEnvelope: JsonObject = {
-		schema: "gentle-ai.review-integration.operation/v2",
-		contract: REVIEW_INTEGRATION_CONTRACT,
-		operation: "review.retry_final_verification",
-		result: {
-			operation: "review.retry_final_verification",
-			predecessor_lineage_id: "review-predecessor",
-			predecessor_revision: digest,
-			lineage_id: "review-successor",
-			state: "validating",
-			store_revision: digest,
-			target_identity: digest,
-			incident_digest: digest,
-			recovery_disposition: "final_verification_retry",
-		},
-	};
-	assert.equal(decodeReviewOperationV2(retryEnvelope).operation, "review.retry_final_verification");
-
-	const crossedResult = clone(validateEnvelope);
-	crossedResult.result = bindSddEnvelope.result;
-	assert.throws(() => decodeReviewOperationV2(crossedResult), /does not match|not allowed|required/);
-});
-
 test("failure context accepts scope_change or binding_revision but rejects both or neither", () => {
 	const base: JsonObject = {
 		schema: "gentle-ai.review-integration.failure/v2",
 		contract: REVIEW_INTEGRATION_CONTRACT,
-		operation: "review.finalize",
+		operation: "review.capture-result",
 		phase: "pre_native",
 		code: "gate_scope_changed",
 		message: "the target scope changed since START",
@@ -618,10 +493,10 @@ test("repair eligible preflight with wrong required_inputs order is rejected", (
 test("next_transition.execute accepts the optional selector_arguments and artifacts the schema declares", () => {
 	const base = {
 		kind: "execute" as const,
-		reason_code: "captured_results_ready",
+		reason_code: "fresh_target_ready",
 		execute: {
-			operation: "review.finalize",
-			command: "gentle-ai review finalize --lineage=review-96f29cbd865e77a9 --captured-results=true",
+			operation: "review.start",
+			command: "gentle-ai review start --lineage=review-96f29cbd865e77a9",
 			arguments: [{ name: "lineage", value: "review-96f29cbd865e77a9", token: "--lineage=review-96f29cbd865e77a9" }],
 			preconditions: [{ name: "target_identity", value: "sha256:" + "9".repeat(64) }],
 			binding: { target_identity: "sha256:" + "9".repeat(64) },
@@ -629,78 +504,16 @@ test("next_transition.execute accepts the optional selector_arguments and artifa
 	};
 
 	assert.doesNotThrow(() => decodeReviewNextTransitionV3(base));
-	assert.doesNotThrow(() => decodeReviewNextTransitionV3({ ...base, execute: { ...base.execute, artifacts: [{ name: "receipt", path: "review-receipt.json" }] } }));
+	assert.doesNotThrow(() => decodeReviewNextTransitionV3({ ...base, execute: { ...base.execute, artifacts: [{ name: "start-record", path: "review-start.json" }] } }));
 	assert.doesNotThrow(() => decodeReviewNextTransitionV3({ ...base, execute: { ...base.execute, selector_arguments: [{ name: "projection", value: "workspace", token: "--projection=workspace" }] } }));
-});
-
-test("next_transition.execute.binding stays open, as its schema declares no properties", () => {
-	const withContext = {
-		kind: "execute" as const,
-		reason_code: "approved_receipt_ready",
-		execute: {
-			operation: "review.validate",
-			arguments: [{ name: "gate", value: "pre-commit", token: "--gate=pre-commit" }],
-			preconditions: [{ name: "target_identity", value: "sha256:" + "8".repeat(64) }],
-			// The provider sends this. The schema constrains nothing here, so Pi
-			// closing the object was stricter than the contract.
-			binding: { target_identity: "sha256:" + "8".repeat(64), repository_context: "rctx1_" + "c".repeat(64) },
-		},
-	};
-
-	assert.doesNotThrow(() => decodeReviewNextTransitionV3(withContext));
 });
 
 // gentle-pi#311 P4-roles: the two Go-owned non-lens provider role capture
 // operations render SELF-CONTAINED vectors (binding tokens + --agent=pi
-// --execute=true). Their schemas are pinned, capture-validation carries the
-// frozen validation request, and a submission descriptor on either one is a
-// contract violation (it would hand the caller a way to author the verdict).
+// --execute=true). Their schemas are pinned, and a submission descriptor on
+// either one is a contract violation because it would hand the caller a way
+// to author the verdict.
 test("next_transition decodes the self-contained provider role capture vectors strictly", () => {
-	const tree = "b".repeat(40);
-	const policyContent = "# frozen targeted-validation policy\r\nrule: preserve exact causal evidence\t\n";
-	const validationRequest = {
-		schema: "gentle-ai.review-targeted-validation-request/v1",
-		request_hash: digest,
-		lineage_id: "review-fixture",
-		expected_revision: digest,
-		target_identity: digest,
-		fix_finding_ids: ["RISK-001"],
-		policy_content: policyContent,
-		fix_findings: [{
-			id: "RISK-001",
-			lens: "review-risk",
-			location: "lib/a.ts:1",
-			severity: "BLOCKER",
-			claim: "the corrected candidate must retain its proof",
-			proof_refs: ["lib/a.ts:1"],
-			evidence_class: "deterministic",
-			causal_disposition: "introduced",
-		}],
-		fix_classifications: [{
-			finding_id: "RISK-001",
-			severity: "BLOCKER",
-			class: "deterministic",
-			causal_disposition: "introduced",
-			proof: "the frozen diff demonstrates the correction boundary",
-		}],
-		projection: "workspace",
-		correction_candidate_tree: tree,
-		correction_target_identity: digest,
-		correction_paths: ["lib/a.ts"],
-		correction_paths_digest: digest,
-	};
-	const expectedFixFindings = validationRequest.fix_findings.map(({ proof_refs: proofRefs, evidence_class: evidenceClass, causal_disposition: causalDisposition, ...finding }) => ({
-		...finding,
-		proofRefs,
-		evidenceClass,
-		causalDisposition,
-	}));
-	const expectedFixClassifications = validationRequest.fix_classifications.map(({ finding_id: findingId, class: classValue, causal_disposition: causalDisposition, ...finding }) => ({
-		...finding,
-		findingId,
-		class: classValue,
-		causalDisposition,
-	}));
 	const roleInput = (name: string, captureOperation: string, schema: string, extra: Record<string, unknown> = {}) => ({
 		kind: "collect",
 		reason_code: "provider_refuter_required",
@@ -720,77 +533,65 @@ test("next_transition decodes the self-contained provider role capture vectors s
 		}] },
 	});
 
+	const decodeRoleTransition = (value: unknown) => decodeReviewNextTransitionV3(value, { v5: true });
 	const refuter = roleInput("provider_refuter", "review.capture-refuter", "https://gentle-ai.dev/schema/review/refuter/v1");
-	const decodedRefuter = decodeReviewNextTransitionV3(refuter);
+	const decodedRefuter = decodeRoleTransition(refuter);
 	assert.equal(decodedRefuter.collect?.inputs[0]?.captureOperation, "review.capture-refuter");
 	assert.equal(decodedRefuter.collect?.inputs[0]?.arguments.at(-1)?.token, "--execute=true");
 
 	assert.throws(
-		() => decodeReviewNextTransitionV3(roleInput("provider_refuter", "review.capture-refuter", "https://gentle-ai.dev/schema/review/reviewer/v1")),
+		() => decodeRoleTransition(roleInput("provider_refuter", "review.capture-refuter", "https://gentle-ai.dev/schema/review/reviewer/v1")),
 		/schema must be https:\/\/gentle-ai\.dev\/schema\/review\/refuter\/v1/,
 	);
 	assert.throws(
-		() => decodeReviewNextTransitionV3(roleInput("provider_refuter", "review.capture-refuter", "https://gentle-ai.dev/schema/review/refuter/v1", {
+		() => decodeRoleTransition(roleInput("provider_refuter", "review.capture-refuter", "https://gentle-ai.dev/schema/review/refuter/v1", {
 			submission: { operation_token: "capture-refuter", argument_tokens: ["--input={{value}}"], values: [{ slot: "{{value}}", domain: "artifact-path", substitution_location: 0 }] },
 		})),
 		/submission is not allowed on the self-contained/,
 	);
 
-	const validator = roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: validationRequest });
-	const decodedValidator = decodeReviewNextTransitionV3(validator);
+	const validator = roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1");
+	const decodedValidator = decodeRoleTransition(validator);
 	assert.equal(decodedValidator.collect?.inputs[0]?.captureOperation, "review.capture-validation");
-	assert.equal(decodedValidator.collect?.inputs[0]?.validationRequest?.requestHash, digest);
-	assert.equal(decodedValidator.collect?.inputs[0]?.validationRequest?.policyContent, policyContent);
-	assert.deepEqual(decodedValidator.collect?.inputs[0]?.validationRequest?.fixFindings, expectedFixFindings);
-	assert.deepEqual(decodedValidator.collect?.inputs[0]?.validationRequest?.fixClassifications, expectedFixClassifications);
-
-	const statusWithValidation = fixture<JsonObject>("status.fixture.json");
-	(statusWithValidation.authority as JsonObject).state = "correction_required";
-	statusWithValidation.validation_request = validationRequest;
-	statusWithValidation.next_transition = validator;
-	const decodedStatus = decodeReviewStatusV3(statusWithValidation);
-	assert.equal(decodedStatus.validationRequest?.policyContent, policyContent);
-	assert.deepEqual(decodedStatus.validationRequest?.fixFindings, expectedFixFindings);
-	assert.deepEqual(decodedStatus.validationRequest?.fixClassifications, expectedFixClassifications);
-	assert.deepEqual(decodedStatus.nextTransition?.collect?.inputs[0]?.validationRequest, decodedStatus.validationRequest);
-
-	const unknownRequest: JsonObject = clone(validationRequest);
-	unknownRequest.unadvertised = true;
-	assert.throws(
-		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: unknownRequest })),
-		/not allowed/,
-	);
-	const unknownFinding: JsonObject = clone(validationRequest);
-	((unknownFinding.fix_findings as JsonObject[])[0]!).unadvertised = true;
-	assert.throws(
-		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: unknownFinding })),
-		/not allowed/,
-	);
-	const malformedFinding: JsonObject = clone(validationRequest);
-	((malformedFinding.fix_findings as JsonObject[])[0]!).proof_refs = "lib/a.ts:1";
-	assert.throws(
-		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: malformedFinding })),
-		/proof_refs/,
-	);
-	const unknownClassification: JsonObject = clone(validationRequest);
-	((unknownClassification.fix_classifications as JsonObject[])[0]!).unadvertised = true;
-	assert.throws(
-		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: unknownClassification })),
-		/not allowed/,
-	);
-	const malformedClassification: JsonObject = clone(validationRequest);
-	((malformedClassification.fix_classifications as JsonObject[])[0]!).class = "unsupported";
-	assert.throws(
-		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1", { validation_request: malformedClassification })),
-		/class/,
-	);
+	assert.equal(decodedValidator.collect?.inputs[0]?.arguments.at(-1)?.token, "--execute=true");
 
 	assert.throws(
-		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/validator/v1")),
-		/validation_request is required/,
-	);
-	assert.throws(
-		() => decodeReviewNextTransitionV3(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/refuter/v1", { validation_request: validationRequest })),
+		() => decodeRoleTransition(roleInput("provider_targeted_validator", "review.capture-validation", "https://gentle-ai.dev/schema/review/refuter/v1")),
 		/schema must be https:\/\/gentle-ai\.dev\/schema\/review\/validator\/v1/,
 	);
+});
+
+test("status enforces authority/frozen/receipt conditionals and decodes the required repair field", () => {
+	const current = devFixture<JsonObject>("status-v5-repository-context.captured.json");
+	delete current.receipt;
+	if (current.action === "finalize") {
+		current.action = "stop";
+		delete current.next_transition;
+		delete current.forecast;
+	}
+	const decoded = decodeReviewStatusV3(current);
+	assert.equal(decoded.repair.status, "unsupported");
+	assert.equal(decoded.authority?.state, "reviewing");
+
+	const missingAuthority = clone(current);
+	delete missingAuthority.authority;
+	assert.throws(() => decodeReviewStatusV3(missingAuthority), /requires authority/);
+
+	const compactMissingFrozen = clone(current);
+	delete compactMissingFrozen.frozen;
+	assert.throws(() => decodeReviewStatusV3(compactMissingFrozen), /requires frozen/);
+});
+
+test("next_transition.execute.binding stays open, as its schema declares no properties", () => {
+	const withContext = {
+		kind: "execute" as const,
+		reason_code: "fresh_target_ready",
+		execute: {
+			operation: "review.start",
+			arguments: [{ name: "lineage", value: "review-fixture", token: "--lineage=review-fixture" }],
+			preconditions: [{ name: "target_identity", value: `sha256:${"8".repeat(64)}` }],
+			binding: { target_identity: `sha256:${"8".repeat(64)}`, repository_context: `rctx1_${"c".repeat(64)}` },
+		},
+	};
+	assert.doesNotThrow(() => decodeReviewNextTransitionV3(withContext));
 });
