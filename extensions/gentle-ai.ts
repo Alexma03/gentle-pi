@@ -1675,12 +1675,16 @@ export async function applyModelConfigAsync(
 
 export async function applySavedModelConfig(
 	ctx: ExtensionContext,
+	applyConfig: typeof applyModelConfigAsync = applyModelConfigAsync,
 ): Promise<{ updated: number; skipped: number; invalidPath?: string }> {
-	const result = await readSavedModelConfigAsync(ctx.cwd);
+	const result = await readModelRoutingAuthorityAsync(
+		modelConfigPath(ctx.cwd),
+		legacyProjectModelConfigPath(ctx.cwd),
+	);
 	if (result.status === "invalid") {
 		return { updated: 0, skipped: 0, invalidPath: result.path };
 	}
-	return applyModelConfigAsync(
+	return applyConfig(
 		ctx.cwd,
 		result.status === "valid" ? result.config : {},
 	);
