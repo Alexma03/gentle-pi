@@ -208,10 +208,10 @@ test("bundled Gentleman-Cute Pi theme defines complete brand and restrained colo
 		[],
 	);
 
-	assertResolvedThemeColor(theme, "accent", "#E35FA6");
-	assertResolvedThemeColor(theme, "searchMatchBg", "#C15995");
+	assertResolvedThemeColor(theme, "accent", "#F095C8");
+	assertResolvedThemeColor(theme, "searchMatchBg", "#C96AA2");
 	assert.equal(colors.borderAccent, "activePink");
-	assertResolvedThemeColor(theme, "borderAccent", "#FF81CC");
+	assertResolvedThemeColor(theme, "borderAccent", "#FFB1DD");
 	assertResolvedThemeColor(theme, "selectedBg", "#28121E");
 	assertResolvedThemeColor(theme, "text", "#F6EFF3");
 	assertResolvedThemeColor(theme, "success", "#D2CBD0");
@@ -227,24 +227,24 @@ test("bundled Gentleman-Cute Pi theme defines complete brand and restrained colo
 	assert.equal(colors.mdCodeBlockBorder, "muted");
 	assertResolvedThemeColor(theme, "mdCodeBlockBorder", "#A78E9B");
 	assert.equal(colors.mdQuoteBorder, "deepPink");
-	assertResolvedThemeColor(theme, "mdQuoteBorder", "#C15995");
+	assertResolvedThemeColor(theme, "mdQuoteBorder", "#C96AA2");
 	assert.equal(colors.mdLink, "accent");
-	assertResolvedThemeColor(theme, "mdLink", "#E35FA6");
+	assertResolvedThemeColor(theme, "mdLink", "#F095C8");
 	assert.equal(colors.mdListBullet, "accent");
-	assertResolvedThemeColor(theme, "mdListBullet", "#E35FA6");
+	assertResolvedThemeColor(theme, "mdListBullet", "#F095C8");
 	assertResolvedThemeColor(theme, "toolDiffAdded", "#A9C7EE");
 	assert.equal(colors.syntaxKeyword, "deepPink");
-	assertResolvedThemeColor(theme, "syntaxKeyword", "#C15995");
+	assertResolvedThemeColor(theme, "syntaxKeyword", "#C96AA2");
 	assertResolvedThemeColor(theme, "syntaxFunction", "#C49BFF");
 	assert.equal(colors.syntaxOperator, "accent");
-	assertResolvedThemeColor(theme, "syntaxOperator", "#E35FA6");
+	assertResolvedThemeColor(theme, "syntaxOperator", "#F095C8");
 	assertResolvedThemeColor(theme, "syntaxString", "#E0C27A");
 	assertResolvedThemeColor(theme, "syntaxNumber", "#D7A0B8");
 	assertResolvedThemeColor(theme, "syntaxType", "#A9C7EE");
 	assert.equal(colors.thinkingXhigh, "accent");
-	assertResolvedThemeColor(theme, "thinkingXhigh", "#E35FA6");
+	assertResolvedThemeColor(theme, "thinkingXhigh", "#F095C8");
 	assert.equal(colors.thinkingMax, "activePink");
-	assertResolvedThemeColor(theme, "thinkingMax", "#FF81CC");
+	assertResolvedThemeColor(theme, "thinkingMax", "#FFB1DD");
 	assert.equal(theme.export?.pageBg, "bg");
 	assert.equal(theme.export?.cardBg, "bgElement");
 	assert.equal(theme.export?.infoBg, "infoBg");
