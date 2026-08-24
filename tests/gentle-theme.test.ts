@@ -117,6 +117,57 @@ test("package manifest exposes bundled themes to Pi discovery", () => {
 	);
 });
 
+test("bundled Gentleman-Sexy Pi theme is available under its exact name", () => {
+	const theme = readJson<GentleThemeJson>(
+		join(PACKAGE_ROOT, "themes", "Gentleman-Sexy.json"),
+	);
+
+	assert.equal(theme.name, "Gentleman-Sexy");
+});
+
+test("bundled Gentleman-Sexy Pi theme defines complete brand and semantic color mappings", () => {
+	const theme = readJson<GentleThemeJson>(
+		join(PACKAGE_ROOT, "themes", "Gentleman-Sexy.json"),
+	);
+	const colors = theme.colors ?? {};
+
+	assert.deepEqual(
+		REQUIRED_THEME_COLOR_KEYS.filter((key) => !(key in colors)),
+		[],
+	);
+	assert.deepEqual(
+		["scrollbarThumb", "searchMatchBg", "searchMatchText", "thinkingMax"].filter(
+			(key) => !(key in colors),
+		),
+		[],
+	);
+
+	assertResolvedThemeColor(theme, "accent", "#F43888");
+	assertResolvedThemeColor(theme, "borderAccent", "#FF4F9A");
+	assertResolvedThemeColor(theme, "selectedBg", "#28121E");
+	assertResolvedThemeColor(theme, "text", "#F6EFF3");
+	assertResolvedThemeColor(theme, "success", "#D2CBD0");
+	assertResolvedThemeColor(theme, "warning", "#F2B86D");
+	assertResolvedThemeColor(theme, "error", "#FF718F");
+	assertResolvedThemeColor(theme, "muted", "#A78E9B");
+	assertResolvedThemeColor(theme, "dim", "#76616B");
+	assertResolvedThemeColor(theme, "toolPendingBg", "#100A0F");
+	assertResolvedThemeColor(theme, "toolSuccessBg", "#151316");
+	assertResolvedThemeColor(theme, "toolErrorBg", "#261019");
+	assertResolvedThemeColor(theme, "toolTitle", "#E0C27A");
+	assertResolvedThemeColor(theme, "customMessageLabel", "#E0C27A");
+	assert.equal(colors.mdCodeBlockBorder, "muted");
+	assertResolvedThemeColor(theme, "mdCodeBlockBorder", "#A78E9B");
+	assertResolvedThemeColor(theme, "toolDiffAdded", "#A9C7EE");
+	assertResolvedThemeColor(theme, "syntaxFunction", "#C49BFF");
+	assertResolvedThemeColor(theme, "syntaxString", "#E0C27A");
+	assertResolvedThemeColor(theme, "syntaxNumber", "#D7A0B8");
+	assertResolvedThemeColor(theme, "syntaxType", "#A9C7EE");
+	assert.equal(theme.export?.pageBg, "bg");
+	assert.equal(theme.export?.cardBg, "bgElement");
+	assert.equal(theme.export?.infoBg, "infoBg");
+});
+
 test("bundled Pi theme is named exactly Gentle and defines all required colors", () => {
 	const theme = readJson<GentleThemeJson>(
 		join(PACKAGE_ROOT, "themes", "Gentle.json"),
