@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -42,14 +42,16 @@ const LAZY_ASSET_NAMES = [
 ] as const;
 const LAZY_REFERENCE_FILE_NAMES = LAZY_ASSET_NAMES.slice(1);
 
-const representativeProductionAssetsDir = mkdtempSync(join(tmpdir(), "gp-b-"));
-for (const name of LAZY_ASSET_NAMES) {
-	const src = join(REAL_ASSETS_DIR, name);
-	writeFileSync(
-		join(representativeProductionAssetsDir, name),
-		existsSync(src) ? readFileSync(src) : `stub placeholder for ${name} (not authored yet)\n`,
-	);
+function copyRequiredLazyAssets(destination: string): void {
+	for (const name of LAZY_ASSET_NAMES) {
+		const source = join(REAL_ASSETS_DIR, name);
+		assert.ok(existsSync(source), `missing packaged lazy asset: ${name}`);
+		copyFileSync(source, join(destination, name));
+	}
 }
+
+const representativeProductionAssetsDir = mkdtempSync(join(tmpdir(), "gp-b-"));
+copyRequiredLazyAssets(representativeProductionAssetsDir);
 const { __testing } = await import("../extensions/gentle-ai.ts");
 
 // A controlled long assets root proves the parent prompt remains within the
@@ -67,13 +69,7 @@ assert.ok(
 	controlledLongAssetsDir.length >= MIN_CONTROLLED_LONG_ASSETS_ROOT_CHARS,
 	`controlled long assets root is only ${controlledLongAssetsDir.length} chars, need >= ${MIN_CONTROLLED_LONG_ASSETS_ROOT_CHARS}`,
 );
-for (const name of LAZY_ASSET_NAMES) {
-	const src = join(REAL_ASSETS_DIR, name);
-	writeFileSync(
-		join(controlledLongAssetsDir, name),
-		existsSync(src) ? readFileSync(src) : `stub placeholder for ${name} (not authored yet)\n`,
-	);
-}
+copyRequiredLazyAssets(controlledLongAssetsDir);
 
 after(() => {
 	rmSync(representativeProductionAssetsDir, { recursive: true, force: true });
