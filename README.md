@@ -312,8 +312,8 @@ Adversarial review roles (the refuter and the targeted validator) are never Pi-a
 ```text
 init
   ↓
-explore → proposal → spec ─┬→ design ─┐
-                            └─────────┴→ tasks → apply → verify → sync → archive
+explore → research (optional) → proposal → spec ─┬→ design ─┐
+                                                  └─────────┴→ tasks → apply → verify → sync → archive
 ```
 
 The main loop is intentionally file-backed when you choose `openspec` or `both`:

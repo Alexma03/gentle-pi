@@ -869,6 +869,7 @@ const SDD_AGENT_NAMES = [
 	"sdd-init",
 	"sdd-onboard",
 	"sdd-explore",
+	"sdd-research",
 	"sdd-proposal",
 	"sdd-spec",
 	"sdd-design",

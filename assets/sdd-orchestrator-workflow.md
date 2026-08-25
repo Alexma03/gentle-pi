@@ -7,12 +7,13 @@ This is the lazy-loaded SDD workflow surface for el Gentleman on Pi. Read this f
 SDD phases:
 
 ```text
-init → explore → proposal → spec → design → tasks → apply → verify → sync → archive
+init → explore → research (optional) → proposal → spec → design → tasks → apply → verify → sync → archive
 ```
 
 Dependency graph:
 
 ```text
+explore → research (optional) → proposal
 proposal → spec ─┬→ tasks → apply → verify → sync → archive
 proposal → design ┘
 ```
@@ -119,6 +120,18 @@ Interactive approval is phase-scoped. A user response such as "continue", "dale"
 
 Before `sdd-proposal` in interactive mode, offer the user a proposal question round instead of silently deciding whether the proposal is clear enough. Explain that the questions are meant to improve the PRD/proposal by uncovering business understanding, business rules, implications, impact, edge cases, and product tradeoffs. Prefer 3–5 concrete product questions per round, then summarize the resulting assumptions and ask whether the user wants to correct anything or run a second question round. Cover business/product/PRD decisions: business problem, target users and situations, business rules, product outcome, current-state gap, implications and impact, edge cases, decision gaps, first-slice scope boundaries, non-goals, product constraints, and business tradeoffs. Do not ask about test commands, PR shape, changed-line budget, or other harness mechanics at proposal time unless the user explicitly asks to discuss delivery.
 
+## Research and Pre-Proposal Gate
+
+This gate is MANDATORY and applies in both execution modes; in interactive mode it runs alongside the proposal question round above, and the two never contradict: the question round shapes the proposal, the gate decides whether `sdd-proposal` may launch at all.
+
+- Offer `sdd-research` immediately after `sdd-explore`. Research is optional until selected; selection makes completion mandatory.
+- Before every proposal, invoke `sdd-proposal` only when selected research is `done` or research is unselected, product decisions are `confirmed`, evidence references are valid, and the selected artifact-store state is ready.
+- The orchestrator owns product discovery. In automatic mode, unresolved product choices require one lossless grouped prompt with all context, options, consequences, allowed answers, and exact tokens; the orchestrator MUST persist the pending pre-proposal state before prompting, then STOP without invoking `sdd-proposal`.
+- The proposer receives a confirmed pre-proposal handoff and MUST NOT interview the user or infer consent.
+- Pi's native `gentle-pi.sdd-status` contract remains the sole status contract. Research and pre-proposal state are orchestrator-owned prose and artifacts (`sdd/{change}/research`, `sdd/{change}/preproposal`, `openspec/changes/{change}/research.md`) layered on top — never a native status field.
+
+Runtime note: this runtime declares no evidence grants (`documentation=[]; open-web=[]`), so a SELECTED research lane fail-closes to a `blocked` outcome and blocks proposal readiness until the user deselects research or evidence capability arrives. SDD chains treat research as unselected.
+
 ## Delivery Strategy
 
 On the first SDD chain request in a session, resolve the delivery strategy from preflight (or ask once) and cache it:
@@ -174,7 +187,7 @@ Check every phase result against the Result Contract:
 
 Use cost-aware validation:
 
-- For lower-risk phases (`sdd-explore`, `sdd-spec`, `sdd-tasks`, `sdd-sync`, `sdd-archive`), the parent may validate inline by reading artifacts back and checking claims.
+- For lower-risk phases (`sdd-explore`, `sdd-research`, `sdd-spec`, `sdd-tasks`, `sdd-sync`, `sdd-archive`), the parent may validate inline by reading artifacts back and checking claims.
 - For higher-risk phases (`sdd-design`, `sdd-apply`), validate the artifact, declared paths, task state, and focused test evidence directly before continuing because errors there compound downstream.
 - If a gate finds any smell — missing artifact, status mismatch, unresolved path, likely drift, or critical risk — rerun the same SDD phase once with corrective feedback. SDD phase validation does not start ordinary review or Judgment Day.
 
@@ -231,6 +244,7 @@ On Pi, phase model routing is user-owned and persisted, not prompt-passed: `/gen
 | Phase        | Default tier   | Reason                                     |
 | ------------ | -------------- | ------------------------------------------ |
 | sdd-explore  | balanced       | Reads code, structural - not architectural |
+| sdd-research | balanced       | Fail-closed evidence record keeping        |
 | sdd-proposal | deep-reasoning | Architectural decisions                    |
 | sdd-spec     | balanced       | Structured writing                         |
 | sdd-design   | deep-reasoning | Architecture decisions                     |

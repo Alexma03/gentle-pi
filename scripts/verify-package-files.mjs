@@ -30,6 +30,7 @@ const requiredPaths = [
   "assets/agents/sdd-init.md",
   "assets/agents/sdd-onboard.md",
   "assets/agents/sdd-proposal.md",
+  "assets/agents/sdd-research.md",
   "assets/agents/sdd-spec.md",
   "assets/agents/sdd-status.md",
   "assets/agents/sdd-sync.md",
