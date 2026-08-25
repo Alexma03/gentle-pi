@@ -19,6 +19,72 @@ function writeMarkdown(path: string, content: string): void {
 	writeFileSync(path, content);
 }
 
+test("session startup reports invalid project routing without mutating the profile", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-model-routing-startup-"));
+	const configHome = join(root, "global");
+	const projectConfigDir = join(root, ".pi", "gentle-ai");
+	const projectAgentsDir = join(root, ".pi", "agents");
+	const projectProfileDir = join(root, ".pi");
+	const rootAgentsDir = join(root, "agents");
+	const agentHome = join(root, "agent-home");
+	const agentHomeAgentsDir = join(agentHome, "agents");
+	const agentHomeSubagentsDir = join(agentHome, "subagents");
+	mkdirSync(configHome, { recursive: true });
+	mkdirSync(projectConfigDir, { recursive: true });
+	mkdirSync(projectAgentsDir, { recursive: true });
+	mkdirSync(projectProfileDir, { recursive: true });
+	mkdirSync(rootAgentsDir, { recursive: true });
+	mkdirSync(agentHomeAgentsDir, { recursive: true });
+	mkdirSync(agentHomeSubagentsDir, { recursive: true });
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+
+	const previousConfigHome = process.env.GENTLE_PI_CONFIG_HOME;
+	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
+	process.env.GENTLE_PI_CONFIG_HOME = configHome;
+	process.env.GENTLE_PI_AGENT_HOME = agentHome;
+	t.after(() => {
+		if (previousConfigHome === undefined) delete process.env.GENTLE_PI_CONFIG_HOME;
+		else process.env.GENTLE_PI_CONFIG_HOME = previousConfigHome;
+		if (previousAgentHome === undefined) delete process.env.GENTLE_PI_AGENT_HOME;
+		else process.env.GENTLE_PI_AGENT_HOME = previousAgentHome;
+	});
+
+	writeFileSync(join(projectConfigDir, "models.json"), "[]");
+	writeMarkdown(join(projectAgentsDir, "worker.md"), "---\nname: worker\ndescription: Worker\n---\nbody\n");
+	const profilePath = join(projectProfileDir, "subagents.json");
+	const profileBytes = `${JSON.stringify({ unrelated: { keep: true } }, null, 2)}\n`;
+	writeFileSync(profilePath, profileBytes);
+	const before = readFileSync(profilePath, "utf8");
+
+	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void>>();
+	const pi = {
+		on(name: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void>) {
+			handlers.set(name, handler);
+		},
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	const sessionStart = handlers.get("session_start");
+	assert.equal(typeof sessionStart, "function");
+	const notifications: Array<{ message: string; severity: string }> = [];
+	await sessionStart!({}, {
+		cwd: root,
+		hasUI: true,
+		ui: {
+			notify(message: string, severity: string) {
+				notifications.push({ message, severity });
+			},
+		},
+	} as unknown as ExtensionContext);
+
+	const warning = notifications.find((entry) => entry.message.includes(join(projectConfigDir, "models.json")));
+	assert.ok(warning, JSON.stringify(notifications));
+	assert.equal(warning!.severity, "warning");
+	assert.match(warning!.message, /skipped model config/);
+	assert.equal(readFileSync(profilePath, "utf8"), before);
+});
+
 test("agent discovery skips skills directories", async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "gentle-pi-agents-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
