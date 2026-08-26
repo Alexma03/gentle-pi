@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
+import { initTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -15,6 +16,8 @@ import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
 import type { ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
+
+initTheme("dark");
 
 function writeMarkdown(path: string, content: string): void {
 	mkdirSync(dirname(path), { recursive: true });
@@ -119,7 +122,7 @@ test("registered Gentle Review tools render reusable rose lifecycle call rows", 
 	}
 });
 
-test("registered Gentle Review tools preserve result envelopes and default result visibility", async () => {
+test("registered Gentle Review tools preserve result envelopes and redact collapsed result rendering", async () => {
 	const tools = registeredGentleTools();
 	const scope = tools.get("gentle_review_scope");
 	const manifest = { version: 1, scopeByMode: { "100644": ["src/file.ts"] }, gitlinks: {} };
@@ -143,9 +146,33 @@ test("registered Gentle Review tools preserve result envelopes and default resul
 		entries: [{ path: "src/file.ts", mode: "100644" }],
 	});
 	assert.deepEqual(result.details, visibleEnvelope);
-	assert.equal(tools.get("gentle_review")?.renderResult, undefined);
-	assert.equal(scope.renderResult, undefined);
-	assert.equal(tools.get("gentle_review_capture")?.renderResult, undefined);
+
+	const resultText = "safe result\x1b[31m\nlineage=secret body=private";
+	const expandHint = keyHint("app.tools.expand", "to expand");
+	for (const name of ["gentle_review", "gentle_review_scope", "gentle_review_capture"]) {
+		const tool = tools.get(name);
+		assert.equal(typeof tool?.renderResult, "function", `${name} must define result rendering`);
+		for (const options of [
+			{ expanded: false, isPartial: true, isError: false },
+			{ expanded: false, isPartial: false, isError: false },
+			{ expanded: false, isPartial: false, isError: true },
+		]) {
+			const collapsed = renderComponent(tool.renderResult({ content: [{ type: "text", text: resultText }] }, options, lifecycleTheme, {}));
+			assert.equal(collapsed, expandHint, `${name} collapsed output must contain one expand hint`);
+			assert.equal(collapsed.split("\n")[0], expandHint, `${name} collapsed output must start with the hint`);
+			assert.doesNotMatch(collapsed, /safe result|lineage=secret|private/);
+		}
+		const expanded = renderComponent(tool.renderResult({ content: [{ type: "text", text: resultText }] }, { expanded: true, isPartial: false, isError: true }, lifecycleTheme, {}));
+		assert.equal(expanded.split("\n")[0], "safe result");
+		assert.match(expanded, /safe result/);
+		assert.match(expanded, /lineage=secret body=private/);
+		assert.doesNotMatch(expanded, /to expand/);
+		assert.doesNotMatch(expanded, /\x1b\[/);
+		const nonText = renderComponent(tool.renderResult({ content: [{ type: "image", data: "opaque", mimeType: "image/png" }] }, { expanded: true, isPartial: false }, lifecycleTheme, {}));
+		assert.equal(nonText, "");
+		const empty = renderComponent(tool.renderResult({ content: [{ type: "text", text: "" }] }, { expanded: false, isPartial: false }, lifecycleTheme, {}));
+		assert.equal(empty, "");
+	}
 });
 
 test("session startup reports invalid project routing without mutating the profile", async (t) => {

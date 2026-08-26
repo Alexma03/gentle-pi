@@ -95,7 +95,7 @@ import {
 	type ReviewMode,
 	type ReviewProjectionV1,
 } from "../lib/review-snapshot.ts";
-import { renderGentleAiLifecycleCall, type GentleAiRenderContext } from "../lib/gentle-ai-renderer.ts";
+import { renderGentleAiLifecycleCall, renderGentleAiResult, type GentleAiRenderContext } from "../lib/gentle-ai-renderer.ts";
 import { sanitizeTerminalText, stripAnsi } from "../lib/terminal-theme.ts";
 import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
 import {
@@ -4957,6 +4957,9 @@ function createGentleAiExtensionForTesting(
 				context as GentleAiRenderContext | undefined,
 			);
 		},
+		renderResult(result, options) {
+			return renderGentleAiResult(result, options);
+		},
 		async execute(_toolCallId, parameters) {
 			const input = parameters as ReviewScopeParameters;
 			const details = readCandidateContextManifestPage(input.manifest, input.sha256, input.cursor ?? 0);
@@ -4982,6 +4985,9 @@ function createGentleAiExtensionForTesting(
 				theme,
 				context as GentleAiRenderContext | undefined,
 			);
+		},
+		renderResult(result, options) {
+			return renderGentleAiResult(result, options);
 		},
 		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw new Error("Review capture was cancelled");
@@ -5024,6 +5030,9 @@ function createGentleAiExtensionForTesting(
 				theme,
 				context as GentleAiRenderContext | undefined,
 			);
+		},
+		renderResult(result, options) {
+			return renderGentleAiResult(result, options);
 		},
 		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw new Error("Review controller operation was cancelled");
