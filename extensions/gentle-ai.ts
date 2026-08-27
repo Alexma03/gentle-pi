@@ -1104,6 +1104,13 @@ function evaluateSensitivePathTool(
 	};
 }
 
+const HERDR_BLOCKER_LABEL = {
+	GUARDED_CONFIRMATION: "Guarded command confirmation",
+	QUESTIONNAIRE: "Questionnaire awaiting input",
+} as const;
+
+type HerdrBlockerLabel = (typeof HERDR_BLOCKER_LABEL)[keyof typeof HERDR_BLOCKER_LABEL];
+
 type HerdrConfirmationLifecycle = {
 	begin(): void;
 	settle(): void;
@@ -1111,16 +1118,35 @@ type HerdrConfirmationLifecycle = {
 
 function createHerdrConfirmationLifecycle(events: ExtensionAPI["events"]): HerdrConfirmationLifecycle {
 	let pending = 0;
+	let questionnaireActive = false;
+	let emittedLabel: HerdrBlockerLabel | undefined;
+	const emitEffectiveBlocker = (): void => {
+		const nextLabel = questionnaireActive
+			? HERDR_BLOCKER_LABEL.QUESTIONNAIRE
+			: pending > 0
+				? HERDR_BLOCKER_LABEL.GUARDED_CONFIRMATION
+				: undefined;
+		if (nextLabel === emittedLabel) return;
+		emittedLabel = nextLabel;
+		if (nextLabel === undefined) events.emit("herdr:blocked", { active: false });
+		else events.emit("herdr:blocked", { active: true, label: nextLabel });
+	};
+
+	events?.on?.("rpiv:ask-user:blocked", (event) => {
+		if (!isRecord(event) || typeof event.active !== "boolean" || event.active === questionnaireActive) return;
+		questionnaireActive = event.active;
+		emitEffectiveBlocker();
+	});
+
 	return {
 		begin() {
-			const wasIdle = pending === 0;
 			pending += 1;
-			if (wasIdle) events.emit("herdr:blocked", { active: true, label: "Guarded command confirmation" });
+			emitEffectiveBlocker();
 		},
 		settle() {
 			if (pending === 0) return;
 			pending -= 1;
-			if (pending === 0) events.emit("herdr:blocked", { active: false });
+			emitEffectiveBlocker();
 		},
 	};
 }
