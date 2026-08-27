@@ -654,6 +654,93 @@ test("guarded command confirmation emits a generic correlated permission lifecyc
 	}
 });
 
+test("concurrent guarded confirmations coalesce the Herdr lifecycle per extension instance", async () => {
+	type ToolCallHandler = (
+		event: { toolName: string; input: unknown },
+		ctx: ExtensionContext,
+	) => Promise<ToolCallEventResult | undefined>;
+	type EmittedEvent = {
+		channel: string;
+		data: {
+			requestId?: string;
+			state?: "waiting" | "approved" | "denied";
+			active?: boolean;
+			label?: string;
+		};
+	};
+	const createHarness = () => {
+		const handlers = new Map<string, ToolCallHandler>();
+		const emitted: EmittedEvent[] = [];
+		const confirmations: Array<(approved: boolean) => void> = [];
+		const pi = {
+			on(name: string, handler: ToolCallHandler) {
+				handlers.set(name, handler);
+			},
+			events: { emit(channel: string, data: EmittedEvent["data"]) { emitted.push({ channel, data }); } },
+			registerCommand() {},
+			registerTool() {},
+		} as unknown as ExtensionAPI;
+		createGentleAiExtension({ nativeReviewCli: null })(pi);
+		return { handlers, emitted, confirmations };
+	};
+	const first = createHarness();
+	const second = createHarness();
+	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-permission-concurrent-"));
+	try {
+		const context = (confirmations: Array<(approved: boolean) => void>) => ({
+			cwd,
+			hasUI: true,
+			ui: {
+				confirm: async () => new Promise<boolean>((resolve) => { confirmations.push(resolve); }),
+			},
+		} as ExtensionContext);
+		const firstRequest = first.handlers.get("tool_call")!({ toolName: "bash", input: { command: "git rebase main" } }, context(first.confirmations));
+		const secondRequest = first.handlers.get("tool_call")!({ toolName: "bash", input: { command: "git rebase main --another-command" } }, context(first.confirmations));
+		await Promise.resolve();
+		assert.deepEqual(first.emitted.map(({ channel, data }) => ({ channel, state: data.state, active: data.active })), [
+			{ channel: "pi-permission-system:permission-request", state: "waiting", active: undefined },
+			{ channel: "herdr:blocked", state: undefined, active: true },
+			{ channel: "pi-permission-system:permission-request", state: "waiting", active: undefined },
+		]);
+		assert.equal(first.confirmations.length, 2);
+		const waitingEvents = first.emitted.filter(({ channel, data }) => channel === "pi-permission-system:permission-request" && data.state === "waiting");
+		assert.notEqual(waitingEvents[0]?.data.requestId, waitingEvents[1]?.data.requestId);
+
+		first.confirmations[0]!(false);
+		assert.deepEqual(await firstRequest, {
+			block: true,
+			reason: "Gentle AI safety policy blocked the command because it was not confirmed.",
+		});
+		assert.deepEqual(first.emitted.map(({ channel, data }) => ({ channel, state: data.state, active: data.active })), [
+			{ channel: "pi-permission-system:permission-request", state: "waiting", active: undefined },
+			{ channel: "herdr:blocked", state: undefined, active: true },
+			{ channel: "pi-permission-system:permission-request", state: "waiting", active: undefined },
+			{ channel: "pi-permission-system:permission-request", state: "denied", active: undefined },
+		]);
+
+		const independentRequest = second.handlers.get("tool_call")!({ toolName: "bash", input: { command: "git rebase main --independent-command" } }, context(second.confirmations));
+		await Promise.resolve();
+		assert.equal(second.emitted.filter(({ channel }) => channel === "herdr:blocked").length, 1);
+		assert.equal(second.emitted.find(({ channel }) => channel === "herdr:blocked")?.data.active, true);
+		assert.equal(second.confirmations.length, 1);
+
+		first.confirmations[1]!(true);
+		assert.equal(await secondRequest, undefined);
+		assert.equal(first.emitted.filter(({ channel, data }) => channel === "herdr:blocked" && data.active === false).length, 1);
+		second.confirmations[0]!(true);
+		assert.equal(await independentRequest, undefined);
+		assert.deepEqual(second.emitted.map(({ channel, data }) => ({ channel, state: data.state, active: data.active })), [
+			{ channel: "pi-permission-system:permission-request", state: "waiting", active: undefined },
+			{ channel: "herdr:blocked", state: undefined, active: true },
+			{ channel: "pi-permission-system:permission-request", state: "approved", active: undefined },
+			{ channel: "herdr:blocked", state: undefined, active: false },
+		]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+
 test("permission lifecycle is inactive for unguarded and headless commands", async () => {
 	type ToolCallHandler = (
 		event: { toolName: string; input: unknown },

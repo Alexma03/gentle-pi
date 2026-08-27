@@ -1023,10 +1023,32 @@ function evaluateSensitivePathTool(
 	};
 }
 
+type HerdrConfirmationLifecycle = {
+	begin(): void;
+	settle(): void;
+};
+
+function createHerdrConfirmationLifecycle(events: ExtensionAPI["events"]): HerdrConfirmationLifecycle {
+	let pending = 0;
+	return {
+		begin() {
+			const wasIdle = pending === 0;
+			pending += 1;
+			if (wasIdle) events.emit("herdr:blocked", { active: true, label: "Guarded command confirmation" });
+		},
+		settle() {
+			if (pending === 0) return;
+			pending -= 1;
+			if (pending === 0) events.emit("herdr:blocked", { active: false });
+		},
+	};
+}
+
 async function confirmCommand(
 	command: string,
 	ctx: ExtensionContext,
 	events: ExtensionAPI["events"],
+	herdrLifecycle: HerdrConfirmationLifecycle,
 ): Promise<ToolCallEventResult | undefined> {
 	const guardrailsConfig = loadRuntimeGuardrailsConfig(ctx.cwd);
 	const classification = classifyGuardedCommand(command, guardrailsConfig);
@@ -1069,25 +1091,22 @@ async function confirmCommand(
 			toolName: "bash",
 		});
 	};
-	const emitHerdrBlocked = (active: boolean): void => {
-		events.emit("herdr:blocked", active
-			? { active: true, label: "Guarded command confirmation" }
-			: { active: false });
-	};
-
 	let approved = false;
 	let confirmationFailed = false;
 	let confirmationError: unknown;
 	emitPermissionRequest("waiting");
-	emitHerdrBlocked(true);
+	herdrLifecycle.begin();
 	try {
 		approved = await ctx.ui.confirm("Allow guarded command?", preview);
 	} catch (error) {
 		confirmationFailed = true;
 		confirmationError = error;
 	} finally {
-		emitPermissionRequest(confirmationFailed || !approved ? "denied" : "approved");
-		emitHerdrBlocked(false);
+		try {
+			emitPermissionRequest(confirmationFailed || !approved ? "denied" : "approved");
+		} finally {
+			herdrLifecycle.settle();
+		}
 	}
 	if (confirmationFailed) throw confirmationError;
 	if (approved) return undefined;
@@ -4980,6 +4999,7 @@ function createGentleAiExtensionForTesting(
 	return function gentleAi(pi: ExtensionAPI): void {
 	const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
 	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
+	const herdrLifecycle = createHerdrConfirmationLifecycle(pi.events);
 
 	pi.on("session_shutdown", (_event, context) => {
 		const sessionKey = pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey);
@@ -5202,7 +5222,7 @@ function createGentleAiExtensionForTesting(
 		if (!isRecord(event.input) || typeof event.input.command !== "string") {
 			return undefined;
 		}
-		return await confirmCommand(event.input.command, ctx, pi.events);
+		return await confirmCommand(event.input.command, ctx, pi.events, herdrLifecycle);
 	});
 
 	pi.registerCommand("gentle:install-sdd", {
