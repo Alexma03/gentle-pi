@@ -579,6 +579,24 @@ async function run() {
 		);
 		assert.equal(emittedEvents[0].data.requestId, emittedEvents[2].data.requestId);
 		emittedEvents.length = 0;
+		pi.events.emit("rpiv:ask-user:blocked", {
+			active: true,
+			question: "private runtime questionnaire",
+			answer: "private runtime answer",
+			path: "/private/runtime-path",
+			command: "private runtime command",
+		});
+		pi.events.emit("rpiv:ask-user:blocked", { active: true, duplicate: true });
+		pi.events.emit("rpiv:ask-user:blocked", { active: "true" });
+		pi.events.emit("rpiv:ask-user:other", { active: false });
+		pi.events.emit("rpiv:ask-user:blocked", { active: false });
+		const rpivHerdrEvents = emittedEvents.filter(({ channel }) => channel === "herdr:blocked");
+		assert.deepEqual(rpivHerdrEvents, [
+			{ channel: "herdr:blocked", data: { active: true, label: "Questionnaire awaiting input" } },
+			{ channel: "herdr:blocked", data: { active: false } },
+		]);
+		assert.doesNotMatch(JSON.stringify(rpivHerdrEvents), /private runtime/i);
+		emittedEvents.length = 0;
 		assert.equal(
 			dangerousReviewCtx.ui.notifications.length,
 			0,

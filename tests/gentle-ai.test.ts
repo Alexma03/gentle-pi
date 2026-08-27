@@ -741,6 +741,142 @@ test("concurrent guarded confirmations coalesce the Herdr lifecycle per extensio
 });
 
 
+test("RPIV questionnaire blockers emit only a private, balanced Herdr projection", () => {
+	type HerdrBlockedEvent = { active: boolean; label?: string };
+	const eventHandlers = new Map<string, (data: unknown) => void>();
+	const published: Array<{ channel: string; data: unknown }> = [];
+	const herdrEvents: HerdrBlockedEvent[] = [];
+	const pi = {
+		on() {},
+		events: {
+			emit(channel: string, data: unknown) {
+				published.push({ channel, data });
+				if (channel === "herdr:blocked") herdrEvents.push(data as HerdrBlockedEvent);
+				const handler = eventHandlers.get(channel);
+				if (handler) handler(data);
+			},
+			on(channel: string, handler: (data: unknown) => void) {
+				eventHandlers.set(channel, handler);
+				return () => eventHandlers.delete(channel);
+			},
+		},
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	assert.equal(eventHandlers.size, 1);
+	assert.equal(eventHandlers.has("rpiv:ask-user:blocked"), true);
+
+	const source = {
+		active: true,
+		question: "private questionnaire text",
+		answer: "private questionnaire answer",
+		path: "/private/questionnaire-path",
+		command: "private questionnaire command",
+		arbitrary: { nested: "private questionnaire field" },
+	};
+	pi.events.emit("rpiv:ask-user:blocked", source);
+	assert.strictEqual(published[0]?.data, source, "the RPIV event remains the source event");
+	assert.deepEqual(herdrEvents, [{ active: true, label: "Questionnaire awaiting input" }]);
+	assert.doesNotMatch(JSON.stringify(herdrEvents), /private questionnaire|questionnaire-path/i);
+
+	pi.events.emit("rpiv:ask-user:blocked", { active: true, duplicate: true });
+	pi.events.emit("rpiv:ask-user:blocked", { active: "true" });
+	pi.events.emit("rpiv:ask-user:blocked", { active: null });
+	pi.events.emit("rpiv:ask-user:blocked", []);
+	pi.events.emit("rpiv:ask-user:blocked", null);
+	pi.events.emit("rpiv:ask-user:other", { active: false });
+	assert.deepEqual(herdrEvents, [{ active: true, label: "Questionnaire awaiting input" }]);
+
+	pi.events.emit("rpiv:ask-user:blocked", { active: false });
+	pi.events.emit("rpiv:ask-user:blocked", { active: false, duplicate: true });
+	pi.events.emit("rpiv:ask-user:blocked", { active: true });
+	pi.events.emit("rpiv:ask-user:blocked", { active: false });
+	assert.deepEqual(herdrEvents, [
+		{ active: true, label: "Questionnaire awaiting input" },
+		{ active: false },
+		{ active: true, label: "Questionnaire awaiting input" },
+		{ active: false },
+	]);
+});
+
+test("Herdr coordinates guarded confirmations and RPIV labels without inactive relabel pulses", async () => {
+	type ToolCallHandler = (
+		event: { toolName: string; input: unknown },
+		ctx: ExtensionContext,
+	) => Promise<ToolCallEventResult | undefined>;
+	type HerdrBlockedEvent = { active: boolean; label?: string };
+	const createHarness = () => {
+		const handlers = new Map<string, ToolCallHandler>();
+		const eventHandlers = new Map<string, (data: unknown) => void>();
+		const herdrEvents: HerdrBlockedEvent[] = [];
+		const confirmations: Array<(approved: boolean) => void> = [];
+		const pi = {
+			on(name: string, handler: ToolCallHandler) {
+				handlers.set(name, handler);
+			},
+			events: {
+				emit(channel: string, data: unknown) {
+					if (channel === "herdr:blocked") herdrEvents.push(data as HerdrBlockedEvent);
+					const handler = eventHandlers.get(channel);
+					if (handler) handler(data);
+				},
+				on(channel: string, handler: (data: unknown) => void) {
+					eventHandlers.set(channel, handler);
+					return () => eventHandlers.delete(channel);
+				},
+			},
+			registerCommand() {},
+			registerTool() {},
+		} as unknown as ExtensionAPI;
+		createGentleAiExtension({ nativeReviewCli: null })(pi);
+		const context = {
+			cwd: process.cwd(),
+			hasUI: true,
+			ui: {
+				confirm: async () => new Promise<boolean>((resolve) => { confirmations.push(resolve); }),
+			},
+		} as ExtensionContext;
+		return { confirmations, context, herdrEvents, pi, toolCall: handlers.get("tool_call")! };
+	};
+
+	const guardedFirst = createHarness();
+	const guardedRequest = guardedFirst.toolCall(
+		{ toolName: "bash", input: { command: "git rebase main" } },
+		guardedFirst.context,
+	);
+	await Promise.resolve();
+	guardedFirst.pi.events.emit("rpiv:ask-user:blocked", { active: true });
+	guardedFirst.confirmations[0]!(true);
+	assert.equal(await guardedRequest, undefined);
+	assert.deepEqual(guardedFirst.herdrEvents, [
+		{ active: true, label: "Guarded command confirmation" },
+		{ active: true, label: "Questionnaire awaiting input" },
+	]);
+	guardedFirst.pi.events.emit("rpiv:ask-user:blocked", { active: false });
+	assert.deepEqual(guardedFirst.herdrEvents, [
+		{ active: true, label: "Guarded command confirmation" },
+		{ active: true, label: "Questionnaire awaiting input" },
+		{ active: false },
+	]);
+
+	const questionnaireFirst = createHarness();
+	questionnaireFirst.pi.events.emit("rpiv:ask-user:blocked", { active: true });
+	const questionnaireRequest = questionnaireFirst.toolCall(
+		{ toolName: "bash", input: { command: "git rebase main" } },
+		questionnaireFirst.context,
+	);
+	await Promise.resolve();
+	questionnaireFirst.pi.events.emit("rpiv:ask-user:blocked", { active: false });
+	questionnaireFirst.confirmations[0]!(false);
+	await questionnaireRequest;
+	assert.deepEqual(questionnaireFirst.herdrEvents, [
+		{ active: true, label: "Questionnaire awaiting input" },
+		{ active: true, label: "Guarded command confirmation" },
+		{ active: false },
+	]);
+});
+
 test("permission lifecycle is inactive for unguarded and headless commands", async () => {
 	type ToolCallHandler = (
 		event: { toolName: string; input: unknown },
