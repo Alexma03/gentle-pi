@@ -484,6 +484,7 @@ test("delivery commands bypass RDD under every mode outcome while command safety
 			on(name: string, handler: ToolCallHandler) {
 				handlers.set(name, handler);
 			},
+			events: { emit() {} },
 			registerCommand() {},
 			registerTool() {},
 		} as unknown as ExtensionAPI;
@@ -500,5 +501,165 @@ test("delivery commands bypass RDD under every mode outcome while command safety
 			const result = await toolCall!({ toolName: "bash", input: { command } }, ctx);
 			assert.equal(result, undefined, `${mode.label}: ${command}`);
 		}
+	}
+});
+
+test("guarded command confirmation emits a generic correlated permission lifecycle", async () => {
+	type ToolCallHandler = (
+		event: { toolName: string; input: unknown },
+		ctx: ExtensionContext,
+	) => Promise<ToolCallEventResult | undefined>;
+	type PermissionEvent = {
+		channel: string;
+		data: {
+			requestId: string;
+			state: "waiting" | "approved" | "denied";
+			source: "tool_call";
+			message: string;
+			toolName: "bash";
+		};
+	};
+	const handlers = new Map<string, ToolCallHandler>();
+	const emitted: PermissionEvent[] = [];
+	const sequence: string[] = [];
+	let confirm!: () => Promise<boolean>;
+	const pi = {
+		on(name: string, handler: ToolCallHandler) {
+			handlers.set(name, handler);
+		},
+		events: {
+			emit(channel: string, data: PermissionEvent["data"]) {
+				sequence.push(`event:${data.state}`);
+				emitted.push({ channel, data });
+			},
+		},
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	const toolCall = handlers.get("tool_call");
+	assert.equal(typeof toolCall, "function");
+	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-permission-request-"));
+	try {
+		const ctx = {
+			cwd,
+			hasUI: true,
+			ui: {
+				confirm: async () => {
+					sequence.push("confirm");
+					return confirm();
+				},
+			},
+		} as ExtensionContext;
+		let resolveConfirmation!: (approved: boolean) => void;
+		confirm = () => new Promise<boolean>((resolve) => { resolveConfirmation = resolve; });
+		const denied = toolCall!({
+			toolName: "bash",
+			input: { command: "git rebase main --secret-command-content" },
+		}, ctx);
+
+		await Promise.resolve();
+		assert.equal(emitted[0].channel, "pi-permission-system:permission-request");
+		assert.equal(emitted[0].data.state, "waiting");
+		assert.deepEqual(sequence, ["event:waiting", "confirm"]);
+		const deniedRequestId = emitted[0].data.requestId;
+		assert.match(deniedRequestId, /^[0-9a-f-]{36}$/);
+		assert.deepEqual(emitted[0].data, {
+			requestId: deniedRequestId,
+			state: "waiting",
+			source: "tool_call",
+			message: "Gentle AI safety policy requires confirmation for this tool call.",
+			toolName: "bash",
+		});
+		assert.equal(Object.keys(emitted[0].data).includes("command"), false);
+		assert.equal(Object.keys(emitted[0].data).includes("preview"), false);
+		assert.doesNotMatch(JSON.stringify(emitted), /secret-command-content|git rebase/);
+
+		resolveConfirmation(false);
+		assert.deepEqual(await denied, {
+			block: true,
+			reason: "Gentle AI safety policy blocked the command because it was not confirmed.",
+		});
+		assert.deepEqual(emitted[1], {
+			channel: "pi-permission-system:permission-request",
+			data: {
+				requestId: deniedRequestId,
+				state: "denied",
+				source: "tool_call",
+				message: "Gentle AI safety policy requires confirmation for this tool call.",
+				toolName: "bash",
+			},
+		});
+
+		emitted.length = 0;
+		sequence.length = 0;
+		confirm = async () => true;
+		assert.equal(await toolCall!({ toolName: "bash", input: { command: "git rebase main" } }, ctx), undefined);
+		assert.equal(emitted.length, 2);
+		assert.equal(emitted[0].data.state, "waiting");
+		assert.equal(emitted[1].data.state, "approved");
+		assert.equal(emitted[0].data.requestId, emitted[1].data.requestId);
+		assert.notEqual(emitted[0].data.requestId, deniedRequestId);
+		assert.deepEqual(sequence, ["event:waiting", "confirm", "event:approved"]);
+
+		emitted.length = 0;
+		sequence.length = 0;
+		confirm = async () => { throw new Error("confirmation unavailable"); };
+		await assert.rejects(
+			toolCall!({ toolName: "bash", input: { command: "git rebase main" } }, ctx),
+			/confirmation unavailable/,
+		);
+		assert.equal(emitted.length, 2);
+		assert.equal(emitted[0].data.state, "waiting");
+		assert.equal(emitted[1].data.state, "denied");
+		assert.equal(emitted[0].data.requestId, emitted[1].data.requestId);
+		assert.deepEqual(sequence, ["event:waiting", "confirm", "event:denied"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("permission lifecycle is inactive for unguarded and headless commands", async () => {
+	type ToolCallHandler = (
+		event: { toolName: string; input: unknown },
+		ctx: ExtensionContext,
+	) => Promise<ToolCallEventResult | undefined>;
+	const handlers = new Map<string, ToolCallHandler>();
+	const emitted: unknown[] = [];
+	let confirmations = 0;
+	const pi = {
+		on(name: string, handler: ToolCallHandler) {
+			handlers.set(name, handler);
+		},
+		events: { emit(_channel: string, data: unknown) { emitted.push(data); } },
+		registerCommand() {},
+		registerTool() {},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	const toolCall = handlers.get("tool_call");
+	assert.equal(typeof toolCall, "function");
+	const cwd = mkdtempSync(join(tmpdir(), "gentle-pi-permission-headless-"));
+	try {
+		const confirm = async () => {
+			confirmations += 1;
+			return true;
+		};
+		assert.equal(await toolCall!({ toolName: "bash", input: { command: "echo safe --secret-command-content" } }, {
+			cwd,
+			hasUI: false,
+			ui: { confirm },
+		} as ExtensionContext), undefined);
+		assert.deepEqual(await toolCall!({ toolName: "bash", input: { command: "git rebase main" } }, {
+			cwd,
+			hasUI: false,
+			ui: { confirm },
+		} as ExtensionContext), {
+			block: true,
+			reason: "Gentle AI safety policy requires interactive confirmation before this command.",
+		});
+		assert.equal(confirmations, 0);
+		assert.deepEqual(emitted, []);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
 	}
 });

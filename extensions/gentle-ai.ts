@@ -1026,6 +1026,7 @@ function evaluateSensitivePathTool(
 async function confirmCommand(
 	command: string,
 	ctx: ExtensionContext,
+	events: ExtensionAPI["events"],
 ): Promise<ToolCallEventResult | undefined> {
 	const guardrailsConfig = loadRuntimeGuardrailsConfig(ctx.cwd);
 	const classification = classifyGuardedCommand(command, guardrailsConfig);
@@ -1056,7 +1057,32 @@ async function confirmCommand(
 		180,
 		"…",
 	);
-	const approved = await ctx.ui.confirm("Allow guarded command?", preview);
+	const requestId = randomUUID();
+	const emitPermissionRequest = (
+		state: "waiting" | "approved" | "denied",
+	): void => {
+		events.emit("pi-permission-system:permission-request", {
+			requestId,
+			state,
+			source: "tool_call",
+			message: "Gentle AI safety policy requires confirmation for this tool call.",
+			toolName: "bash",
+		});
+	};
+
+	let approved = false;
+	let confirmationFailed = false;
+	let confirmationError: unknown;
+	emitPermissionRequest("waiting");
+	try {
+		approved = await ctx.ui.confirm("Allow guarded command?", preview);
+	} catch (error) {
+		confirmationFailed = true;
+		confirmationError = error;
+	} finally {
+		emitPermissionRequest(confirmationFailed || !approved ? "denied" : "approved");
+	}
+	if (confirmationFailed) throw confirmationError;
 	if (approved) return undefined;
 	return {
 		block: true,
@@ -5169,7 +5195,7 @@ function createGentleAiExtensionForTesting(
 		if (!isRecord(event.input) || typeof event.input.command !== "string") {
 			return undefined;
 		}
-		return await confirmCommand(event.input.command, ctx);
+		return await confirmCommand(event.input.command, ctx, pi.events);
 	});
 
 	pi.registerCommand("gentle:install-sdd", {
