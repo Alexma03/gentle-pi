@@ -64,10 +64,28 @@ function createPi() {
 	const commands = new Map();
 	const flags = new Map();
 	const tools = new Map();
+	const eventHandlers = new Map();
+	const emittedEvents = [];
 	const flagValues = new Map([["no-skill-registry", true]]);
+	const events = {
+		emit(channel, data) {
+			emittedEvents.push({ channel, data });
+			for (const handler of eventHandlers.get(channel) ?? []) handler(data);
+		},
+		on(channel, handler) {
+			const handlers = eventHandlers.get(channel) ?? new Set();
+			handlers.add(handler);
+			eventHandlers.set(channel, handlers);
+			return () => {
+				handlers.delete(handler);
+				if (handlers.size === 0) eventHandlers.delete(channel);
+			};
+		},
+	};
 	let activeTools = ["read", "bash", "edit", "write"];
 
 	const pi = {
+		events,
 		on(name, handler) {
 			const list = hooks.get(name) ?? [];
 			list.push(handler);
@@ -108,7 +126,7 @@ function createPi() {
 		},
 	};
 
-	return { pi, hooks, commands, flags, tools };
+	return { pi, hooks, commands, flags, tools, emittedEvents };
 }
 
 function createUi() {
@@ -206,7 +224,7 @@ async function run() {
 	process.env.GENTLE_PI_TEST_ASSETS_DIR = ambientTestAssetsDir;
 	const globalModelsPath = join(globalConfigHome, "models.json");
 	const globalSubagentsPath = join(globalAgentHome, "subagents.json");
-	const { pi, hooks, commands, flags, tools } = createPi();
+	const { pi, hooks, commands, flags, tools, emittedEvents } = createPi();
 	await loadExtensions(pi);
 
 	// gentle-pi#404: a collect binding that returns the native last-event
@@ -524,6 +542,43 @@ async function run() {
 		);
 		assert.equal(needsConfirm.block, true);
 		assert.match(needsConfirm.reason, /not confirmed/);
+		assert.deepEqual(
+			emittedEvents.map(({ channel, data }) => ({
+				channel,
+				state: data.state,
+				active: data.active,
+				label: data.label,
+			})),
+			[
+				{
+					channel: "pi-permission-system:permission-request",
+					state: "waiting",
+					active: undefined,
+					label: undefined,
+				},
+				{
+					channel: "herdr:blocked",
+					state: undefined,
+					active: true,
+					label: "Guarded command confirmation",
+				},
+				{
+					channel: "pi-permission-system:permission-request",
+					state: "denied",
+					active: undefined,
+					label: undefined,
+				},
+				{
+					channel: "herdr:blocked",
+					state: undefined,
+					active: false,
+					label: undefined,
+				},
+			],
+			"guarded confirmation emits both lifecycle channels in order",
+		);
+		assert.equal(emittedEvents[0].data.requestId, emittedEvents[2].data.requestId);
+		emittedEvents.length = 0;
 		assert.equal(
 			dangerousReviewCtx.ui.notifications.length,
 			0,

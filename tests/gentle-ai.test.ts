@@ -519,8 +519,13 @@ test("guarded command confirmation emits a generic correlated permission lifecyc
 			toolName: "bash";
 		};
 	};
+	type HerdrBlockedEvent = {
+		channel: "herdr:blocked";
+		data: { active: boolean; label?: string };
+	};
+	type EmittedEvent = PermissionEvent | HerdrBlockedEvent;
 	const handlers = new Map<string, ToolCallHandler>();
-	const emitted: PermissionEvent[] = [];
+	const emitted: EmittedEvent[] = [];
 	const sequence: string[] = [];
 	let confirm!: () => Promise<boolean>;
 	const pi = {
@@ -528,9 +533,13 @@ test("guarded command confirmation emits a generic correlated permission lifecyc
 			handlers.set(name, handler);
 		},
 		events: {
-			emit(channel: string, data: PermissionEvent["data"]) {
-				sequence.push(`event:${data.state}`);
-				emitted.push({ channel, data });
+			emit(channel: string, data: EmittedEvent["data"]) {
+				sequence.push(
+					channel === "herdr:blocked"
+						? `herdr:${"active" in data && data.active ? "active" : "inactive"}`
+						: `event:${data.state}`,
+				);
+				emitted.push({ channel, data } as EmittedEvent);
 			},
 		},
 		registerCommand() {},
@@ -561,7 +570,11 @@ test("guarded command confirmation emits a generic correlated permission lifecyc
 		await Promise.resolve();
 		assert.equal(emitted[0].channel, "pi-permission-system:permission-request");
 		assert.equal(emitted[0].data.state, "waiting");
-		assert.deepEqual(sequence, ["event:waiting", "confirm"]);
+		assert.deepEqual(emitted[1], {
+			channel: "herdr:blocked",
+			data: { active: true, label: "Guarded command confirmation" },
+		});
+		assert.deepEqual(sequence, ["event:waiting", "herdr:active", "confirm"]);
 		const deniedRequestId = emitted[0].data.requestId;
 		assert.match(deniedRequestId, /^[0-9a-f-]{36}$/);
 		assert.deepEqual(emitted[0].data, {
@@ -580,7 +593,7 @@ test("guarded command confirmation emits a generic correlated permission lifecyc
 			block: true,
 			reason: "Gentle AI safety policy blocked the command because it was not confirmed.",
 		});
-		assert.deepEqual(emitted[1], {
+		assert.deepEqual(emitted[2], {
 			channel: "pi-permission-system:permission-request",
 			data: {
 				requestId: deniedRequestId,
@@ -590,30 +603,52 @@ test("guarded command confirmation emits a generic correlated permission lifecyc
 				toolName: "bash",
 			},
 		});
+		assert.deepEqual(emitted[3], {
+			channel: "herdr:blocked",
+			data: { active: false },
+		});
+		assert.deepEqual(sequence, ["event:waiting", "herdr:active", "confirm", "event:denied", "herdr:inactive"]);
 
 		emitted.length = 0;
 		sequence.length = 0;
 		confirm = async () => true;
 		assert.equal(await toolCall!({ toolName: "bash", input: { command: "git rebase main" } }, ctx), undefined);
-		assert.equal(emitted.length, 2);
+		assert.equal(emitted.length, 4);
 		assert.equal(emitted[0].data.state, "waiting");
-		assert.equal(emitted[1].data.state, "approved");
-		assert.equal(emitted[0].data.requestId, emitted[1].data.requestId);
+		assert.deepEqual(emitted[1], {
+			channel: "herdr:blocked",
+			data: { active: true, label: "Guarded command confirmation" },
+		});
+		assert.equal(emitted[2].data.state, "approved");
+		assert.equal(emitted[0].data.requestId, emitted[2].data.requestId);
 		assert.notEqual(emitted[0].data.requestId, deniedRequestId);
-		assert.deepEqual(sequence, ["event:waiting", "confirm", "event:approved"]);
+		assert.deepEqual(emitted[3], {
+			channel: "herdr:blocked",
+			data: { active: false },
+		});
+		assert.deepEqual(sequence, ["event:waiting", "herdr:active", "confirm", "event:approved", "herdr:inactive"]);
 
 		emitted.length = 0;
 		sequence.length = 0;
-		confirm = async () => { throw new Error("confirmation unavailable"); };
+		const confirmationError = new Error("confirmation unavailable");
+		confirm = async () => { throw confirmationError; };
 		await assert.rejects(
 			toolCall!({ toolName: "bash", input: { command: "git rebase main" } }, ctx),
-			/confirmation unavailable/,
+			(error) => error === confirmationError,
 		);
-		assert.equal(emitted.length, 2);
+		assert.equal(emitted.length, 4);
 		assert.equal(emitted[0].data.state, "waiting");
-		assert.equal(emitted[1].data.state, "denied");
-		assert.equal(emitted[0].data.requestId, emitted[1].data.requestId);
-		assert.deepEqual(sequence, ["event:waiting", "confirm", "event:denied"]);
+		assert.deepEqual(emitted[1], {
+			channel: "herdr:blocked",
+			data: { active: true, label: "Guarded command confirmation" },
+		});
+		assert.equal(emitted[2].data.state, "denied");
+		assert.equal(emitted[0].data.requestId, emitted[2].data.requestId);
+		assert.deepEqual(emitted[3], {
+			channel: "herdr:blocked",
+			data: { active: false },
+		});
+		assert.deepEqual(sequence, ["event:waiting", "herdr:active", "confirm", "event:denied", "herdr:inactive"]);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}

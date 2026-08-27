@@ -1069,11 +1069,17 @@ async function confirmCommand(
 			toolName: "bash",
 		});
 	};
+	const emitHerdrBlocked = (active: boolean): void => {
+		events.emit("herdr:blocked", active
+			? { active: true, label: "Guarded command confirmation" }
+			: { active: false });
+	};
 
 	let approved = false;
 	let confirmationFailed = false;
 	let confirmationError: unknown;
 	emitPermissionRequest("waiting");
+	emitHerdrBlocked(true);
 	try {
 		approved = await ctx.ui.confirm("Allow guarded command?", preview);
 	} catch (error) {
@@ -1081,6 +1087,7 @@ async function confirmCommand(
 		confirmationError = error;
 	} finally {
 		emitPermissionRequest(confirmationFailed || !approved ? "denied" : "approved");
+		emitHerdrBlocked(false);
 	}
 	if (confirmationFailed) throw confirmationError;
 	if (approved) return undefined;
