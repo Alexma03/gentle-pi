@@ -1275,7 +1275,7 @@ async function run() {
 		pi.setActiveTools(["read", "bash", "edit", "write", "mem_save"]);
 		const ctx = createCtx(engramSddCwd, true, "engram-session");
 		await commands.get("gentle:sdd-preflight").handler("", ctx);
-		assert.deepEqual(ctx.ui.selections[1].options, ["openspec", "engram", "both"]);
+		assert.deepEqual(ctx.ui.selections[1].options, ["openspec", "engram", "hybrid"]);
 	} finally {
 		pi.setActiveTools(["read", "bash", "edit", "write"]);
 		await rm(engramSddCwd, { recursive: true, force: true });
@@ -1326,7 +1326,7 @@ async function run() {
 		pi.setActiveTools(["read", "bash", "edit", "write", "mem_save"]);
 		const ctx = createCtx(bothSddInitCwd, true, "both-sdd-init-session");
 		ctx.ui.select = async (label, options) => {
-			if (label === "SDD artifact store") return "both";
+			if (label === "SDD artifact store") return "hybrid";
 			return options[0];
 		};
 		await commands.get("gentle:sdd-preflight").handler("", ctx);

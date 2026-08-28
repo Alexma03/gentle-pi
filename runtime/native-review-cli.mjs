@@ -89,8 +89,9 @@ export const NATIVE_SDD_ARTIFACT_STORE = {
 	// HYBRID reaches the wire with gentle-ai #3814/#3636. It previously existed
 	// only in prompt prose while the provider reported such a workspace as
 	// openspec. Note the vocabulary difference from Pi's own preflight type in
-	// lib/sdd-status.ts, which calls the operator-facing choice "both": this
-	// constant is the WIRE domain, and gentle-ai owns it.
+	// lib/sdd-status.ts, which now uses the same name: the operator-facing
+	// choice was reconciled to the provider's vocabulary, and already-persisted
+	// "both" normalizes forward.
 	HYBRID: "hybrid",
 	NONE: "none",
 }         ;

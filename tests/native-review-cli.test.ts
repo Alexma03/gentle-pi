@@ -614,7 +614,10 @@ test("native SDD status rejects an unknown status identity in either direction",
 	for (const [name, document] of [
 		["unknown version", { ...fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json"), schemaVersion: 3 }],
 		["unknown schema name", { ...fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json"), schemaName: "gentle-ai.sdd-status-next" }],
-		["unknown artifact store", { ...fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json"), artifactStore: "both" }],
+		// "both" is this repo's own legacy spelling of the dual-store mode. The
+		// provider never emits it, so it must be refused on the wire even though
+		// the preflight normalizes it forward when reading operator config.
+		["a store the provider never emits", { ...fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json"), artifactStore: "both" }],
 	] as const) {
 		const queue = queuedAdapter([{ stdout: JSON.stringify(document) }]);
 		await assert.rejects(
