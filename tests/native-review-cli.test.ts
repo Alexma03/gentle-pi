@@ -578,3 +578,72 @@ test("current review STATUS retains compact snapshot and released-lock wire fiel
 		assert.equal((await client(canonical.adapter).reviewStatus({ cwd: alias })).repository, root);
 	}
 });
+
+// gentle-ai commit 3c4c7fb6 (2026-08-24, "refactor(sdd)!: replace status v1 with
+// clean v2") moved SchemaVersion from 1 to 2, and gentle-ai #3814 widens the
+// artifactStore domain with "hybrid" (a mode that previously existed only in
+// prompt prose, see gentle-ai #3636). gentle-pi had no v2 decoder at all, so
+// every current status was rejected with IDENTITY_MISMATCH before any field was
+// read. The v2 object shape is key-identical to the shape this decoder already
+// declares; only the version value and the artifactStore domain moved.
+
+test("native SDD status decodes the v2 identity", async () => {
+	const document = fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json");
+	assert.equal(document.schemaVersion, 2, "fixture must be a real v2 capture");
+	const queue = queuedAdapter([{ stdout: JSON.stringify(document) }]);
+	const status = await client(queue.adapter).sddStatus({ cwd: "/repo", change: "agent-builder" });
+	assert.equal(status.artifactStore, "openspec");
+});
+
+test("native SDD status admits the hybrid artifact store", async () => {
+	const document = { ...fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json"), artifactStore: "hybrid" };
+	const queue = queuedAdapter([{ stdout: JSON.stringify(document) }]);
+	const status = await client(queue.adapter).sddStatus({ cwd: "/repo", change: "agent-builder" });
+	assert.equal(status.artifactStore, "hybrid");
+});
+
+test("native SDD status keeps decoding the v1 identity it was pinned against", async () => {
+	const document = fixture("../native-review-cli/v2.1.3/sdd-status.json");
+	assert.equal(document.schemaVersion, 1, "the pinned-era fixture must stay v1");
+	const queue = queuedAdapter([{ stdout: JSON.stringify(document) }]);
+	const status = await client(queue.adapter).sddStatus({ cwd: "/repo", change: "native-review-authority-parity" });
+	assert.equal(status.artifactStore, "openspec");
+});
+
+test("native SDD status rejects an unknown status identity in either direction", async () => {
+	for (const [name, document] of [
+		["unknown version", { ...fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json"), schemaVersion: 3 }],
+		["unknown schema name", { ...fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json"), schemaName: "gentle-ai.sdd-status-next" }],
+		["unknown artifact store", { ...fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json"), artifactStore: "both" }],
+	] as const) {
+		const queue = queuedAdapter([{ stdout: JSON.stringify(document) }]);
+		await assert.rejects(
+			() => client(queue.adapter).sddStatus({ cwd: "/repo", change: "agent-builder" }),
+			(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH,
+			`expected ${name} to be refused`,
+		);
+	}
+});
+
+test("native SDD status expects each identity's own artifact set, not a merged one", async () => {
+	// v2 removed review lineage state from the SDD document. Accepting a v1 body
+	// under v2 (or the reverse) would silently admit a shape the provider never
+	// emits for that identity, which is what the cross-identity rule forbids.
+	const v1 = fixture("../native-review-cli/v2.1.3/sdd-status.json");
+	const v2 = fixture("../native-review-cli/v2.5.0-rc.1/sdd-status.json");
+
+	assert.deepEqual(Object.keys(v2.artifacts as object).sort(), ["applyProgress", "design", "proposal", "specs", "tasks", "verifyReport"]);
+	assert.ok(Object.keys(v1.artifacts as object).includes("reviewReceipt"), "the v1 fixture must still carry review artifacts");
+
+	for (const [name, document, change] of [
+		["v1 artifacts under the v2 identity", { ...v2, artifacts: v1.artifacts, artifactPaths: v1.artifactPaths, contextFiles: v1.contextFiles }, "agent-builder"],
+		["v2 artifacts under the v1 identity", { ...v1, artifacts: v2.artifacts, artifactPaths: v2.artifactPaths, contextFiles: v2.contextFiles }, "native-review-authority-parity"],
+	] as const) {
+		const queue = queuedAdapter([{ stdout: JSON.stringify(document) }]);
+		await assert.rejects(
+			() => client(queue.adapter).sddStatus({ cwd: "/repo", change }),
+			(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.SCHEMA_INCOMPATIBLE,
+			`expected ${name} to be refused`,
+		);
+	}
+});
