@@ -85,8 +85,21 @@ export type ExecFileAdapter = (request: ExecFileRequest) => Promise<ExecFileResu
 export const NATIVE_SDD_ARTIFACT_STORE = {
 	OPENSPEC: "openspec",
 	ENGRAM: "engram",
+	// HYBRID reaches the wire with gentle-ai #3814/#3636. It previously existed
+	// only in prompt prose while the provider reported such a workspace as
+	// openspec. Note the vocabulary difference from Pi's own preflight type in
+	// lib/sdd-status.ts, which now uses the same name: the operator-facing
+	// choice was reconciled to the provider's vocabulary, and already-persisted
+	// "both" normalizes forward.
+	HYBRID: "hybrid",
 	NONE: "none",
 } as const;
+
+// The status identities this decoder admits. gentle-ai 3c4c7fb6 replaced v1
+// with v2; the object shape is key-identical across the two, so one decoder
+// spans both rather than duplicating it. Anything outside this set is an
+// identity mismatch, in either direction.
+export const NATIVE_SDD_STATUS_VERSIONS = [1, 2] as const;
 export type NativeSddArtifactStore = (typeof NATIVE_SDD_ARTIFACT_STORE)[keyof typeof NATIVE_SDD_ARTIFACT_STORE];
 
 export const NATIVE_SDD_ARTIFACT_STATE = {
@@ -1308,13 +1321,19 @@ class NativeReviewPlainCli {
 		const { body: result } = await this.execute(NATIVE_REVIEW_OPERATION.SDD_STATUS, request.cwd, ["sdd-status", request.change, "--cwd", request.cwd, "--json", "--instructions"], false, request.signal);
 		return decode(NATIVE_REVIEW_OPERATION.SDD_STATUS, false, () => {
 			const body = exactObject(result, ["schemaName", "schemaVersion", "changeName", "artifactStore", "planningHome", "changeRoot", "artifactPaths", "contextFiles", "artifacts", "taskProgress", "dependencies", "applyState", "actionContext", "relationships", "remediationState", "nextRecommended", "blockedReasons"], ["reviewGate", "reviewTransaction", "phaseInstructions"]);
-			if (body.schemaName !== "gentle-ai.sdd-status" || body.schemaVersion !== 1 || body.changeName !== request.change || !["openspec", "engram", "none"].includes(body.artifactStore as string) || !["blocked", "all_done", "ready"].includes(body.applyState as string)) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.SDD_STATUS, false, "native status identity mismatch");
-			const paths = ["proposal", "specs", "design", "tasks", "applyProgress", "verifyReport", "reviewPolicy", "reviewLedger", "reviewReceipt", "reviewBundle", "reviewContext", "reviewState"];
+			if (body.schemaName !== "gentle-ai.sdd-status" || !(NATIVE_SDD_STATUS_VERSIONS as readonly number[]).includes(body.schemaVersion as number) || body.changeName !== request.change || !(Object.values(NATIVE_SDD_ARTIFACT_STORE) as string[]).includes(body.artifactStore as string) || !["blocked", "all_done", "ready"].includes(body.applyState as string)) throw nativeError(NATIVE_REVIEW_ERROR_CODE.IDENTITY_MISMATCH, NATIVE_REVIEW_OPERATION.SDD_STATUS, false, "native status identity mismatch");
+			// v2 removed review lineage state from the SDD status document: the
+			// review* artifacts and their paths are gone, because review authority
+			// no longer projects here. v1 still carries them, so the expected key
+			// sets are gated on the identity rather than merged.
+			const v2 = body.schemaVersion === 2;
+			const sddPaths = ["proposal", "specs", "design", "tasks", "applyProgress", "verifyReport"];
+			const paths = v2 ? sddPaths : [...sddPaths, "reviewPolicy", "reviewLedger", "reviewReceipt", "reviewBundle", "reviewContext", "reviewState"];
 			const pathMap = (value: unknown) => { const parsed = exactObject(value, paths); for (const path of paths) stringArray(parsed[path]); };
 			const planningHome = exactObject(body.planningHome, ["mode", "path"]);
 			if (planningHome.mode !== "repo-local") throw new Error("invalid planning home");
 			requiredString(planningHome.path); requiredString(body.changeRoot); pathMap(body.artifactPaths); pathMap(body.contextFiles);
-			const artifactStates = paths.filter((path) => path !== "reviewPolicy" || body.artifactStore === NATIVE_SDD_ARTIFACT_STORE.ENGRAM);
+			const artifactStates = v2 ? paths : paths.filter((path) => path !== "reviewPolicy" || body.artifactStore === NATIVE_SDD_ARTIFACT_STORE.ENGRAM);
 			const artifacts = exactObject(body.artifacts, artifactStates);
 			for (const path of artifactStates) if (!Object.values(NATIVE_SDD_ARTIFACT_STATE).includes(artifacts[path] as NativeSddArtifactState)) throw new Error("invalid artifact state");
 			const taskProgress = exactObject(body.taskProgress, ["total", "completed", "pending", "allComplete"]);
@@ -1326,9 +1345,12 @@ class NativeReviewPlainCli {
 			if (actionContext.mode !== "repo-local" || requiredString(actionContext.workspaceRoot).length === 0 || stringArray(actionContext.allowedEditRoots).length === 0) throw new Error("invalid action context");
 			const relationships = exactObject(body.relationships, ["dependsOn", "supersedes", "amends", "conflictsWith", "sameDomainActiveChanges"]);
 			for (const field of ["dependsOn", "supersedes", "amends", "conflictsWith", "sameDomainActiveChanges"]) stringArray(relationships[field]);
-			const remediation = exactObject(body.remediationState, ["required", "complete", "failedEvidenceRevision", "lineageId", "generation", "fixBatch", "reason"], ["correctionBudget"]);
-			if (typeof remediation.required !== "boolean" || typeof remediation.complete !== "boolean" || ["failedEvidenceRevision", "lineageId", "reason"].some((field) => typeof remediation[field] !== "string")) throw new Error("invalid remediation state");
-			nonNegativeInteger(remediation.generation); nonNegativeInteger(remediation.fixBatch);
+			// Same identity gate: v2 dropped lineageId/generation/fixBatch from
+			// remediationState along with the review lineage projection.
+			const remediationStrings = v2 ? ["failedEvidenceRevision", "reason"] : ["failedEvidenceRevision", "lineageId", "reason"];
+			const remediation = exactObject(body.remediationState, v2 ? ["required", "complete", "failedEvidenceRevision", "reason"] : ["required", "complete", "failedEvidenceRevision", "lineageId", "generation", "fixBatch", "reason"], ["correctionBudget"]);
+			if (typeof remediation.required !== "boolean" || typeof remediation.complete !== "boolean" || remediationStrings.some((field) => typeof remediation[field] !== "string")) throw new Error("invalid remediation state");
+			if (!v2) { nonNegativeInteger(remediation.generation); nonNegativeInteger(remediation.fixBatch); }
 			if (remediation.correctionBudget !== undefined) nonNegativeInteger(remediation.correctionBudget);
 			if (body.phaseInstructions !== undefined) {
 				const instructions = exactObject(body.phaseInstructions, ["apply", "verify", "remediate", "archive"]);
