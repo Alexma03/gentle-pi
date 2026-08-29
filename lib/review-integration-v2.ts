@@ -434,6 +434,10 @@ export interface ReviewTargetedValidationFindingV1 {
 
 export interface ReviewTargetedValidationClassificationV1 {
 	findingId: string;
+	// The provider's FindingEvidence carries severity as an omitempty field, so
+	// a classification may or may not name one. Rejecting it made every
+	// targeted-validation STATUS that carried one undecodable.
+	severity?: string;
 	class: "deterministic" | "inferential";
 	causalDisposition: "introduced" | "behavior-activated" | "worsened";
 	proof: string;
@@ -1009,7 +1013,7 @@ export function decodeReviewStartV3(value: unknown): ReviewStartV3 {
 	const body = exactRecord(value, "start", [
 		"schema", "contract", "operation", "action", "lenses_required", "lineage_id", "state", "risk_level",
 		"selected_lenses", "projection", "changed_files", "changed_lines", "correction_budget", "risk_reasons", "artifact_subjects",
-	], [...overlayFields, "changed_path_manifest", "repository_context"]);
+	], [...overlayFields, "changed_path_manifest", "repository_context", "acknowledgement"]);
 	requireIdentity(body, "gentle-ai.review-integration.start/v3", REVIEW_INTEGRATION_OPERATION.START);
 
 	// dependentRequired binds base_tree<->candidate_tree bidirectionally, and
@@ -1048,7 +1052,7 @@ export function decodeReviewStartV3(value: unknown): ReviewStartV3 {
 		if (source.capability !== "review.opaque_repository_context") throw new TypeError("start.repository_context.capability is unsupported");
 		repositoryContext = {
 			capability: "review.opaque_repository_context",
-			handle: text(source.handle, "start.repository_context.handle", { pattern: /^rctx1_[0-9a-f]{64}$/ }),
+			handle: text(source.handle, "start.repository_context.handle", { pattern: /^rctx[12]_[0-9a-f]{64}$/ }),
 			revision: sha256(source.revision, "start.repository_context.revision"),
 			targetIdentity: sha256(source.target_identity, "start.repository_context.target_identity"),
 			...(source.event_id === undefined ? {} : { eventId: sha256(source.event_id, "start.repository_context.event_id") }),
@@ -1196,7 +1200,7 @@ export function decodeAuthorityRepairAssessmentV1(value: unknown): AuthorityRepa
 // collect inputs and the execute binding.
 // ---------------------------------------------------------------------------
 
-const NEXT_TRANSITION_OPERATIONS = ["review.start", "review.recover", "review.repair"] as const;
+const NEXT_TRANSITION_OPERATIONS = ["review.start", "review.recover", "review.repair", "review.acknowledge-approved"] as const;
 
 function decodeTransitionArguments(value: unknown, label: string): readonly ReviewTransitionArgumentV3[] {
 	return array(value, label, (entry, entryLabel) => {
@@ -1314,9 +1318,11 @@ export function decodeReviewTargetedValidationRequestV1(value: unknown, label = 
 		};
 	}, { minimum: 1 });
 	const fixClassifications = array(body.fix_classifications, `${label}.fix_classifications`, (entry, entryLabel): ReviewTargetedValidationClassificationV1 => {
-		const classification = exactRecord(entry, entryLabel, ["finding_id", "class", "causal_disposition", "proof"]);
+		const classification = exactRecord(entry, entryLabel, ["finding_id", "class", "causal_disposition", "proof"], ["severity"]);
+		const severity = classification.severity === undefined ? undefined : nonempty(classification.severity, `${entryLabel}.severity`);
 		return {
 			findingId: nonempty(classification.finding_id, `${entryLabel}.finding_id`),
+			...(severity === undefined ? {} : { severity }),
 			class: enumeration(classification.class, ["deterministic", "inferential"] as const, `${entryLabel}.class`),
 			causalDisposition: enumeration(classification.causal_disposition, ["introduced", "behavior-activated", "worsened"] as const, `${entryLabel}.causal_disposition`),
 			proof: nonempty(classification.proof, `${entryLabel}.proof`),
@@ -1633,7 +1639,7 @@ export function decodeReviewStatusV3(value: unknown): ReviewStatusV3 {
 		if (source.capability !== "review.opaque_repository_context") throw new TypeError("status.repository_context.capability is unsupported");
 		repositoryContext = {
 			capability: "review.opaque_repository_context",
-			handle: text(source.handle, "status.repository_context.handle", { pattern: /^rctx1_[0-9a-f]{64}$/ }),
+			handle: text(source.handle, "status.repository_context.handle", { pattern: /^rctx[12]_[0-9a-f]{64}$/ }),
 			revision: sha256(source.revision, "status.repository_context.revision"),
 			targetIdentity: sha256(source.target_identity, "status.repository_context.target_identity"),
 			...(source.event_id === undefined ? {} : { eventId: sha256(source.event_id, "status.repository_context.event_id") }),
@@ -2046,6 +2052,30 @@ export interface ReviewStatusContinuationV1 {
 	raw: Record<string, unknown>;
 }
 
+const REVIEW_APPROVED_ACKNOWLEDGEMENT_OPERATION = "review.acknowledge-approved" as const;
+
+// The exact ordered argument names the provider renders for one approved
+// acknowledgement. The list is closed and positional on the wire, so decoding
+// by position is what proves the relay is replaying the provider's own
+// invocation rather than one the host assembled.
+const REVIEW_APPROVED_ACKNOWLEDGEMENT_ARGUMENTS = ["cwd", "lineage", "target", "expected-revision", "token"] as const;
+
+export interface ReviewApprovedAcknowledgementBindingV1 {
+	lineageId: string;
+	revision: string;
+	targetIdentity: string;
+	repositoryContext?: string;
+}
+
+export interface ReviewApprovedAcknowledgementV1 {
+	operation: typeof REVIEW_APPROVED_ACKNOWLEDGEMENT_OPERATION;
+	command: string;
+	arguments: readonly ReviewTransitionArgumentV3[];
+	preconditions: readonly ReviewTransitionArgumentV3[];
+	binding: ReviewApprovedAcknowledgementBindingV1;
+	raw: Record<string, unknown>;
+}
+
 export interface ReviewLastEventClosureV1 {
 	schema: typeof REVIEW_LAST_EVENT_CLOSURE_SCHEMA;
 	operation: ReviewLastEventClosureOperation;
@@ -2058,6 +2088,12 @@ export interface ReviewLastEventClosureV1 {
 	correctionLines?: number;
 	advisoryFindings?: ReviewAdvisoryFindingsV1;
 	statusContinuation?: ReviewStatusContinuationV1;
+	acknowledgement?: ReviewApprovedAcknowledgementV1;
+	// Set when the provider sent an acknowledgement this decoder could not
+	// read. It is deliberately distinct from an absent one: the host must be
+	// able to tell "approved, nothing to run" from "approved, and the thing
+	// that ends this is present but unreadable here".
+	acknowledgementUndecodable?: true;
 }
 
 export interface ReviewLastEventClosureBinding {
@@ -2084,6 +2120,48 @@ function decodeReviewStatusContinuationArtifactV1(value: unknown, label: string)
 	};
 }
 
+// decodeReviewApprovedAcknowledgementV1 decodes the one continuation that burns
+// approved authority. Only this exact invocation ends the lifecycle, so every
+// field is pinned: the closed positional argument list, the single approved
+// precondition, and the fully-bound lineage/revision/target it commits to.
+function decodeReviewApprovedAcknowledgementV1(value: unknown, label: string): ReviewApprovedAcknowledgementV1 {
+	const body = exactRecord(value, label, ["operation", "command", "arguments", "preconditions", "binding"]);
+	if (body.operation !== REVIEW_APPROVED_ACKNOWLEDGEMENT_OPERATION) {
+		throw new TypeError(`${label}.operation must be ${REVIEW_APPROVED_ACKNOWLEDGEMENT_OPERATION}`);
+	}
+	const command = text(body.command, `${label}.command`, { minimum: 1, pattern: /^gentle-ai review acknowledge-approved(?: |$)/ });
+	const argumentsList = decodeTransitionArguments(body.arguments, `${label}.arguments`);
+	if (argumentsList.length !== REVIEW_APPROVED_ACKNOWLEDGEMENT_ARGUMENTS.length) {
+		throw new TypeError(`${label}.arguments must carry exactly ${REVIEW_APPROVED_ACKNOWLEDGEMENT_ARGUMENTS.length} provider-issued arguments`);
+	}
+	argumentsList.forEach((argument, index) => {
+		const expected = REVIEW_APPROVED_ACKNOWLEDGEMENT_ARGUMENTS[index];
+		if (argument.name !== expected) throw new TypeError(`${label}.arguments[${index}].name must be ${expected}`);
+		if (argument.token === undefined) throw new TypeError(`${label}.arguments[${index}] requires its exact token`);
+	});
+	const preconditions = decodeTransitionArguments(body.preconditions, `${label}.preconditions`);
+	if (preconditions.length !== 1 || preconditions[0].name !== "state" || preconditions[0].value !== "approved") {
+		throw new TypeError(`${label}.preconditions must be the single approved state precondition`);
+	}
+	const sourceBinding = exactRecord(body.binding, `${label}.binding`, ["lineage_id", "revision", "target_identity"], ["repository_context"]);
+	const repositoryContext = sourceBinding.repository_context === undefined
+		? undefined
+		: text(sourceBinding.repository_context, `${label}.binding.repository_context`, { pattern: /^rctx[12]_[0-9a-f]{64}$/ });
+	return {
+		operation: REVIEW_APPROVED_ACKNOWLEDGEMENT_OPERATION,
+		command,
+		arguments: argumentsList,
+		preconditions,
+		binding: {
+			lineageId: lineage(sourceBinding.lineage_id, `${label}.binding.lineage_id`),
+			revision: sha256(sourceBinding.revision, `${label}.binding.revision`),
+			targetIdentity: sha256(sourceBinding.target_identity, `${label}.binding.target_identity`),
+			...(repositoryContext === undefined ? {} : { repositoryContext }),
+		},
+		raw: body,
+	};
+}
+
 function decodeReviewStatusContinuationV1(value: unknown): ReviewStatusContinuationV1 {
 	const body = exactRecord(value, "last_event_closure.status_continuation", ["operation", "arguments", "preconditions", "binding"], ["command", "selector_arguments", "artifacts"]);
 	if (body.operation !== REVIEW_STATUS_CONTINUATION_OPERATION.STATUS) throw new TypeError("last_event_closure.status_continuation.operation must be review.status");
@@ -2096,7 +2174,7 @@ function decodeReviewStatusContinuationV1(value: unknown): ReviewStatusContinuat
 	const revision = sourceBinding.revision === undefined ? undefined : sha256(sourceBinding.revision, "last_event_closure.status_continuation.binding.revision");
 	const repositoryContext = sourceBinding.repository_context === undefined
 		? undefined
-		: text(sourceBinding.repository_context, "last_event_closure.status_continuation.binding.repository_context", { pattern: /^rctx1_[0-9a-f]{64}$/ });
+		: text(sourceBinding.repository_context, "last_event_closure.status_continuation.binding.repository_context", { pattern: /^rctx[12]_[0-9a-f]{64}$/ });
 	const selectorArguments = body.selector_arguments === undefined
 		? undefined
 		: decodeTransitionArguments(body.selector_arguments, "last_event_closure.status_continuation.selector_arguments");
@@ -2124,7 +2202,7 @@ function decodeReviewStatusContinuationV1(value: unknown): ReviewStatusContinuat
 }
 
 export function decodeReviewLastEventClosureV1(value: unknown): ReviewLastEventClosureV1 {
-	const body = exactRecord(value, "last_event_closure", ["schema", "operation", "lineage_id", "state", "store_revision"], ["target_identity", "request_hash", "correction_lines", "action", "advisory_findings", "status_continuation"]);
+	const body = exactRecord(value, "last_event_closure", ["schema", "operation", "lineage_id", "state", "store_revision"], ["target_identity", "request_hash", "correction_lines", "action", "advisory_findings", "status_continuation", "acknowledgement"]);
 	if (body.schema !== REVIEW_LAST_EVENT_CLOSURE_SCHEMA) throw new TypeError(`last_event_closure.schema must be ${REVIEW_LAST_EVENT_CLOSURE_SCHEMA}`);
 	const operation = enumeration(body.operation, Object.values(REVIEW_LAST_EVENT_CLOSURE_OPERATION), "last_event_closure.operation") as ReviewLastEventClosureOperation;
 	const state = enumeration(body.state, REVIEW_LAST_EVENT_TERMINAL_STATES, "last_event_closure.state") as ReviewLastEventClosureState;
@@ -2164,6 +2242,59 @@ export function decodeReviewLastEventClosureV1(value: unknown): ReviewLastEventC
 			throw new TypeError("last_event_closure status continuation lineage argument does not match its enclosing closure");
 		}
 	}
+	// Only an approved closure may carry the continuation that burns its
+	// authority: any other state offering an acknowledgement would be inviting
+	// a burn the provider never authorized.
+	//
+	// It stays optional because the pinned installer binary predates it. A
+	// provider that emits one is decoded strictly; a provider that does not is
+	// still the contract this build ships against. Requiring it belongs with
+	// the pin bump that makes it always present.
+	// Decoded defensively on purpose. This decoder pins the acknowledgement to a
+	// closed positional shape, and the same patch that added it already shows
+	// what strictness costs when the provider moves: rejecting one omitempty
+	// field made every targeted-validation STATUS that carried it undecodable.
+	// Here the blast radius would be worse than a lost field. Throwing would
+	// fail the whole approved closure, so the host would lose the approval
+	// outcome AND the only invocation that burns the authority, leaving the
+	// lineage approved and un-burnable at once. An unreadable continuation
+	// degrades to a flag; everything else about the approval still arrives.
+	let acknowledgement: ReviewApprovedAcknowledgementV1 | undefined;
+	let acknowledgementUndecodable = false;
+	if (body.acknowledgement !== undefined) {
+		try {
+			acknowledgement = decodeReviewApprovedAcknowledgementV1(body.acknowledgement, "last_event_closure.acknowledgement");
+		} catch {
+			acknowledgement = undefined;
+			acknowledgementUndecodable = true;
+		}
+	}
+	if (acknowledgementUndecodable && state !== "approved") {
+		throw new TypeError("last_event_closure acknowledgement requires approved state");
+	}
+	if (acknowledgement !== undefined) {
+		if (state !== "approved") throw new TypeError("last_event_closure acknowledgement requires approved state");
+		if (acknowledgement.binding.lineageId !== shared.lineageId) {
+			throw new TypeError("last_event_closure acknowledgement lineage does not match its enclosing closure");
+		}
+		if (acknowledgement.binding.revision !== shared.storeRevision) {
+			throw new TypeError("last_event_closure acknowledgement revision does not match its enclosing closure");
+		}
+		const lineageArguments = acknowledgement.arguments.filter((argument) => argument.name === "lineage");
+		if (lineageArguments.length !== 1 || lineageArguments[0]?.value !== shared.lineageId || lineageArguments[0]?.token !== `--lineage=${shared.lineageId}`) {
+			throw new TypeError("last_event_closure acknowledgement lineage argument does not match its enclosing closure");
+		}
+		// The target is the other half of what this invocation burns, and it is
+		// relayed verbatim. A terminal closure carries no target of its own, so
+		// the acknowledgement's binding is the only statement of which candidate
+		// is being burned: pinning lineage and revision while leaving the
+		// relayed target token free of it proves nothing about what runs.
+		const targetArguments = acknowledgement.arguments.filter((argument) => argument.name === "target");
+		if (targetArguments.length !== 1 || targetArguments[0]?.value !== acknowledgement.binding.targetIdentity
+			|| targetArguments[0]?.token !== `--target=${acknowledgement.binding.targetIdentity}`) {
+			throw new TypeError("last_event_closure acknowledgement target argument does not match its binding");
+		}
+	}
 	const action = nonempty(body.action, "last_event_closure.action");
 	const advisoryFindings = body.advisory_findings === undefined
 		? undefined
@@ -2174,6 +2305,8 @@ export function decodeReviewLastEventClosureV1(value: unknown): ReviewLastEventC
 		action,
 		...(advisoryFindings === undefined ? {} : { advisoryFindings }),
 		...(statusContinuation === undefined ? {} : { statusContinuation }),
+		...(acknowledgement === undefined ? {} : { acknowledgement }),
+		...(acknowledgementUndecodable ? { acknowledgementUndecodable: true as const } : {}),
 	};
 }
 
