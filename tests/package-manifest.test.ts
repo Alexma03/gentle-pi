@@ -912,6 +912,7 @@ test("gentle-ai-worker packages the exact scoped writer contract", () => {
 		"read",
 		"grep",
 		"find",
+		"codegraph",
 		"edit",
 		"write",
 		"bash",
@@ -922,6 +923,13 @@ test("gentle-ai-worker packages the exact scoped writer contract", () => {
 		"a subagent must not be able to delegate",
 	);
 	assert.ok(!tools.includes("glob"), "the unsupported glob tool must not return");
+	assert.match(source, /For structural questions, use the cwd-scoped `codegraph` tool before broad filesystem searches\./);
+	assert.match(source, /CodeGraph read access may be broad/);
+	assert.match(source, /writes remain strictly limited to the exact parent-provided `## Allowed edit surfaces`/);
+	assert.match(source, /CodeGraph does not authorize scope expansion/);
+	assert.match(source, /If CodeGraph reports that it is unavailable or fails, then use `read`, `grep`, and `find` as the fallback\./);
+	assert.match(source, /Do not use that fallback before CodeGraph is unavailable or fails\./);
+	assert.match(source, /If CodeGraph reports stale or pending files, read those files directly/);
 
 	const interactionContract = readMarkdownSection(source, "Interaction contract");
 	assert.doesNotMatch(
@@ -1028,6 +1036,7 @@ test("installSddAssets installs gentle-ai-worker with a loader-compatible scoped
 			"read",
 			"grep",
 			"find",
+			"codegraph",
 			"edit",
 			"write",
 			"bash",
@@ -1059,7 +1068,7 @@ test("normal and forced installation copy generic agents with complete role cont
 	const previousAgentHome = process.env.GENTLE_PI_AGENT_HOME;
 	const expectedTools = {
 		"gentle-ai-explore": ["read", "grep", "find", "codegraph"],
-		"gentle-ai-verify": ["read", "grep", "find", "bash"],
+		"gentle-ai-verify": ["read", "grep", "find", "codegraph", "bash"],
 	} as const;
 
 	try {
@@ -1094,6 +1103,13 @@ test("normal and forced installation copy generic agents with complete role cont
 						assert.match(source, /only outputs the parent explicitly identified as expected/);
 						assert.match(source, /unexpected mutation as a blocker/);
 						assert.match(source, /do not clean it up or fix it/);
+						assert.match(source, /For structural impact analysis, use the cwd-scoped `codegraph` tool before broad filesystem searches\./);
+						assert.match(source, /product files remain read-only/);
+						assert.match(source, /Only exact parent-authorized test, build, or lint commands may run\./);
+						assert.match(source, /CodeGraph output alone is not verification evidence\./);
+						assert.match(source, /inspect direct files and observed command results/i);
+						assert.match(source, /If CodeGraph reports that it is unavailable or fails, then use `read`, `grep`, and `find` as the fallback\./);
+						assert.match(source, /If CodeGraph reports stale or pending files, read those files directly/);
 					}
 				}
 			} finally {

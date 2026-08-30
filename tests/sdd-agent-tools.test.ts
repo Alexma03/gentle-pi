@@ -7,8 +7,8 @@ const repoRoot = process.cwd();
 const assetsAgentsDir = join(repoRoot, "assets", "agents");
 const GENERIC_ROLE_TOOLS: Record<string, string[]> = {
 	"gentle-ai-explore.md": ["read", "grep", "find", "codegraph"],
-	"gentle-ai-worker.md": ["read", "grep", "find", "edit", "write", "bash", "mem_save"],
-	"gentle-ai-verify.md": ["read", "grep", "find", "bash"],
+	"gentle-ai-worker.md": ["read", "grep", "find", "codegraph", "edit", "write", "bash", "mem_save"],
+	"gentle-ai-verify.md": ["read", "grep", "find", "codegraph", "bash"],
 };
 
 function readFrontmatter(path: string): string {
@@ -56,6 +56,28 @@ function assertGenericRoleBody(fileName: string, source: string): void {
 		assert.match(source, /only outputs the parent explicitly identified as expected/);
 		assert.match(source, /unexpected mutation as a blocker/);
 		assert.match(source, /report it, but do not clean it up or fix it/);
+	}
+}
+
+function assertCodeGraphGuidance(fileName: string, source: string): void {
+	if (fileName === "gentle-ai-worker.md") {
+		assert.match(source, /For structural questions, use the cwd-scoped `codegraph` tool before broad filesystem searches\./);
+		assert.match(source, /CodeGraph read access may be broad/);
+		assert.match(source, /writes remain strictly limited to the exact parent-provided `## Allowed edit surfaces`/);
+		assert.match(source, /CodeGraph does not authorize scope expansion/);
+		assert.match(source, /If CodeGraph reports that it is unavailable or fails, then use `read`, `grep`, and `find` as the fallback\./);
+		assert.match(source, /Do not use that fallback before CodeGraph is unavailable or fails\./);
+		assert.match(source, /If CodeGraph reports stale or pending files, read those files directly/);
+	}
+
+	if (fileName === "gentle-ai-verify.md") {
+		assert.match(source, /For structural impact analysis, use the cwd-scoped `codegraph` tool before broad filesystem searches\./);
+		assert.match(source, /product files remain read-only/);
+		assert.match(source, /Only exact parent-authorized test, build, or lint commands may run\./);
+		assert.match(source, /CodeGraph output alone is not verification evidence\./);
+		assert.match(source, /inspect direct files and observed command results/i);
+		assert.match(source, /If CodeGraph reports that it is unavailable or fails, then use `read`, `grep`, and `find` as the fallback\./);
+		assert.match(source, /If CodeGraph reports stale or pending files, read those files directly/);
 	}
 }
 
@@ -117,9 +139,11 @@ test("generic non-SDD agents declare exact role tool allowlists", () => {
 		const path = join(assetsAgentsDir, fileName);
 		assert.ok(existsSync(path), `${fileName} must exist`);
 		assert.deepEqual(readTools(path), expectedTools);
+		const source = readFileSync(path, "utf8");
 		if (fileName !== "gentle-ai-worker.md") {
-			assertGenericRoleBody(fileName, readFileSync(path, "utf8"));
+			assertGenericRoleBody(fileName, source);
 		}
+		assertCodeGraphGuidance(fileName, source);
 	}
 });
 

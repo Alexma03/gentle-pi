@@ -908,6 +908,29 @@ async function run() {
 			{ name: "gentle-ai-explore", tools: ["read", "grep", "find", "codegraph"] },
 			"isolated package installation must activate only the explorer inspection tools",
 		);
+		const installedWorkerPath = join(globalAgentHome, "agents", "gentle-ai-worker.md");
+		assert.equal(existsSync(installedWorkerPath), true);
+		assert.deepEqual(
+			readAgentDefinition(await readFile(installedWorkerPath, "utf8")),
+			{
+				name: "gentle-ai-worker",
+				tools: ["read", "grep", "find", "codegraph", "edit", "write", "bash", "mem_save"],
+			},
+			"isolated package installation must preserve the worker's scoped implementation tools",
+		);
+		const installedWorkerSource = await readFile(installedWorkerPath, "utf8");
+		assert.match(installedWorkerSource, /CodeGraph read access may be broad/);
+		assert.match(installedWorkerSource, /writes remain strictly limited to the exact parent-provided `## Allowed edit surfaces`/);
+		const installedVerifyPath = join(globalAgentHome, "agents", "gentle-ai-verify.md");
+		assert.equal(existsSync(installedVerifyPath), true);
+		assert.deepEqual(
+			readAgentDefinition(await readFile(installedVerifyPath, "utf8")),
+			{ name: "gentle-ai-verify", tools: ["read", "grep", "find", "codegraph", "bash"] },
+			"isolated package installation must activate the verifier's constrained inspection tools",
+		);
+		const installedVerifySource = await readFile(installedVerifyPath, "utf8");
+		assert.match(installedVerifySource, /CodeGraph output alone is not verification evidence\./);
+		assert.match(installedVerifySource, /Only exact parent-authorized test, build, or lint commands may run\./);
 		const installedRiskSource = await readFile(
 			join(globalAgentHome, "agents", "review-risk.md"),
 			"utf8",
