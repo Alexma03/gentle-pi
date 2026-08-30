@@ -36,8 +36,6 @@ export const TRIVIALITY = {
 
 export type Triviality = (typeof TRIVIALITY)[keyof typeof TRIVIALITY];
 
-export const LARGE_CHANGED_LINE_THRESHOLD = 400;
-
 export const FULL_4R_LENSES: readonly ReviewLens[] = Object.freeze([
 	REVIEW_LENS.RISK,
 	REVIEW_LENS.RESILIENCE,
@@ -148,16 +146,11 @@ export function classifyReviewRoute(evidence: DiffEvidence): ReviewPlan {
 		};
 	}
 
-	const requestsFull4R =
-		evidence.hotPathChanged ||
-		evidence.changedLines > LARGE_CHANGED_LINE_THRESHOLD;
-	if (requestsFull4R) {
+	if (evidence.hotPathChanged) {
 		return {
 			route: REVIEW_ROUTE.FULL_4R,
 			lenses: FULL_4R_LENSES,
-			reason: evidence.hotPathChanged
-				? "non-trivial hot-path diff requires full 4R"
-				: `diff exceeds ${LARGE_CHANGED_LINE_THRESHOLD} changed lines`,
+			reason: "non-trivial hot-path diff requires full 4R",
 		};
 	}
 

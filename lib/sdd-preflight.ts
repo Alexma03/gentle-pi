@@ -26,33 +26,30 @@ export type SddExecutionMode = "interactive" | "auto";
 export type SddDeliveryStrategy =
 	| "ask-on-risk"
 	| "auto-chain"
-	| "single-pr"
-	| "exception-ok";
+	| "single-pr";
 /** @deprecated Use SddDeliveryStrategy; legacy values normalize at persistence boundaries. */
 export type SddChainedPrStrategy =
 	| SddDeliveryStrategy
 	| "auto-forecast"
 	| "ask-always"
 	| "single-pr-default"
-	| "force-chained";
-export type SddPreflightField = "executionMode" | "artifactStore" | "chainedPrStrategy" | "reviewBudgetLines";
-export const SDD_PREFLIGHT_FIELDS = ["executionMode", "artifactStore", "chainedPrStrategy", "reviewBudgetLines"] as const;
+	| "force-chained"
+	| "exception-ok";
+export type SddPreflightField = "executionMode" | "artifactStore" | "chainedPrStrategy";
+export const SDD_PREFLIGHT_FIELDS = ["executionMode", "artifactStore", "chainedPrStrategy"] as const;
 
 export interface SddPreflightPreferences {
 	executionMode: SddExecutionMode;
 	artifactStore: SddArtifactStore;
 	/** Runtime values are canonical; legacy assignments normalize at persistence/render boundaries. */
 	chainedPrStrategy: SddChainedPrStrategy;
-	reviewBudgetLines: number;
 	engramAvailable: boolean;
 	prompted: boolean;
-	sizeExceptionAccepted?: true;
 }
 
 export interface SddPreflightResolutionOptions {
 	persisted?: Partial<SddPreflightPreferences>;
 	promptFields?: readonly SddPreflightField[];
-	acceptSizeException?: true;
 }
 
 interface SddPreflightCallbacks {
@@ -90,7 +87,6 @@ export const DEFAULT_SDD_PREFLIGHT: SddPreflightPreferences = Object.freeze({
 	executionMode: "auto",
 	artifactStore: "openspec",
 	chainedPrStrategy: "ask-on-risk",
-	reviewBudgetLines: 400,
 	engramAvailable: false,
 	prompted: false,
 });
@@ -119,22 +115,11 @@ export function normalizeSddArtifactStore(value: unknown): SddArtifactStore | un
 	return isSddArtifactStore(value) ? value : undefined;
 }
 
-function normalizeReviewBudgetValue(value: unknown): number | undefined {
-	const parsed = typeof value === "number"
-		? value
-		: typeof value === "string"
-			? Number.parseInt(value.trim(), 10)
-			: Number.NaN;
-	return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
-}
-
 function normalizeSddStrategySelection(
 	value: unknown,
-	allowExceptionOk: boolean,
 ): SddDeliveryStrategy | undefined {
-	if (value === "exception-ok") return allowExceptionOk ? value : undefined;
 	if (value === "auto-forecast" || value === "ask-always") return "ask-on-risk";
-	if (value === "single-pr-default") return "single-pr";
+	if (value === "single-pr-default" || value === "exception-ok") return "single-pr";
 	if (value === "force-chained") return "auto-chain";
 	return value === "ask-on-risk" || value === "auto-chain" || value === "single-pr"
 		? value
@@ -143,25 +128,21 @@ function normalizeSddStrategySelection(
 
 export function normalizeSddChainedPrStrategy(
 	value: unknown,
-	allowExceptionOk = false,
 ): SddDeliveryStrategy {
-	return normalizeSddStrategySelection(value, allowExceptionOk) ?? "ask-on-risk";
+	return normalizeSddStrategySelection(value) ?? "ask-on-risk";
 }
 
 function normalizedSelections(
 	value: Partial<Record<SddPreflightField, unknown>> | undefined,
 	engramAvailable: boolean,
-	allowExceptionOk: boolean,
 ): Partial<Record<SddPreflightField, unknown>> {
 	if (!value) return {};
 	const result: Partial<Record<SddPreflightField, unknown>> = {};
 	if (isSddExecutionMode(value.executionMode)) result.executionMode = value.executionMode;
 	const artifactStore = normalizeSddArtifactStore(value.artifactStore);
 	if (artifactStore !== undefined && (engramAvailable || artifactStore === "openspec" || artifactStore === "none")) result.artifactStore = artifactStore;
-	const strategy = normalizeSddStrategySelection(value.chainedPrStrategy, allowExceptionOk);
+	const strategy = normalizeSddStrategySelection(value.chainedPrStrategy);
 	if (strategy) result.chainedPrStrategy = strategy;
-	const reviewBudgetLines = normalizeReviewBudgetValue(value.reviewBudgetLines);
-	if (reviewBudgetLines !== undefined) result.reviewBudgetLines = reviewBudgetLines;
 	return result;
 }
 
@@ -354,7 +335,7 @@ export function readSddPreflightFromDisk(cwd: string): SddPreflightPreferences |
 		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
 		if (!isRecord(parsed)) return undefined;
 		// Validate required fields to guard against stale/corrupt writes.
-		const { executionMode, artifactStore, chainedPrStrategy, reviewBudgetLines, engramAvailable, prompted } = parsed;
+		const { executionMode, artifactStore, chainedPrStrategy, engramAvailable, prompted } = parsed;
 		// Normalize before validating: a preflight file written before the
 		// dual-store rename carries "both", and discarding it would silently
 		// drop the operator's choice back to the default.
@@ -362,19 +343,17 @@ export function readSddPreflightFromDisk(cwd: string): SddPreflightPreferences |
 		if (
 			!isSddExecutionMode(executionMode) ||
 			canonicalArtifactStore === undefined ||
-			typeof reviewBudgetLines !== "number" ||
-			!Number.isFinite(reviewBudgetLines) ||
-			reviewBudgetLines <= 0 ||
 			typeof engramAvailable !== "boolean" ||
 			typeof prompted !== "boolean"
 		) {
 			return undefined;
 		}
+		// A legacy `reviewBudgetLines` field on disk is ignored: it is no longer a
+		// current preflight field, and its presence must not invalidate the file.
 		return {
 			executionMode,
 			artifactStore: canonicalArtifactStore,
 			chainedPrStrategy: normalizeSddChainedPrStrategy(chainedPrStrategy),
-			reviewBudgetLines: normalizeReviewBudgetValue(reviewBudgetLines) ?? DEFAULT_SDD_PREFLIGHT.reviewBudgetLines,
 			engramAvailable,
 			prompted,
 		};
@@ -391,9 +370,6 @@ export function writeSddPreflightToDisk(cwd: string, prefs: SddPreflightPreferen
 			executionMode: isSddExecutionMode(prefs.executionMode) ? prefs.executionMode : DEFAULT_SDD_PREFLIGHT.executionMode,
 			artifactStore: normalizeSddArtifactStore(prefs.artifactStore) ?? DEFAULT_SDD_PREFLIGHT.artifactStore,
 			chainedPrStrategy: normalizeSddChainedPrStrategy(prefs.chainedPrStrategy),
-			reviewBudgetLines:
-				normalizeReviewBudgetValue(prefs.reviewBudgetLines) ??
-				DEFAULT_SDD_PREFLIGHT.reviewBudgetLines,
 			engramAvailable: prefs.engramAvailable === true,
 			prompted,
 		};
@@ -647,21 +623,18 @@ export async function collectSddPreflightPreferences(
 	options: SddPreflightResolutionOptions = {},
 ): Promise<SddPreflightPreferences> {
 	const persistedPrompted = options.persisted?.prompted === true;
-	const allowExceptionOk = options.acceptSizeException === true;
-	const persisted = normalizedSelections(options.persisted, engramAvailable, allowExceptionOk);
+	const persisted = normalizedSelections(options.persisted, engramAvailable);
 	const resolved: Partial<Record<SddPreflightField, unknown>> = { ...persisted };
 	let prompted = persistedPrompted;
-	let sizeExceptionAccepted = allowExceptionOk && persisted.chainedPrStrategy === "exception-ok";
 	const promptFields = new Set(options.promptFields ?? []);
 
 	const usePromptedValue = (
 		field: SddPreflightField,
 		value: unknown,
 	): void => {
-		const candidate = normalizedSelections({ [field]: value }, engramAvailable, allowExceptionOk);
+		const candidate = normalizedSelections({ [field]: value }, engramAvailable);
 		if (candidate[field] !== undefined) {
 			resolved[field] = candidate[field];
-			if (field === "chainedPrStrategy" && candidate[field] === "exception-ok") sizeExceptionAccepted = true;
 			prompted = true;
 		}
 	};
@@ -679,7 +652,6 @@ export async function collectSddPreflightPreferences(
 	await promptField("executionMode", () => ctx.ui.select("SDD execution mode", ["interactive", "auto"]));
 	await promptField("artifactStore", () => ctx.ui.select("SDD artifact store", artifactOptions), artifactOptions.length > 1);
 	await promptField("chainedPrStrategy", () => ctx.ui.select("SDD delivery strategy", ["ask-on-risk", "auto-chain", "single-pr"]));
-	await promptField("reviewBudgetLines", () => ctx.ui.input("SDD review budget lines", String(DEFAULT_SDD_PREFLIGHT.reviewBudgetLines)));
 
 	const resolvedValue = <T>(field: SddPreflightField, fallback: T): T =>
 		(resolved[field] as T | undefined) ?? fallback;
@@ -687,18 +659,13 @@ export async function collectSddPreflightPreferences(
 		executionMode: resolvedValue("executionMode", DEFAULT_SDD_PREFLIGHT.executionMode),
 		artifactStore: resolvedValue("artifactStore", DEFAULT_SDD_PREFLIGHT.artifactStore),
 		chainedPrStrategy: resolvedValue("chainedPrStrategy", DEFAULT_SDD_PREFLIGHT.chainedPrStrategy),
-		reviewBudgetLines: resolvedValue("reviewBudgetLines", DEFAULT_SDD_PREFLIGHT.reviewBudgetLines),
 		engramAvailable,
 		prompted,
-		...(sizeExceptionAccepted ? { sizeExceptionAccepted: true as const } : {}),
 	};
 }
 
 export function renderSddPreflightPrompt(prefs: SddPreflightPreferences): string {
-	const deliveryStrategy = normalizeSddChainedPrStrategy(
-		prefs.chainedPrStrategy,
-		prefs.sizeExceptionAccepted === true,
-	);
+	const deliveryStrategy = normalizeSddChainedPrStrategy(prefs.chainedPrStrategy);
 	const sourceLine = prefs.prompted
 		? "These SDD preferences are explicit current-session choices. Reuse them unless the user explicitly changes them."
 		: "These SDD preferences are canonical defaults or persisted choices. Treat them as authoritative; do not revisit dependent decisions unless a genuine human-control gate is reached.";
@@ -707,7 +674,7 @@ export function renderSddPreflightPrompt(prefs: SddPreflightPreferences): string
 			? [
 					"- Interactive phase gate: complete only the current SDD phase. Do not start the next SDD phase unless the current user turn explicitly approves that next phase.",
 					"- In interactive mode, words like `continue`, `dale`, or `go on` approve only the immediate next phase, not all remaining phases.",
-					"- Before writing an SDD proposal in interactive mode, offer the user a proposal question round to improve the PRD/proposal by uncovering business rules, implications, impact, edge cases, product tradeoffs, and decision gaps. Prefer 3–5 concrete product questions per round, then summarize assumptions and ask whether the user wants corrections or a second question round. Do not ask about test commands, PR shape, changed-line budget, or other harness mechanics at proposal time unless the user explicitly asks to discuss delivery.",
+					"- Before writing an SDD proposal in interactive mode, offer the user a proposal question round to improve the PRD/proposal by uncovering business rules, implications, impact, edge cases, product tradeoffs, and decision gaps. Prefer 3–5 concrete product questions per round, then summarize assumptions and ask whether the user wants corrections or a second question round. Do not ask about test commands, PR shape, or other harness mechanics at proposal time unless the user explicitly asks to discuss delivery.",
 				]
 			: [
 					"- Auto mode: phases may run back-to-back only because the user chose speed and trusts the flow.",
@@ -718,13 +685,10 @@ export function renderSddPreflightPrompt(prefs: SddPreflightPreferences): string
 		`- Execution mode: ${prefs.executionMode}`,
 		`- Artifact store: ${prefs.artifactStore}${prefs.engramAvailable ? "" : " (Engram unavailable in this session)"}`,
 		`- Delivery strategy: ${deliveryStrategy}`,
-		"- Delivery strategy domain: `ask-on-risk` | `auto-chain` | `single-pr` | `exception-ok`",
-		`- Review budget: ${prefs.reviewBudgetLines} changed lines (400 is the canonical threshold unless explicitly changed)`,
+		"- Delivery strategy domain: `ask-on-risk` | `auto-chain` | `single-pr`",
 		"- Chain strategy: deferred until chaining is selected.",
-		"- `exception-ok` is never inferred; it requires explicit acceptance of `size:exception`.",
 		...interactiveRules,
-		"- Preserve human-controlled consent, authorization, security, destructive/publishing, ambiguous-scope, and `size:exception` gates.",
-		"- When review-budget risk requires a delivery decision, use `ask-on-risk` to pause and ask; do not invent a chain strategy or an exception.",
+		"- Preserve human-controlled consent, authorization, security, destructive/publishing, and ambiguous-scope gates.",
 	].join("\n");
 }
 
@@ -762,7 +726,6 @@ export async function ensureSddPreflight(
 					`Mode: ${prefs.executionMode}`,
 					`Artifacts: ${prefs.artifactStore}`,
 					`Delivery strategy: ${prefs.chainedPrStrategy}`,
-					`Review budget: ${prefs.reviewBudgetLines} changed lines`,
 					`Preference source: ${prefs.prompted ? "explicit session choice" : "canonical default or persisted preference"}`,
 					`Global SDD assets ready: ${result.agents} agent(s), ${result.chains} chain(s), ${result.support} support file(s), ${result.skipped} already present.`,
 					modelRoutingLine,

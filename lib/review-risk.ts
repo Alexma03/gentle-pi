@@ -12,7 +12,6 @@ export type ReviewRiskTier =
 	(typeof REVIEW_RISK_TIER)[keyof typeof REVIEW_RISK_TIER];
 
 export const MAX_CORRECTION_CHANGED_LINES = 200;
-export const LARGE_AUTHORED_CHANGE_LINES = 400;
 
 export interface ReviewDiffStat {
 	path: string;
@@ -117,9 +116,7 @@ export function classifyReviewRisk(
 	const candidatePaths = candidateStats
 		.map((stat) => stat.path);
 	const hasOpaqueCandidate = candidateStats.some((stat) => stat.binary || stat.mode_only);
-	const high =
-		originalChangedLines > LARGE_AUTHORED_CHANGE_LINES ||
-		candidatePaths.some(isHighRiskPath);
+	const high = candidatePaths.some(isHighRiskPath);
 	const low =
 		!high &&
 		!hasOpaqueCandidate &&

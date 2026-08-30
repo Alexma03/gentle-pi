@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	FULL_4R_LENSES,
-	LARGE_CHANGED_LINE_THRESHOLD,
 	REVIEW_LENS,
 	REVIEW_EVENT,
 	REVIEW_ROUTE,
@@ -35,7 +34,6 @@ test("routing constants expose stable runtime values", () => {
 		STANDARD: "standard",
 		FULL_4R: "full-4R",
 	});
-	assert.equal(LARGE_CHANGED_LINE_THRESHOLD, 400);
 	assert.deepEqual(FULL_4R_LENSES, [
 		REVIEW_LENS.RISK,
 		REVIEW_LENS.RESILIENCE,
@@ -107,18 +105,12 @@ test("standard routing selects exactly one dominant lens by fixed precedence", (
 	assert.deepEqual(classifyReviewRoute(evidence()).lenses, [REVIEW_LENS.READABILITY]);
 });
 
-for (const changedLines of [399, 400]) {
-	test(`${changedLines} ordinary changed lines remain standard`, () => {
+test("changed-line count does not influence review route selection", () => {
+	for (const changedLines of [0, 1, 17, 10_000, 1_000_000]) {
 		const plan = classifyReviewRoute(evidence({ changedLines }));
-		assert.equal(plan.route, REVIEW_ROUTE.STANDARD);
+		assert.equal(plan.route, REVIEW_ROUTE.STANDARD, `changedLines=${changedLines}`);
 		assert.equal(plan.lenses.length, 1);
-	});
-}
-
-test("401 ordinary changed lines route to full 4R in stable order", () => {
-	const plan = classifyReviewRoute(evidence({ changedLines: 401 }));
-	assert.equal(plan.route, REVIEW_ROUTE.FULL_4R);
-	assert.deepEqual(plan.lenses, FULL_4R_LENSES);
+	}
 });
 
 test("non-trivial hot path routes to full 4R regardless of size", () => {
@@ -130,7 +122,7 @@ test("non-trivial hot path routes to full 4R regardless of size", () => {
 for (const event of ["pre-commit", "pre-push", "pre-pr", "on-ci", "on-schedule"] satisfies TriggerEvent[]) {
 	test(`${event} cannot classify outside ordinary transaction start`, () => {
 		assert.throws(
-			() => classifyReviewRoute(evidence({ event, changedLines: 401 })),
+			() => classifyReviewRoute(evidence({ event, hotPathChanged: true })),
 			/only.*ordinary.*start/i,
 		);
 	});
@@ -260,10 +252,10 @@ test("incomplete runtime collection remains standard instead of trivial", () => 
 	assert.deepEqual(plan.lenses, [REVIEW_LENS.READABILITY]);
 });
 
-test("incomplete triviality evidence cannot suppress a known 401-line full route", () => {
+test("incomplete triviality evidence cannot suppress a hot-path full route", () => {
 	const plan = classifyReviewRoute(
 		evidence({
-			changedLines: 401,
+			hotPathChanged: true,
 			triviality: TRIVIALITY.UNPROVEN,
 			evidenceComplete: false,
 		}),
@@ -275,7 +267,7 @@ test("incomplete triviality evidence cannot suppress a known 401-line full route
 test("stable full-lens order is independent of standard-risk signals", () => {
 	const plan = classifyReviewRoute(
 		evidence({
-			changedLines: 401,
+			hotPathChanged: true,
 			riskSignal: true,
 			resilienceSignal: true,
 			reliabilitySignal: true,

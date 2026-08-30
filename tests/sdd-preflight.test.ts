@@ -30,7 +30,6 @@ const SAMPLE_PREFS: SddPreflightPreferences = {
 	executionMode: "auto",
 	artifactStore: "engram",
 	chainedPrStrategy: "auto-chain",
-	reviewBudgetLines: 400,
 	engramAvailable: true,
 	prompted: true,
 };
@@ -39,7 +38,7 @@ function preflightContext(cwd: string, hasUI: boolean, calls: string[] = [], ans
 	return { cwd, hasUI, ui: { select: async (title: string) => (calls.push(`select:${title}`), answers[title]), input: async (title: string) => (calls.push(`input:${title}`), answers[title]), notify: () => {} } } as Parameters<typeof collectSddPreflightPreferences>[0];
 }
 function writeRawPreflight(cwd: string, chainedPrStrategy: string, prompted = true): string {
-	const path = sddPreflightDiskPath(cwd); mkdirSync(join(cwd, ".pi", "gentle-ai"), { recursive: true }); writeFileSync(path, JSON.stringify({ executionMode: "auto", artifactStore: "openspec", chainedPrStrategy, reviewBudgetLines: 400, engramAvailable: false, prompted })); return path;
+	const path = sddPreflightDiskPath(cwd); mkdirSync(join(cwd, ".pi", "gentle-ai"), { recursive: true }); writeFileSync(path, JSON.stringify({ executionMode: "auto", artifactStore: "openspec", chainedPrStrategy, reviewBudgetLines: 73, engramAvailable: false, prompted })); return path;
 }
 test("production callers distinguish automatic defaults from explicit preflight prompts", () => {
 	const root = join(import.meta.dirname, ".."), gentleAi = readFileSync(join(root, "extensions", "gentle-ai.ts"), "utf8"), sddInit = readFileSync(join(root, "extensions", "sdd-init.ts"), "utf8");
@@ -54,17 +53,41 @@ test("headless/UI canonical-domain parity", async () => {
 	assert.deepEqual(ui, DEFAULT_SDD_PREFLIGHT); assert.deepEqual(headless, ui); assert.deepEqual(calls, []);
 });
 test("explicit UI selections override defaults when a field is genuinely unresolved", async () => {
-	const calls: string[] = [], prefs = await collectSddPreflightPreferences(preflightContext(await workspace(), true, calls, { "SDD execution mode": "interactive", "SDD artifact store": "engram", "SDD delivery strategy": "auto-chain", "SDD review budget lines": "700" }), true, { persisted: DEFAULT_SDD_PREFLIGHT, promptFields: ["executionMode", "artifactStore", "chainedPrStrategy", "reviewBudgetLines"] });
-	assert.deepEqual({ executionMode: prefs.executionMode, artifactStore: prefs.artifactStore, chainedPrStrategy: prefs.chainedPrStrategy, reviewBudgetLines: prefs.reviewBudgetLines }, { executionMode: "interactive", artifactStore: "engram", chainedPrStrategy: "auto-chain", reviewBudgetLines: 700 }); assert.equal(prefs.prompted, true); assert.equal(calls.length, 4);
+	const calls: string[] = [], prefs = await collectSddPreflightPreferences(preflightContext(await workspace(), true, calls, { "SDD execution mode": "interactive", "SDD artifact store": "engram", "SDD delivery strategy": "auto-chain" }), true, { persisted: DEFAULT_SDD_PREFLIGHT, promptFields: ["executionMode", "artifactStore", "chainedPrStrategy"] });
+	assert.deepEqual({ executionMode: prefs.executionMode, artifactStore: prefs.artifactStore, chainedPrStrategy: prefs.chainedPrStrategy }, { executionMode: "interactive", artifactStore: "engram", chainedPrStrategy: "auto-chain" }); assert.equal(prefs.prompted, true); assert.equal(calls.length, 3);
+});
+
+test("review budget is no longer a preflight field, default, or question", async () => {
+	assert.equal("reviewBudgetLines" in DEFAULT_SDD_PREFLIGHT, false);
+	const calls: string[] = [], prefs = await collectSddPreflightPreferences(preflightContext(await workspace(), true, calls, { "SDD review budget lines": "700" }), true, { persisted: DEFAULT_SDD_PREFLIGHT, promptFields: ["executionMode", "artifactStore", "chainedPrStrategy"] });
+	assert.equal("reviewBudgetLines" in prefs, false);
+	assert.deepEqual(calls, ["select:SDD execution mode", "select:SDD artifact store", "select:SDD delivery strategy"]);
+});
+
+test("new persisted preferences omit the review budget", async () => {
+	const cwd = await workspace();
+	writeSddPreflightToDisk(cwd, DEFAULT_SDD_PREFLIGHT);
+	const raw = JSON.parse(readFileSync(sddPreflightDiskPath(cwd), "utf8")) as Record<string, unknown>;
+	assert.equal("reviewBudgetLines" in raw, false);
+	const loaded = readSddPreflightFromDisk(cwd);
+	assert.ok(loaded);
+	assert.equal("reviewBudgetLines" in loaded, false);
 });
 test("legacy persisted strategies normalize to canonical values", async () => {
 	const mappings = { "auto-forecast": "ask-on-risk", "ask-always": "ask-on-risk", "single-pr-default": "single-pr", "force-chained": "auto-chain" } as const;
 	for (const [legacy, canonical] of Object.entries(mappings)) { const cwd = await workspace(); writeRawPreflight(cwd, legacy); assert.equal(readSddPreflightFromDisk(cwd)?.chainedPrStrategy, canonical); }
 });
-test("exception-ok requires narrow delivery-gate provenance", async () => {
-	for (const prompted of [false, true]) { const cwd = await workspace(); writeRawPreflight(cwd, "exception-ok", prompted); assert.equal(readSddPreflightFromDisk(cwd)?.chainedPrStrategy, "ask-on-risk"); }
-	const accepted = await collectSddPreflightPreferences(preflightContext(await workspace(), false), false, { persisted: { ...DEFAULT_SDD_PREFLIGHT, chainedPrStrategy: "exception-ok" }, acceptSizeException: true }); assert.equal(accepted.chainedPrStrategy, "exception-ok"); assert.equal(accepted.sizeExceptionAccepted, true);
-	const durable = await workspace(); writeSddPreflightToDisk(durable, accepted); assert.equal(readSddPreflightFromDisk(durable)?.chainedPrStrategy, "ask-on-risk");
+test("legacy exception-ok normalizes to single-pr without a size gate", async () => {
+	for (const prompted of [false, true]) {
+		const cwd = await workspace();
+		writeRawPreflight(cwd, "exception-ok", prompted);
+		assert.equal(readSddPreflightFromDisk(cwd)?.chainedPrStrategy, "single-pr");
+	}
+	const normalized = await collectSddPreflightPreferences(preflightContext(await workspace(), false), false, {
+		persisted: { ...DEFAULT_SDD_PREFLIGHT, chainedPrStrategy: "exception-ok" },
+	});
+	assert.equal(normalized.chainedPrStrategy, "single-pr");
+	assert.equal("sizeExceptionAccepted" in normalized, false);
 });
 
 test("sddPreflightDiskPath returns project-local .pi/gentle-ai/sdd-preflight.json", async () => {
@@ -116,10 +139,23 @@ test("readSddPreflightFromDisk returns undefined for JSON with invalid fields", 
 	const cwd = await workspace();
 	const path = sddPreflightDiskPath(cwd);
 	mkdirSync(join(cwd, ".pi", "gentle-ai"), { recursive: true });
-	writeFileSync(path, JSON.stringify({ executionMode: "invalid", artifactStore: "openspec", chainedPrStrategy: "auto-forecast", reviewBudgetLines: 400, engramAvailable: false, prompted: false }));
+	writeFileSync(path, JSON.stringify({ executionMode: "invalid", artifactStore: "openspec", chainedPrStrategy: "auto-forecast", reviewBudgetLines: 73, engramAvailable: false, prompted: false }));
 
 	// executionMode "invalid" is not "interactive" | "auto" → should reject
 	assert.equal(readSddPreflightFromDisk(cwd), undefined);
+});
+
+test("legacy persisted review budget is read and ignored", async () => {
+	const cwd = await workspace();
+	const path = sddPreflightDiskPath(cwd);
+	mkdirSync(join(cwd, ".pi", "gentle-ai"), { recursive: true });
+	writeFileSync(path, JSON.stringify({ executionMode: "interactive", artifactStore: "openspec", chainedPrStrategy: "ask-on-risk", reviewBudgetLines: 73, engramAvailable: false, prompted: true }));
+
+	const loaded = readSddPreflightFromDisk(cwd);
+	assert.ok(loaded);
+	assert.equal("reviewBudgetLines" in loaded, false);
+	assert.equal(loaded.executionMode, "interactive");
+	assert.equal(loaded.chainedPrStrategy, "ask-on-risk");
 });
 
 test("readSddPreflightFromDisk normalizes unknown chainedPrStrategy to ask-on-risk", async () => {
@@ -130,7 +166,7 @@ test("readSddPreflightFromDisk normalizes unknown chainedPrStrategy to ask-on-ri
 		executionMode: "interactive",
 		artifactStore: "openspec",
 		chainedPrStrategy: "unknown-strategy",
-		reviewBudgetLines: 400,
+		reviewBudgetLines: 73,
 		engramAvailable: false,
 		prompted: true,
 	}));
@@ -262,7 +298,7 @@ test("a persisted legacy 'both' artifact store loads as hybrid", async () => {
 	mkdirSync(join(cwd, ".pi", "gentle-ai"), { recursive: true });
 	writeFileSync(
 		sddPreflightDiskPath(cwd),
-		JSON.stringify({ executionMode: "auto", artifactStore: "hybrid", chainedPrStrategy: "ask-on-risk", reviewBudgetLines: 400, engramAvailable: true, prompted: true }),
+		JSON.stringify({ executionMode: "auto", artifactStore: "hybrid", chainedPrStrategy: "ask-on-risk", reviewBudgetLines: 73, engramAvailable: true, prompted: true }),
 	);
 
 	const loaded = readSddPreflightFromDisk(cwd, true);
@@ -274,7 +310,7 @@ test("a persisted canonical 'hybrid' artifact store loads unchanged", async () =
 	mkdirSync(join(cwd, ".pi", "gentle-ai"), { recursive: true });
 	writeFileSync(
 		sddPreflightDiskPath(cwd),
-		JSON.stringify({ executionMode: "auto", artifactStore: "hybrid", chainedPrStrategy: "ask-on-risk", reviewBudgetLines: 400, engramAvailable: true, prompted: true }),
+		JSON.stringify({ executionMode: "auto", artifactStore: "hybrid", chainedPrStrategy: "ask-on-risk", reviewBudgetLines: 73, engramAvailable: true, prompted: true }),
 	);
 
 	const loaded = readSddPreflightFromDisk(cwd, true);

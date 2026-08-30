@@ -38,7 +38,9 @@ test("risk classification freezes deterministic low, medium, and high routes", (
 	assert.deepEqual(high.selected_lenses, FULL_4R_LENSES);
 
 	const large = classifyReviewRisk([stat("src/value.ts", 401)]);
-	assert.equal(large.tier, REVIEW_RISK_TIER.HIGH);
+	assert.equal(large.tier, REVIEW_RISK_TIER.MEDIUM);
+	assert.deepEqual(large.selected_lenses, [REVIEW_LENS.READABILITY]);
+	assert.equal(large.original_changed_lines, 401);
 });
 
 test("binary-only and mode-only candidates keep zero authored lines but require a lens", () => {

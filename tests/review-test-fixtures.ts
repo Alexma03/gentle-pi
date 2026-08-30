@@ -59,7 +59,7 @@ export function testSnapshot(options: TestSnapshotOptions): SnapshotV1 {
 		genesis_paths: options.genesisPaths ?? ["app.ts", "src/auth.ts", "src/retry.ts", "src/review.ts"],
 		diff_evidence: {
 			event: REVIEW_EVENT.ORDINARY_START,
-			changedLines: route === REVIEW_ROUTE.FULL_4R ? 401 : route === REVIEW_ROUTE.TRIVIAL ? 1 : 10,
+			changedLines: route === REVIEW_ROUTE.TRIVIAL ? 1 : 10,
 			triviality:
 				route === REVIEW_ROUTE.TRIVIAL
 					? TRIVIALITY.PROVEN
@@ -67,7 +67,7 @@ export function testSnapshot(options: TestSnapshotOptions): SnapshotV1 {
 			evidenceComplete: true,
 			executableChanged: route !== REVIEW_ROUTE.TRIVIAL,
 			configurationChanged: false,
-			hotPathChanged: false,
+			hotPathChanged: route === REVIEW_ROUTE.FULL_4R,
 			riskSignal: selected === REVIEW_LENS.RISK,
 			resilienceSignal: selected === REVIEW_LENS.RESILIENCE,
 			reliabilitySignal: selected === REVIEW_LENS.RELIABILITY,
