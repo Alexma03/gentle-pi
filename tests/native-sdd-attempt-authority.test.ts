@@ -94,7 +94,7 @@ test("workflow names acquire and settle as sole provider authority for OpenSpec 
 	const section = readMarkdownSection(read(WORKFLOW), SECTION);
 	assert.match(section, /sdd-attempt acquire/);
 	assert.match(section, /sdd-attempt settle/);
-	assert.match(section, /sole attempt and changed-line budget authority/i);
+	assert.match(section, /sole attempt and evidence authority/i);
 	assert.match(section, /Git-common-dir/);
 	assert.match(section, /OpenSpec and Engram/);
 });
@@ -132,10 +132,10 @@ test("workflow acquire command line binds every mandatory payload argument", () 
 		"--work-unit <label>",
 		"--evidence-goal <goal>",
 		"--max-attempts <count>",
-		"--max-changed-lines <count>",
 	]) {
 		assert.ok(acquire.includes(arg), `acquire command is missing ${arg}; command: ${acquire}`);
 	}
+	assert.doesNotMatch(acquire, /max-changed-lines/);
 });
 
 test("workflow settle command line binds mandatory arguments and routing invariants", () => {

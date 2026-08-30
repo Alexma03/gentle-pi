@@ -1,6 +1,6 @@
 ---
 name: gentle-ai-chained-pr
-description: "Trigger: PRs over 400 lines, stacked PRs, review slices. Split oversized changes into chained PRs that protect review focus."
+description: "Trigger: stacked PRs, chained PRs, review slices, reviewer cognitive load. Split multi-boundary changes into coherent chained PRs."
 license: Apache-2.0
 metadata:
   author: gentleman-programming
@@ -9,12 +9,13 @@ metadata:
 
 ## Activation Contract
 
-Load this skill when a planned PR may exceed **400 changed lines**, SDD forecasts `400-line budget risk: High` or `Chained PRs recommended: Yes`, or the user asks for chained/stacked PRs, review slices, or reviewer-load control.
+Load this skill when SDD forecasts `Chained PRs recommended: Yes`, the work crosses natural domain/interface/risk boundaries, or the user asks for chained/stacked PRs, review slices, or reviewer-load control.
 
 ## Hard Rules
 
-- Split PRs over **400 changed lines** unless a maintainer explicitly accepts `size:exception`.
-- Keep each PR reviewable in about **≤60 minutes**.
+- Split only at natural architectural, domain, interface, risk, or verification boundaries.
+- Never estimate, count, display, or gate on changed lines or review minutes.
+- Never deform a correct cohesive solution merely to create smaller diffs.
 - Use one deliverable work unit per PR; keep tests/docs with the unit they verify.
 - State start, end, prior dependencies, follow-up work, and out-of-scope items in every chained PR.
 - Every child PR must include a dependency diagram marking the current PR with `📍`.
@@ -26,16 +27,16 @@ Load this skill when a planned PR may exceed **400 changed lines**, SDD forecast
 
 | Condition | Action |
 |---|---|
-| PR ≤400 changed lines and focused | Keep single PR. |
-| PR >400, each slice can land independently | Use Stacked PRs to main. |
-| PR >400, feature must integrate before main | Use Feature Branch Chain with tracker. |
-| Generated/vendor/migration diff cannot split cleanly | Ask maintainer for `size:exception`. |
+| Change is cohesive and focused | Keep a single PR regardless of its diff size. |
+| Natural slices can land independently | Use Stacked PRs to main. |
+| Feature must integrate before main | Use Feature Branch Chain with tracker. |
+| Generated/vendor/migration work cannot split coherently | Keep one PR and explain the cohesion and verification plan. |
 | SDD provides `delivery_strategy` | Follow it before apply/PR creation. |
 
 ## Execution Steps
 
-1. Estimate changed lines and identify independent work units.
-2. Ask for a chain strategy when none is cached and the budget is exceeded.
+1. Assess conceptual complexity, cohesion, domains, interfaces, risk, verification burden, and independent work units without counting lines.
+2. Ask for a chain strategy when none is cached and natural chaining boundaries are selected.
 3. Create branches/PRs using the chosen strategy only.
 4. Add Chain Context to each PR without replacing the repo PR template.
 5. Verify each PR independently: CI/tests/docs/manual checks, rollback scope, and clean diff.
@@ -43,7 +44,7 @@ Load this skill when a planned PR may exceed **400 changed lines**, SDD forecast
 
 ## Output Contract
 
-Return the chosen strategy, PR order, current PR boundary, dependency diagram, review budget (`additions + deletions`), verification plan, and any `size:exception` rationale.
+Return the chosen strategy, PR order, current PR boundary, dependency diagram, qualitative workload rationale, verification plan, and any unresolved cohesion or dependency risk.
 
 ## References
 

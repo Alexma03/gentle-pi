@@ -23,7 +23,7 @@ Initial discovery and scoped re-judgment are separate modes.
 
 During initial discovery, run exactly once against the supplied `initial_review_tree` and return candidate rows only.
 
-Run one exhaustive read-only sweep — at most two sweeps for a full-4R-scale target (hot auth/update/security/payments paths, or more than 400 changed lines). Do not edit, delegate, refute, or inspect unrelated scope.
+Run one exhaustive read-only sweep — at most two sweeps for a qualitatively full-4R-scale target such as security-sensitive paths, broad cross-domain changes, risky interfaces, or unusually dense verification burden. Changed-line counts never determine sweep intensity. Do not edit, delegate, refute, or inspect unrelated scope.
 
 During initial discovery, do not persist state, mutate claims, launch actors, request fixes, validate fixes, or deliver anything.
 

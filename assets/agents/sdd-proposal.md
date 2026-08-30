@@ -33,7 +33,7 @@ If skill paths are missing, explicit fallback loading is allowed only as degrade
   8. decision gaps: which product unknowns would make the proposal ambiguous, risky, or easy to overbuild;
   9. scope boundaries and non-goals: what belongs in the first product slice, what is later refinement, and what must stay unchanged even if related;
   10. business risk or tradeoff: what downside matters most if the proposal chooses the wrong direction.
-- Prefer 3–5 concrete product questions per round. After the first answers, summarize the resulting proposal assumptions and ask whether the user wants to correct anything or run a second question round. Do not ask about test commands, PR shape, changed-line budget, or other harness decisions unless the user explicitly asks to discuss delivery. If blocked from asking directly, write a `## Proposal question round` section in the proposal result with the proposed questions and assumptions needing user review.
+- Prefer 3–5 concrete product questions per round. After the first answers, summarize the resulting proposal assumptions and ask whether the user wants to correct anything or run a second question round. Do not ask about test commands, PR shape, or other harness decisions unless the user explicitly asks to discuss delivery. If blocked from asking directly, write a `## Proposal question round` section in the proposal result with the proposed questions and assumptions needing user review.
 - Write `openspec/changes/{change}/proposal.md`.
 - Include intent, scope, affected areas, risks, rollback, and success criteria.
 - Do NOT launch child subagents. Parent/orchestrator owns delegation.

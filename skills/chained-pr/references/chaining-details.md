@@ -59,7 +59,7 @@ Append this section to the repo PR template; do not replace required issue/check
 | Base | `<target branch>` |
 | Depends on | <PR/issue/link or "None"> |
 | Follow-up | <next PR or "None"> |
-| Review budget | <changed lines> / 400 |
+| Workload rationale | <why this is one coherent review unit> |
 | Starts at | <branch, PR, or state this builds on> |
 | Ends with | <standalone result delivered by this PR> |
 
@@ -86,14 +86,15 @@ main
 ## Commands
 
 ```bash
-gh pr view <PR_NUMBER> --json additions,deletions,changedFiles,title,url
+gh pr view <PR_NUMBER> --json baseRefName,headRefName,title,url
 gh pr create --base feat/my-feature --title "feat(scope): focused slice" --body-file pr-body.md
 gh pr create --base feat/my-feature-01-core --title "feat(scope): next focused slice" --body-file pr-body.md
 ```
 
 ## Reviewer Guidance
 
-- Ask for a split when a PR exceeds 400 changed lines without `size:exception`.
+- Ask for a split when the work crosses natural domain, interface, risk, or verification boundaries and separate review units would reduce cognitive load.
+- Keep one PR when the change is conceptually cohesive; never split solely because of diff size.
 - Recommend Feature Branch Chain when work must integrate before `main`.
 - Recommend stacked PRs when each slice can merge independently.
 - Review child PRs against immediate parent branches; a polluted diff is a branching bug.

@@ -64,28 +64,21 @@ Read structured status, proposal, specs, design, tasks, existing code, tests, `a
 
 ## Review Workload Gate
 
-Before implementing, inspect `tasks.md` for `Review Workload Forecast` and these guard lines:
+Before implementing, inspect `tasks.md` for the qualitative `Review Workload Forecast` and these guard lines:
 
 ```text
 Decision needed before apply: Yes|No
 Chained PRs recommended: Yes|No
-Chain strategy: stacked-to-main|feature-branch-chain|size-exception|pending
-400-line budget risk: Low|Medium|High
+Chain strategy: stacked-to-main|feature-branch-chain|pending
 ```
 
-If any of these are true:
+If `Decision needed before apply: Yes` or `Chained PRs recommended: Yes`, continue only when the parent prompt gives a resolved delivery path:
 
-- `Decision needed before apply: Yes`
-- `Chained PRs recommended: Yes`
-- `400-line budget risk: High`
+- `auto-chain` or chosen chained/stacked PR mode: implement only the assigned natural work-unit slice and report the PR boundary.
+- `single-pr`: continue when the plan explains why the complete change is one cohesive, reviewable unit.
+- `ask-on-risk`: continue only after the user chooses between the proposed natural split and one cohesive unit.
 
-then continue only when the parent prompt gives a resolved delivery path:
-
-- `auto-chain` or chosen chained/stacked PR mode: implement only the assigned work-unit slice and report the PR boundary.
-- `exception-ok` or `size:exception`: continue only if the prompt explicitly says the maintainer accepts the exception.
-- `single-pr` above budget: continue only after explicit `size:exception` approval.
-
-If no delivery decision is provided, STOP before writing code and return `blocked` with the exact decision needed.
+Never estimate or count changed lines, and never rewrite or split correct cohesive work to satisfy a numeric threshold. If no required delivery decision is provided, STOP before writing code and return `blocked` with the exact qualitative decision needed.
 
 ## Strict TDD Gate
 

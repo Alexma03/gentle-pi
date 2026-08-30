@@ -76,6 +76,6 @@ When documenting a PR, reduce reviewer burnout by making the review path explici
 # Check markdown files changed in the current branch
 git diff --name-only -- '*.md'
 
-# Inspect PR changed-line count for cognitive load
-gh pr view <PR_NUMBER> --json additions,deletions,changedFiles
+# Inspect PR context without treating diff size as cognitive load
+gh pr view <PR_NUMBER> --json title,body,baseRefName,headRefName
 ```

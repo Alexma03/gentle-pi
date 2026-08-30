@@ -20,7 +20,7 @@ This skill guides public collaboration. It does not grant issue approval, label,
 - Group by causal authority invariant. Use one issue and one PR or explicit chain per independent invariant and rollback boundary. Split independent causes; never merge a superseded or conflicting authority line.
 - Inventory every operator flow claimed by the issue or PR, including entry, mode, environment, expectation, and negative controls. Require one truthful black-box bench journey per CLI or lifecycle flow, or actual runtime E2E proof when the core bench cannot represent it. Synthetic proxy coverage never proves another runtime.
 - Use CodeGraph-first impact mapping, a dedicated worktree, and behavior-first tests. Run source-mutating normalization before candidate freeze.
-- Forecast authored changes before edits. The hard limit is 400 additions plus deletions; above it, STOP for a chain or explicit maintainer-approved exception.
+- Assess conceptual complexity, cohesion, affected domains, interface and rollback boundaries, risk, verification burden, and reviewer cognitive load before edits. Chain only at natural work boundaries; never estimate or gate on changed lines.
 - When RDD is enabled, bind review receipts, lineage, correction, and recovery evidence to the exact candidate. Keep bounded review defects in one correction transaction; never treat that evidence as delivery authority.
 - Require independent read-only candidate validation before publication. Validation cannot edit source or authority; findings require a new candidate.
 - Keep communication humane and evidence-based. Repository labels and workflow metadata are maintainer-owned, never evidence of contributor blame.
@@ -33,21 +33,22 @@ This skill guides public collaboration. It does not grant issue approval, label,
 | Issue gate or reproduction fails | Wait, stop, or narrow with evidence. |
 | Invariant or rollback is independent | Separate issue and authoritative PR line. |
 | Core bench fits / does not fit | Bench journey / actual runtime E2E; never proxy. |
-| Forecast exceeds 400 lines | Chain or approved exception before edits. |
+| Independent domain, interface, rollback, or verification boundaries exist | Chain at those natural boundaries before edits. |
+| Change remains one cohesive invariant | Keep one PR and explain its review and rollback story. |
 
 ## Execution Steps
 
 1. Check mode, approval, PR conflicts, and current-main reproduction.
 2. Name invariant and rollback; isolate the worktree; CodeGraph-map code, tests, evidence, docs, distribution, and registration.
 3. Inventory flows and controls; add failing tests and the smallest correction.
-4. Normalize, enforce budget, run tests, and record each flow's exact candidate, command, scenario, and result.
+4. Normalize, preserve the approved scope and qualitative work boundaries, run tests, and record each flow's exact candidate, command, scenario, and result.
 5. Freeze, validate read-only, and give the verdict, evidence, and one humane next action.
 
 ## Output Contract
 
-Return `rdd_mode`, `issue_pr`, `causal_invariant`, `operator_flows`, `journey_runtime_evidence`, `changed_line_budget`, `tests`, `rollback`, and `unresolved_authority_decisions`.
+Return `rdd_mode`, `issue_pr`, `causal_invariant`, `operator_flows`, `journey_runtime_evidence`, `workload_assessment`, `tests`, `rollback`, and `unresolved_authority_decisions`.
 
-Identify approved and superseded/conflicting authority lines; every flow, negative control, and candidate-bound proof; additions plus deletions and chain/exception; test results; independent rollback; and unresolved maintainer decisions.
+Identify approved and superseded/conflicting authority lines; every flow, negative control, and candidate-bound proof; qualitative scope, cohesion, risk, and any natural chain boundary; test results; independent rollback; and unresolved maintainer decisions. Never use changed-line counts as workload evidence.
 
 ## References
 

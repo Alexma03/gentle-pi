@@ -16,9 +16,9 @@ Risk routing is deterministic:
 |---|---|
 | `low` | Zero lenses; only proven docs/comments/format/typo-string work with no executable or configuration change |
 | `medium` | One dominant lens for ordinary changes |
-| `high` | Canonical 4R for auth, update, security, payments, data exposure/loss, permissions, shell/process, or more than 400 authored lines |
+| `high` | Canonical 4R for auth, update, security, payments, data exposure/loss, permissions, shell/process, or other configured high-risk paths |
 
-Generated files matching `testdata/golden/**` remain in snapshot identity but do not count as authored risk lines. Ordinary tests, fixtures, and snapshots are never broadly excluded. The correction budget is frozen as `min(200, ceil(original_changed_lines / 2))`.
+Generated files matching `testdata/golden/**` remain in snapshot identity but do not contribute to the correction-budget baseline. Ordinary tests, fixtures, and snapshots are never broadly excluded. Routing never uses changed-line counts. The correction budget is frozen as `min(200, ceil(original_changed_lines / 2))`.
 
 Before status/START, consult effective review mode. `off` creates no authority or authorization and yields organic `disabled/unmanaged`, never approval. Ordinary START declares `--consent relay`; low risk stays silent. A medium/high `consent/v2` result always returns the complete raw provider envelope plus an opaque in-memory candidate binding to the parent, then stops without UI or provider follow-up. The parent localizes and presents it losslessly while preserving tokens, commands, target IDs, and invocations. One explicit `answer-consent` call accepts only that binding and `granted|declined`, consumes it before provider mutation, and rechecks repository/target/projection/lineage/answer binding. Ambiguity reconciles through STATUS, never replay. Grant is exact-candidate-only. Decline creates no lineage, authority, actor/candidate binding, latch, or pending authorization; the next candidate asks again. Old Pi clone latch files are inert.
 

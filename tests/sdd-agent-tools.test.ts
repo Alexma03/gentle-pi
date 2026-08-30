@@ -235,3 +235,53 @@ test("the retired Pi adversarial role agents are not packaged", () => {
 		assert.ok(!existsSync(join(assetsAgentsDir, retired)), `${retired} must stay deleted`);
 	}
 });
+
+const QUALITATIVE_WORKFLOW = "sdd-orchestrator-workflow.md";
+const NUMERIC_CHANGED_LINE_POLICY = /(?:\b\d[\d_,]*\b[^\n]*(?:changed|authored)[- ]lines?|(?:changed|authored)[- ]lines?[^\n]*\b\d[\d_,]*\b|review[- ]budget[^\n]*\b\d[\d_,]*\b)/i;
+
+// Pins the qualitative review-workload language across the active SDD
+// forecast/apply/verify agents, the orchestrator workflow, and the Judgment Day
+// judges. Numeric changed-line estimates/thresholds and size-exception or
+// exception-ok routing must not reappear; research tests and the explore-only
+// packaged background policy are preserved elsewhere in this file.
+test("qualitative review workload language replaces numeric changed-line estimates and size-exception routing", () => {
+	for (const fileName of ["sdd-tasks.md", "sdd-apply.md", "sdd-verify.md"]) {
+		const source = readFileSync(join(assetsAgentsDir, fileName), "utf8");
+		assert.match(source, /Review Workload Forecast/i, `${fileName} must keep the forecast`);
+		assert.doesNotMatch(
+			source,
+			NUMERIC_CHANGED_LINE_POLICY,
+			`${fileName} must not estimate or gate on changed lines`,
+		);
+		assert.doesNotMatch(source, /size:exception|exception-ok/i, `${fileName} must not route via size exceptions`);
+		assert.match(
+			source,
+			/qualitative|cohesion|complexity|verification burden/i,
+			`${fileName} must use qualitative workload language`,
+		);
+	}
+
+	const workflow = readFileSync(join(assetsAgentsDir, "..", QUALITATIVE_WORKFLOW), "utf8");
+	assert.match(workflow, /Review Workload Guard/i);
+	assert.doesNotMatch(workflow, NUMERIC_CHANGED_LINE_POLICY);
+	assert.doesNotMatch(workflow, /size:exception|exception-ok/i);
+	assert.match(workflow, /qualitative/i);
+	assert.match(workflow, /cohesion|cohesive/i);
+	assert.doesNotMatch(workflow, /review budget `400`|review budget 400/i);
+
+	for (const judge of ["jd-judge-a.md", "jd-judge-b.md"]) {
+		const source = readFileSync(join(assetsAgentsDir, judge), "utf8");
+		assert.doesNotMatch(
+			source,
+			NUMERIC_CHANGED_LINE_POLICY,
+			`${judge} must not gate sweeps on changed lines`,
+		);
+		assert.match(source, /qualitatively full-4R-scale target/i, `${judge} must use qualitative sweep scale`);
+		assert.match(source, /verification burden/i, `${judge} must weigh verification burden`);
+		assert.notEqual(
+			readFrontmatterField(join(assetsAgentsDir, judge), "subagent_mode"),
+			"background",
+			`${judge} must remain a foreground review role`,
+		);
+	}
+});

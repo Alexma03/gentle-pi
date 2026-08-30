@@ -75,11 +75,12 @@ If strict TDD is active and no external support file is available, perform the c
 
 ## Review Workload Verification
 
-Verify that implementation respected the `Review Workload Forecast` from `tasks.md`:
+Verify that implementation respected the qualitative `Review Workload Forecast` from `tasks.md`:
 
-- If chained PRs were recommended, confirm only the assigned slice was implemented.
-- If `size:exception` was used, confirm it was explicitly recorded.
+- If chained PRs were recommended, confirm only the assigned natural work-unit slice was implemented.
+- If one cohesive PR was selected, confirm the implementation remains conceptually cohesive across its domains, interfaces, and tests.
 - If `Chain strategy` was set, confirm the returned PR/work boundary matches it.
+- Never use changed-line counts as evidence of reviewability.
 - Flag scope creep beyond assigned tasks as WARNING or CRITICAL depending on risk.
 
 ## Task Checkbox Verification

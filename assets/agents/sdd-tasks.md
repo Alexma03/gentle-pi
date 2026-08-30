@@ -52,12 +52,15 @@ Put this near the top of `tasks.md`:
 
 | Field | Value |
 |-------|-------|
-| Estimated changed lines | <rough estimate or range> |
-| 400-line budget risk | Low / Medium / High |
+| Conceptual complexity | Low / Medium / High — <reason> |
+| Cohesion | Single cohesive unit / Natural boundaries exist — <reason> |
+| Affected domains and interfaces | <summary> |
+| Test and migration burden | <summary> |
+| Reviewer cognitive load | Low / Medium / High — <reason> |
 | Chained PRs recommended | Yes / No |
-| Suggested split | <single PR or PR 1 → PR 2 → PR 3> |
-| Delivery strategy | <ask-on-risk / auto-chain / single-pr / exception-ok> |
-| Chain strategy | <stacked-to-main / feature-branch-chain / size-exception / pending> |
+| Suggested split | <single PR or natural PR 1 → PR 2 → PR 3 boundaries> |
+| Delivery strategy | <ask-on-risk / auto-chain / single-pr> |
+| Chain strategy | <stacked-to-main / feature-branch-chain / pending> |
 ```
 
 Also include these exact plain-text guard lines:
@@ -65,15 +68,14 @@ Also include these exact plain-text guard lines:
 ```text
 Decision needed before apply: Yes|No
 Chained PRs recommended: Yes|No
-Chain strategy: stacked-to-main|feature-branch-chain|size-exception|pending
-400-line budget risk: Low|Medium|High
+Chain strategy: stacked-to-main|feature-branch-chain|pending
 ```
 
 ## Forecast Rules
 
-- Estimate whether implementation is likely to exceed 400 changed lines (`additions + deletions`).
-- Use signals: file count, phases, integration points, tests, docs, migrations, generated artifacts, and cross-cutting concerns.
-- If risk is High or likely >400 lines, recommend chained PRs and split tasks into autonomous work units.
+- Never estimate, count, or gate on changed lines.
+- Assess conceptual complexity, cohesion, affected domains, interface boundaries, test burden, migrations, generated artifacts, risk, and reviewer cognitive load.
+- Recommend chaining only when natural architectural or review boundaries produce clearer autonomous work units; never split correct cohesive work solely because it is large.
 - Work units must have clear start, finish, verification, and rollback boundaries.
 - If chain strategy is not known, set it to `pending` and set `Decision needed before apply` according to delivery strategy.
 

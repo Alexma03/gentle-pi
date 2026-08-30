@@ -61,14 +61,14 @@ For the next PR, add links to the previous and following PRs so the chain stays 
 ### Ask for split
 
 ```markdown
-This PR exceeds the 400-line budget, so we need to split it or justify `size:exception`.
+This PR crosses distinct domain and integration boundaries, so splitting it would make each review more focused and independently verifiable.
 
-Suggested order: foundation + tests first, then integration, then docs. That gives each review a clear start and end.
+Suggested order: foundation + tests first, then integration, then docs. That gives each review a clear start and end without deforming cohesive work.
 ```
 
 ## Commands
 
 ```bash
 # Inspect a PR before writing review feedback
-gh pr view <PR_NUMBER> --json title,body,additions,deletions,changedFiles
+gh pr view <PR_NUMBER> --json title,body,url,reviewDecision
 ```

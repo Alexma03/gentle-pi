@@ -17,7 +17,7 @@ Use it for:
 - Preparing commits before opening a PR.
 - Turning a large change into chained or stacked PRs.
 - Keeping reviewer cognitive load healthy.
-- Applying SDD tasks without accidentally producing a PR above 400 changed lines.
+- Applying SDD tasks without producing a conceptually overloaded or incoherent PR.
 
 ## Critical Rules
 
@@ -29,7 +29,7 @@ Use it for:
 | Keep docs with the user-visible change | Docs belong with the feature or workflow they explain. |
 | Tell a story | A reviewer should understand why each commit exists from its diff and message. |
 | Future PR-ready | Each commit should be a candidate chained PR when the change grows. |
-| SDD workload guard | If SDD tasks forecast a >400-line change, group commits into chained PR slices before implementation. |
+| SDD workload guard | If SDD forecasts natural architectural or review boundaries, group commits into coherent PR slices before implementation. |
 
 ## Work Unit Checklist
 
@@ -57,15 +57,16 @@ Use work-unit commits as the foundation for chained PRs:
 1. Build the smallest independent work unit.
 2. Include verification for that unit.
 3. Commit it with a Conventional Commit message.
-4. If the PR approaches 400 changed lines, promote commits or groups of commits into chained PRs.
+4. If the work crosses natural domain, interface, risk, or verification boundaries, promote coherent commit groups into chained PRs.
 
 ## SDD Relationship
 
-When `sdd-tasks` produces a Review Workload Forecast:
+When `sdd-tasks` produces a qualitative Review Workload Forecast:
 
-- Low risk: keep work-unit commits inside one PR.
-- Medium risk: commit by work unit and monitor changed lines before PR creation.
-- High risk: follow SDD `delivery_strategy` — ask on `ask-on-risk`, auto-slice on `auto-chain`, require `size:exception` on over-budget `single-pr`, or record accepted `size:exception` on `exception-ok`.
+- Cohesive, focused work: keep work-unit commits inside one PR.
+- Natural boundaries exist: commit by work unit and follow the selected delivery strategy.
+- High cognitive or cross-domain burden: ask on `ask-on-risk`, auto-slice on `auto-chain`, or preserve one PR on `single-pr` only when the plan explains its cohesion.
+- Never estimate or count lines, and never split a correct cohesive solution to satisfy a numeric threshold.
 
 Each SDD work unit should map cleanly to a commit or PR with:
 
@@ -78,8 +79,8 @@ Each SDD work unit should map cleanly to a commit or PR with:
 
 ```bash
 # Review the story before committing
-git diff --stat
-git diff --cached --stat
+git diff --name-status
+git diff --cached --name-status
 
 # Check recent commit style
 git log --oneline -5

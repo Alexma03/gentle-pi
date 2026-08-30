@@ -68,7 +68,6 @@ test("rendered SDD preflight prompt is English artifact copy", () => {
 		executionMode: "interactive",
 		artifactStore: "openspec",
 		chainedPrStrategy: "ask-on-risk",
-		reviewBudgetLines: 400,
 		engramAvailable: false,
 		prompted: true,
 	};
@@ -76,14 +75,15 @@ test("rendered SDD preflight prompt is English artifact copy", () => {
 
 	assert.match(prompt, /These SDD preferences are explicit current-session choices/);
 	assert.match(prompt, /Delivery strategy: ask-on-risk/);
-	assert.match(prompt, /Review budget: 400 changed lines/);
+	assert.doesNotMatch(prompt, /review[- ]budget/i);
+	assert.doesNotMatch(prompt, /\d+\s+changed lines/i);
 	assert.match(prompt, /complete only the current SDD phase/i);
 	assert.match(prompt, /Do not start the next SDD phase/i);
 	assert.match(prompt, /approve only the immediate next phase/i);
 	assert.match(prompt, /offer the user a proposal question round/i);
 	assert.match(prompt, /business rules, implications, impact, edge cases/i);
 	assert.match(prompt, /second question round/i);
-	assert.match(prompt, /explicit acceptance of `size:exception`/);
+	assert.doesNotMatch(prompt, /size:exception|exception-ok/i);
 	assert.match(prompt, /human-controlled consent, authorization, security, destructive\/publishing/);
 	for (const pattern of SPANISH_PREFLIGHT_COPY) {
 		assert.doesNotMatch(prompt, pattern);
@@ -145,7 +145,7 @@ test("SDD proposal questions focus on business and PRD gaps", async () => {
 	// likely way harness mechanics would leak back into proposal questions.
 	assert.match(
 		proposalAgent,
-		/Do not ask about test commands, PR shape, changed-line budget, or other harness decisions unless the user explicitly asks to discuss delivery/i,
+		/Do not ask about test commands, PR shape, or other harness decisions unless the user explicitly asks to discuss delivery/i,
 	);
 });
 
@@ -247,7 +247,7 @@ test("comment-writer is context-reactive and neutral by default for Spanish comm
 	for (const englishExample of [
 		"Good approach overall",
 		"Approved. The scope is clear",
-		"This PR exceeds the 400-line budget",
+		"This PR crosses distinct domain and integration boundaries",
 	]) {
 		assert.match(skill, new RegExp(englishExample.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 	}

@@ -62,11 +62,11 @@ Do not ask SDD setup questions on session start. The first time the user initiat
 
 Resolve each field in this order: (1) explicit current user/session choice, (2) valid persisted preference, (3) capability or already-selected strategy constraint, (4) canonical documented default, and (5) ask only when the field is genuinely unresolved. If `/gentle:sdd-preflight` cannot be invoked, resolve the same order inline; do not recreate a four-question setup prompt. Missing Engram is a capability constraint that resolves the artifact store to `openspec` unless the user has made an incompatible explicit request, which remains a human decision.
 
-Preflight canonical defaults are execution `auto`, artifact store `openspec`, delivery strategy `ask-on-risk`, and review budget `400`; capability and already-selected constraints may narrow them.
+Preflight canonical defaults are execution `auto`, artifact store `openspec`, and delivery strategy `ask-on-risk`; capability and already-selected constraints may narrow them. Review workload has no numeric budget or line-count field.
 
-Selectors/inputs appear only for genuinely unresolved fields. Defaulted and one-option fields do not prompt; persisted/session values are reused, and an explicit current choice overrides them when presented. `chain_strategy` remains deferred, and `exception-ok` requires explicit `size:exception` acceptance and is never inferred.
+Selectors/inputs appear only for genuinely unresolved fields. Defaulted and one-option fields do not prompt; persisted/session values are reused, and an explicit current choice overrides them when presented. `chain_strategy` remains deferred.
 
-The exact `delivery_strategy` domain accepted by `sdd-tasks` and `sdd-apply` is `ask-on-risk`, `auto-chain`, `single-pr`, or `exception-ok`; above the review threshold, `auto-chain` resolves without asking again.
+The exact `delivery_strategy` domain accepted by `sdd-tasks` and `sdd-apply` is `ask-on-risk`, `auto-chain`, or `single-pr`. Workload decisions use qualitative complexity, cohesion, domain and interface boundaries, test burden, risk, and reviewer cognitive load—never line counts.
 
 The package should ensure SDD assets are present as global Pi runtime assets without the user needing to remember per-project setup commands. If assets are missing, install them non-destructively into:
 
@@ -118,7 +118,7 @@ In interactive mode, between phases:
 
 Interactive approval is phase-scoped. A user response such as "continue", "dale", or "go on" approves only the immediate next phase, not the rest of the SDD pipeline. Do not treat a generated artifact as approved until the user has had a chance to review or explicitly delegate that review.
 
-Before `sdd-proposal` in interactive mode, offer the user a proposal question round instead of silently deciding whether the proposal is clear enough. Explain that the questions are meant to improve the PRD/proposal by uncovering business understanding, business rules, implications, impact, edge cases, and product tradeoffs. Prefer 3–5 concrete product questions per round, then summarize the resulting assumptions and ask whether the user wants to correct anything or run a second question round. Cover business/product/PRD decisions: business problem, target users and situations, business rules, product outcome, current-state gap, implications and impact, edge cases, decision gaps, first-slice scope boundaries, non-goals, product constraints, and business tradeoffs. Do not ask about test commands, PR shape, changed-line budget, or other harness mechanics at proposal time unless the user explicitly asks to discuss delivery.
+Before `sdd-proposal` in interactive mode, offer the user a proposal question round instead of silently deciding whether the proposal is clear enough. Explain that the questions are meant to improve the PRD/proposal by uncovering business understanding, business rules, implications, impact, edge cases, and product tradeoffs. Prefer 3–5 concrete product questions per round, then summarize the resulting assumptions and ask whether the user wants to correct anything or run a second question round. Cover business/product/PRD decisions: business problem, target users and situations, business rules, product outcome, current-state gap, implications and impact, edge cases, decision gaps, first-slice scope boundaries, non-goals, product constraints, and business tradeoffs. Do not ask about test commands, PR shape, or other harness mechanics at proposal time unless the user explicitly asks to discuss delivery.
 
 ## Research and Pre-Proposal Gate
 
@@ -136,12 +136,11 @@ Runtime note: Pi declares evidence grants `documentation=[fetch_content,get_sear
 
 On the first SDD chain request in a session, resolve the delivery strategy from preflight (or ask once) and cache it:
 
-- `ask-on-risk` — default; ask only when the tasks forecast detects review-budget risk.
-- `auto-chain` — automatically split into chained/stacked PR slices when needed.
-- `single-pr` — proceed as one PR only if the size is within budget.
-- `exception-ok` — user accepts `size:exception` when over budget. The preflight menu cannot select this; it is reached only when the user explicitly accepts `size:exception`, either up front or when `ask-on-risk` stops to ask.
+- `ask-on-risk` — default; ask only when the qualitative forecast identifies a genuine review-workload decision.
+- `auto-chain` — automatically split at natural architectural or review boundaries when needed.
+- `single-pr` — preserve one cohesive PR when the work forms one understandable unit.
 
-These four are the whole domain. Pass `delivery_strategy` to `sdd-tasks` and `sdd-apply`.
+These three are the whole domain. Pass `delivery_strategy` to `sdd-tasks` and `sdd-apply`. Never introduce a numeric workload threshold or delivery-waiver token.
 
 ## Chain Strategy
 
@@ -197,12 +196,12 @@ The gatekeeper is additive: it does not relax the Review Workload Guard, Strict 
 
 ## Native Runtime Attempt Authority
 
-The package-local Gentle AI runtime owns the Git-common-dir compact SDD attempt ledger. It is the sole attempt and changed-line budget authority for both OpenSpec and Engram flows on Pi. Pi must not implement a local attempt mirror, counter, token store, state machine, or extension interception layer; such code would duplicate provider authority and could not truthfully settle all runs.
+The package-local Gentle AI runtime owns the Git-common-dir compact SDD attempt ledger. It is the sole attempt and evidence authority for both OpenSpec and Engram flows on Pi. Pi must not implement a local attempt mirror, counter, token store, state machine, or extension interception layer; such code would duplicate provider authority and could not truthfully settle all runs.
 
 Before every runtime-bearing `sdd-apply`, `sdd-verify`, or remediation actor/harness launch, the orchestrator MUST call the compact acquire:
 
 ```text
-gentle-ai sdd-attempt acquire --cwd <repo> --change <change> --request-id <id> --work-unit <label> --evidence-goal <goal> --max-attempts <count> --max-changed-lines <count>
+gentle-ai sdd-attempt acquire --cwd <repo> --change <change> --request-id <id> --work-unit <label> --evidence-goal <goal> --max-attempts <count>
 ```
 
 Pass `--token` only to continue an active attempt; pass `--remediates-evidence-revision` only for an unmanaged remediation. Do not invent continuation or remediation state the provider has not returned.
@@ -291,18 +290,17 @@ When launching `sdd-archive`, forward explicit final-state facts for any work co
 
 ## Review Workload Guard
 
-After `sdd-tasks` completes and before launching `sdd-apply`, inspect the task output's `Review Workload Forecast`.
+After `sdd-tasks` completes and before launching `sdd-apply`, inspect the task output's qualitative `Review Workload Forecast`. It must assess conceptual complexity, cohesion, affected domains, interface boundaries, test burden, risk, reviewer cognitive load, and natural work-unit boundaries without estimating or counting lines.
 
-If it says `Chained PRs recommended: Yes`, `400-line budget risk: High`, estimated changed lines exceed 400, or `Decision needed before apply: Yes`, apply the cached `delivery_strategy`:
+If it says `Chained PRs recommended: Yes` or `Decision needed before apply: Yes`, apply the cached `delivery_strategy`:
 
-- `ask-on-risk`: stop and ask whether to split or proceed with `size:exception`.
-- `auto-chain`: split automatically; ask for `chain_strategy` only if missing.
-- `single-pr`: stop and require/record `size:exception` before apply.
-- `exception-ok`: continue and tell `sdd-apply` this run uses `size:exception`.
+- `ask-on-risk`: stop and ask whether to split at the proposed natural boundaries or proceed as one cohesive unit.
+- `auto-chain`: split automatically at the proposed natural boundaries; ask for `chain_strategy` only if missing.
+- `single-pr`: proceed only when the plan explains why one PR remains cohesive and reviewable; otherwise stop and ask whether to change strategy.
 
 Any other `delivery_strategy` value is invalid. Do NOT pick the nearest branch and do NOT proceed: STOP, report the unrecognised value, and re-collect the delivery strategy before launching `sdd-apply`.
 
-Always pass the resolved `delivery_strategy`, `chain_strategy`, and any chosen PR boundary/exception to `sdd-apply` in the launch prompt.
+Always pass the resolved `delivery_strategy`, `chain_strategy`, and chosen natural work boundary to `sdd-apply` in the launch prompt.
 
 Any review transaction explicitly started outside SDD persists through its own artifact-store branch and budget. SDD completion itself launches no review actors and mints no review authority.
 
