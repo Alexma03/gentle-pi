@@ -1,6 +1,7 @@
 ---
 name: gentle-ai-explore
 description: Read-only exploration and mapping for generic non-SDD work.
+subagent_mode: background
 tools:
   - read
   - grep

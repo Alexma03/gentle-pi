@@ -18,6 +18,13 @@ function readFrontmatter(path: string): string {
 	return match[1];
 }
 
+function readFrontmatterField(path: string, field: string): string | undefined {
+	const line = readFrontmatter(path)
+		.split("\n")
+		.find((candidate) => candidate.startsWith(`${field}:`));
+	return line?.slice(field.length + 1).trim();
+}
+
 function readTools(path: string): string[] {
 	const frontmatter = readFrontmatter(path);
 	const lines = frontmatter.split("\n");
@@ -144,6 +151,19 @@ test("generic non-SDD agents declare exact role tool allowlists", () => {
 			assertGenericRoleBody(fileName, source);
 		}
 		assertCodeGraphGuidance(fileName, source);
+	}
+});
+
+test("only generic exploration opts into packaged background mode", () => {
+	const explorer = join(assetsAgentsDir, "gentle-ai-explore.md");
+	assert.equal(readFrontmatterField(explorer, "subagent_mode"), "background");
+
+	for (const fileName of ["gentle-ai-worker.md", "gentle-ai-verify.md"]) {
+		assert.notEqual(
+			readFrontmatterField(join(assetsAgentsDir, fileName), "subagent_mode"),
+			"background",
+			`${fileName} must not default to background mode`,
+		);
 	}
 });
 

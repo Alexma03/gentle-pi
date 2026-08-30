@@ -1144,6 +1144,103 @@ test("bounded implementation routing uses the same explicit fallback in both pol
 	);
 });
 
+test("background orchestration keeps exploration-only work under a five-task ceiling", () => {
+	const routing = readFileSync(
+		join(PACKAGE_ROOT, "assets", "orchestrator-delegation.md"),
+		"utf8",
+	);
+	const background = readMarkdownSection(routing, "Background Subagent Policy");
+
+	assert.match(background, /global plugin `default_mode` remains `task`/);
+	assert.match(
+		background,
+		/`gentle-ai-explore` is the only generic role that defaults to background via `subagent_mode: background`/,
+	);
+	assert.match(background, /no more than 5 concurrent background tasks/);
+	assert.doesNotMatch(background, /no more than 2 concurrent background tasks/);
+	assert.match(background, /independent, read-only exploration or audit/);
+	assert.match(
+		background,
+		/writers, verification evidence, interaction-required work, SDD apply\/archive\/dependent phases, and next-action-gating work use foreground `mode: "task"`/i,
+	);
+});
+
+test("parallel work units require a parent-owned complete dependency DAG", () => {
+	const routing = readFileSync(
+		join(PACKAGE_ROOT, "assets", "orchestrator-delegation.md"),
+		"utf8",
+	);
+	const workUnits = readMarkdownSection(routing, "Atomic Work Units and Parallel Launches");
+
+	assert.match(
+		workUnits,
+		/An atomic work unit is a coherent, context-complete, independently verifiable outcome—not a tiny file-count fragment/,
+	);
+	assert.match(workUnits, /Before any parallel launch, the parent owns a dependency DAG/);
+	assert.match(
+		workUnits,
+		/Every node records its outcome, inputs\/context, dependencies, repository\/worktree, broad read scope, bounded write surface, validation, and stop conditions\./,
+	);
+});
+
+test("parallel writers require isolated repositories or worktrees and ordered integration", () => {
+	const routing = readFileSync(
+		join(PACKAGE_ROOT, "assets", "orchestrator-delegation.md"),
+		"utf8",
+	);
+	const writers = readMarkdownSection(routing, "Parallel Writer Boundary");
+
+	assert.match(
+		writers,
+		/Parallel writers are allowed only for distinct repositories or explicitly isolated Git worktrees/,
+	);
+	assert.match(
+		writers,
+		/no overlapping paths, shared contracts, migrations, generated outputs, or unresolved dependencies/,
+	);
+	assert.match(writers, /one writer per `\(repository, worktree, write surface\)`/);
+	assert.match(writers, /the parent owns integration order/);
+});
+
+test("subagent continuation is timeout-only and revalidated", () => {
+	const routing = readFileSync(
+		join(PACKAGE_ROOT, "assets", "orchestrator-delegation.md"),
+		"utf8",
+	);
+	const continuation = readMarkdownSection(routing, "Selective Continuation");
+
+	assert.match(continuation, /`subagent_continue` only after `total_timeout` or `stall_timeout`/);
+	assert.match(
+		continuation,
+		/the same persisted task after the parent revalidates that it remains correct, scoped, and non-conflicting/,
+	);
+	assert.match(
+		continuation,
+		/including repository\/worktree, git state, dependencies, and allowed edit surfaces/,
+	);
+	assert.match(
+		continuation,
+		/Never continue completed, user-cancelled, interrupted, superseded, drifted, or scope-invalid work/,
+	);
+	assert.match(continuation, /never automatically reuse completed worker context/);
+});
+
+test("CodeGraph guidance binds the exact root and requires source and test evidence", () => {
+	const routing = readFileSync(
+		join(PACKAGE_ROOT, "assets", "orchestrator-delegation.md"),
+		"utf8",
+	);
+	const codeGraph = readMarkdownSection(routing, "CodeGraph Lifecycle");
+
+	assert.match(codeGraph, /CodeGraph accelerates navigation but never replaces source\/test evidence/);
+	assert.match(codeGraph, /Use the exact workspace-root index/);
+	assert.match(
+		codeGraph,
+		/check CodeGraph status\/sync after structural changes, stale warnings, or worktree\/root uncertainty/,
+	);
+	assert.match(codeGraph, /Never use an index from another worktree as authority/);
+});
+
 test("orchestrator routes generic roles without static RDD lens routing", () => {
 	for (const file of ["orchestrator.md", "orchestrator-delegation.md"]) {
 		const routing = readFileSync(join(PACKAGE_ROOT, "assets", file), "utf8");

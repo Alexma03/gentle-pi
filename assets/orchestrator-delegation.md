@@ -135,13 +135,30 @@ Background execution is policy-gated: the always-on orchestrator prompt renders 
 
 When the policy is on and `subagent_run` is available:
 
+- `gentle-ai-explore` is the only generic role that defaults to background via `subagent_mode: background`; the global plugin `default_mode` remains `task`, so writers, verifiers, SDD phases, and dependent phases remain foreground unless explicitly configured otherwise.
 - Use `subagent_run` `mode: "background"` ONLY for independent, read-only exploration or audit work where the parent can continue non-overlapping work.
-- At the parent level, allow no more than 2 concurrent background tasks.
+- At the parent level, allow no more than 5 concurrent background tasks.
+- Keep background limited to independent, read-only exploration or audit work. Writers, verification evidence, interaction-required work, SDD apply/archive/dependent phases, and next-action-gating work use foreground `mode: "task"`.
 - Completion notifications only: do not poll, sleep, run status checks, or proactively read for completion.
-- Use foreground `mode: "task"` when the result is needed before the next action, and always for user decisions, SDD apply or other writers, dependent verification evidence, archive, dependent phases, and any delegated work whose output determines the next action.
 - Do not duplicate launches or work, and do not overlap files or topics. Never run parallel writers in one worktree.
 - Background jobs are process-local and non-durable. A restart loses them; make no recovery claim.
 <!-- /gentle-pi:background-subagents -->
+
+#### Atomic Work Units and Parallel Launches
+
+An atomic work unit is a coherent, context-complete, independently verifiable outcome—not a tiny file-count fragment. Before any parallel launch, the parent owns a dependency DAG. Every node records its outcome, inputs/context, dependencies, repository/worktree, broad read scope, bounded write surface, validation, and stop conditions.
+
+#### Parallel Writer Boundary
+
+Parallel writers are allowed only for distinct repositories or explicitly isolated Git worktrees, with no overlapping paths, shared contracts, migrations, generated outputs, or unresolved dependencies. Keep one writer per `(repository, worktree, write surface)`; the parent owns integration order.
+
+#### Selective Continuation
+
+Use `subagent_continue` only after `total_timeout` or `stall_timeout`. It may resume only the same persisted task after the parent revalidates that it remains correct, scoped, and non-conflicting, including repository/worktree, git state, dependencies, and allowed edit surfaces. Never continue completed, user-cancelled, interrupted, superseded, drifted, or scope-invalid work; never automatically reuse completed worker context.
+
+#### CodeGraph Lifecycle
+
+CodeGraph accelerates navigation but never replaces source/test evidence. Use the exact workspace-root index; check CodeGraph status/sync after structural changes, stale warnings, or worktree/root uncertainty. Never use an index from another worktree as authority.
 
 For generic non-SDD exploration and mapping, first attempt the installed package-owned `gentle-ai-explore`. If that individual role is missing or unusable, fall back to Pi's native `Agent` with the same read-only mapping constraints and report the fallback.
 
