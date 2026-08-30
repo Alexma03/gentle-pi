@@ -130,7 +130,7 @@ This gate is MANDATORY and applies in both execution modes; in interactive mode 
 - The proposer receives a confirmed pre-proposal handoff and MUST NOT interview the user or infer consent.
 - Pi's native `gentle-pi.sdd-status` contract remains the sole status contract. Research and pre-proposal state are orchestrator-owned prose and artifacts (`sdd/{change}/research`, `sdd/{change}/preproposal`, `openspec/changes/{change}/research.md`) layered on top — never a native status field.
 
-Runtime note: this runtime declares no evidence grants (`documentation=[]; open-web=[]`), so a SELECTED research lane fail-closes to a `blocked` outcome and blocks proposal readiness until the user deselects research or evidence capability arrives. SDD chains treat research as unselected.
+Runtime note: Pi declares evidence grants `documentation=[fetch_content,get_search_content]` and `open-web=[web_search,source_check,fetch_content,get_search_content]`. Selected research must be admitted against the exact grants; unsupported classes fail closed with no claims, and a selected lane must finish honestly (`done | partial | blocked`) before proposal readiness.
 
 ## Delivery Strategy
 

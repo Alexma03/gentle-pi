@@ -147,6 +147,66 @@ test("generic non-SDD agents declare exact role tool allowlists", () => {
 	}
 });
 
+const RESEARCH_EVIDENCE_TOOLS = ["web_search", "source_check", "fetch_content", "get_search_content"];
+const RESEARCH_WORKFLOW = "sdd-orchestrator-workflow.md";
+
+test("sdd-research declares native evidence tools, exact grants, and default-deny audit guidance", () => {
+	const path = join(assetsAgentsDir, "sdd-research.md");
+	const source = readFileSync(path, "utf8");
+
+	// Exact native Pi evidence toolset (Gentle AI a27ba4d0 contract).
+	for (const tool of RESEARCH_EVIDENCE_TOOLS) {
+		assert.ok(readTools(path).includes(tool), `sdd-research.md must declare native evidence tool ${tool}`);
+	}
+
+	// Auditable evidence grants, verbatim.
+	assert.match(source, /documentation=\[fetch_content,get_search_content\]/);
+	assert.match(source, /open-web=\[web_search,source_check,fetch_content,get_search_content\]/);
+
+	// Retired deny-all wording is gone: research no longer blocks outright.
+	assert.doesNotMatch(source, /documentation=\[\);\s*open-web=\[\)/);
+	assert.doesNotMatch(source, /declares no evidence grants/);
+	assert.doesNotMatch(source, /persist a `blocked` outcome with no claims, and stop/);
+
+	// Default-deny audit guidance stays: evidence authority is never inferred.
+	assert.match(source, /Never infer evidence authority/i);
+	assert.match(source, /Bash, MCP, memory, inherited tools/i);
+	assert.match(source, /Unsupported or undeclared classes deny admission and emit no claims/);
+
+	// Positive research behavior: documentation URLs, varied web queries, claim
+	// verification, claim-to-source mapping, observed-vs-inference, honest outcomes.
+	assert.match(source, /supplied as URLs/i);
+	assert.match(source, /varied `web_search` queries/i);
+	assert.match(source, /Verify material claims/i);
+	assert.match(source, /claim-to-source mapping/i);
+	assert.match(source, /distinguish observed evidence from inference/i);
+	assert.match(source, /`done \| partial \| blocked`/);
+
+	// Unchanged contracts: no child subagents, persistence honesty.
+	assert.match(source, /Do NOT launch child subagents/i);
+	assert.match(source, /Never claim persistence you did not perform/i);
+});
+
+test("sdd-orchestrator-workflow declares the same exact research grants and no deny-all runtime note", () => {
+	const source = readFileSync(join(assetsAgentsDir, "..", RESEARCH_WORKFLOW), "utf8");
+
+	// The orchestrator workflow must surface the same auditable Pi grants.
+	assert.match(source, /documentation=\[fetch_content,get_search_content\]/);
+	assert.match(source, /open-web=\[web_search,source_check,fetch_content,get_search_content\]/);
+
+	// Selected research must be admitted against exact grants and fail closed for
+	// unsupported classes, then finish honestly before proposal readiness.
+	assert.match(source, /admitted against the exact grants/i);
+	assert.match(source, /unsupported classes fail closed/i);
+	assert.match(source, /selected lane must finish honestly[^.]*before proposal readiness/i);
+
+	// Retired deny-all runtime note is gone.
+	assert.doesNotMatch(source, /declares no evidence grants/i);
+	assert.doesNotMatch(source, /documentation=\[\);\s*open-web=\[\)/);
+	assert.doesNotMatch(source, /fail-closes to a `blocked` outcome/i);
+	assert.doesNotMatch(source, /treat research as unselected/i);
+});
+
 test("the retired Pi adversarial role agents are not packaged", () => {
 	// gentle-pi#311 P5: the refuter and targeted validator verdicts execute
 	// through Go-owned pi processes via provider-rendered self-contained
