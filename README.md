@@ -51,7 +51,7 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 | **Configurable startup intro** | Adds a rose/text-logo startup intro, compact runtime panel, color presets, and commands to hide or show the decorative parts.                  |
 | **Work routing discipline**    | Small tasks stay inline. Context-heavy exploration can be delegated. Large or risky changes go through SDD/OpenSpec.                          |
 | **SDD/OpenSpec assets**        | Installs phase agents and chains for `init`, `onboard`, `explore`, `proposal`, `spec`, `design`, `tasks`, `apply`, `verify`, `sync`, and `archive`. |
-| **Lazy SDD preflight**         | Resolves SDD mode, artifact store, delivery strategy, and review budget once per session; prompts only when a choice is genuinely unresolved.              |
+| **Lazy SDD preflight**         | Resolves SDD mode, artifact store, and delivery strategy once per session; prompts only when a choice is genuinely unresolved.                            |
 | **Subagent orchestration**     | Keeps one parent session responsible while child agents explore, implement, test, or review with focused context.                             |
 | **Strict TDD support**         | When project config declares a test command, apply/verify phases must record RED → GREEN → TRIANGULATE → REFACTOR evidence.                   |
 | **Reviewer protection**        | Surfaces review workload risk before a task turns into an oversized PR.                                                                       |
@@ -184,7 +184,7 @@ Reconciliation is intentionally narrow: native code may quarantine only the boun
 
 Native lifecycle status remains informational. VALIDATE does not authorize delivery; commit, push, PR, and release commands follow ordinary repository policy. Recovery grants no new budget, and legacy graph bundle export/import is retired.
 
-This is the post-U8 boundary, not the final architecture. [Issue #191](https://github.com/Gentleman-Programming/gentle-pi/issues/191) is the immediate final unit in this same delivery: extract the remaining Pi command-projection and lifecycle-gate surface from `review-transaction.ts`, repoint runtime enforcement, then delete only dependencies proven unreachable without weakening graph-v1 Judgment Day. The branch-wide High-tier 4R runs after that extraction, before the single size-exception PR.
+This is the post-U8 boundary, not the final architecture. [Issue #191](https://github.com/Gentleman-Programming/gentle-pi/issues/191) is the immediate final unit in this same delivery: extract the remaining Pi command-projection and lifecycle-gate surface from `review-transaction.ts`, repoint runtime enforcement, then delete only dependencies proven unreachable without weakening graph-v1 Judgment Day. The branch-wide High-tier 4R runs after that extraction, before the final cohesive PR.
 
 ### Review Lens Selection (architecture reference)
 
@@ -196,7 +196,7 @@ This is the post-U8 boundary, not the final architecture. [Issue #191](https://g
 | Behavior, state, tests, determinism, regressions | `review-reliability` |
 | Shell/process integration, partial failures, recovery, degraded dependencies | `review-resilience` |
 | Security, permissions, data exposure/loss, architecture, dependencies | `review-risk` |
-| Large PR, hot path, or >400 changed lines | Full 4R: `review-risk`, `review-resilience`, `review-readability`, `review-reliability` |
+| Security-sensitive path, broad cross-domain change, risky interface, or dense verification burden | Full 4R: `review-risk`, `review-resilience`, `review-readability`, `review-reliability` |
 
 The former compact controller classified documentation/comment/formatting-only changes as zero-lens, standard changes as one dominant lens, and higher-risk paths as full 4R. This describes compatibility architecture only; never derive or run those choices from this README.
 
@@ -400,7 +400,7 @@ Engram-only mode is different by design: Engram is working memory and does not m
 
 Preflight values resolve in this order: explicit current user/session choice, valid persisted preference, capability or already-selected strategy constraint, canonical default, then a prompt only when genuinely unresolved. Resolved values are reused for later SDD flows in the session.
 
-Canonical values are `auto` execution mode, `openspec` artifact store, `ask-on-risk` delivery strategy, and a `400` changed-line review threshold. The delivery strategy domain is `ask-on-risk`, `auto-chain`, `single-pr`, or `exception-ok`; `chain_strategy` remains deferred until chaining is selected. `exception-ok` requires explicit `size:exception` acceptance and is never inferred. Consent, authorization, security, destructive/publishing, interactive phase approval, and ambiguous-scope gates remain human-controlled.
+Canonical values are `auto` execution mode, `openspec` artifact store, and `ask-on-risk` delivery strategy. The delivery strategy domain is `ask-on-risk`, `auto-chain`, or `single-pr`; `chain_strategy` remains deferred until chaining is selected. Review workload is assessed qualitatively from complexity, cohesion, domains, interfaces, risk, verification burden, and reviewer cognitive load. Changed-line counts never determine routing, chaining, or authorization. Consent, authorization, security, destructive/publishing, interactive phase approval, and ambiguous-scope gates remain human-controlled.
 
 It does **not** overwrite existing global assets unless you explicitly run:
 
