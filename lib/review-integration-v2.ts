@@ -117,7 +117,6 @@ const REQUIRED_SCHEMAS_COMMON = Object.freeze([
 	"gentle-ai.review-integration.operation/v2",
 	"gentle-ai.review-integration.projection/v1",
 	"gentle-ai.review-integration.repair/v2",
-	"gentle-ai.review-integration.start/v3",
 	"gentle-ai.review-receipt/v1",
 	"gentle-ai.review-receipt/v2",
 	"gentle-ai.review-result-artifact/v2",
@@ -127,18 +126,56 @@ const REQUIRED_SCHEMAS_COMMON = Object.freeze([
 	"https://gentle-ai.dev/schema/review/reviewer/v1",
 	"https://gentle-ai.dev/schema/review/validator/v1",
 ] as const);
-const CAPABILITIES_SCHEMA_IDENTITIES: Readonly<Record<string, { protocolMinor: number; requiredSchemas: readonly string[] }>> = Object.freeze({
+// The v2.3 provider contract (first advertised by the pinned v2.5.0-rc.3
+// runtime) retired exact_receipt_replay, five_delivery_gates, and
+// sdd_receipt_binding from the mandatory feature set and
+// exact_gate_receipt_discovery, one_shot_final_verification_retry, and
+// outcome_bound_verification_evidence from the optional set; none of them is
+// consumed by Pi's negotiated v2 lane. Earlier minors keep their frozen
+// requirement sets unchanged.
+const REQUIRED_MANDATORY_FEATURES_V23 = Object.freeze([
+	"compact_v2_authority",
+	"immutable_snapshot",
+	"legacy_v1_target_scoped_read_only",
+	"repository_independent_capabilities",
+	"restart_safe_projection",
+	"target_scoped_status",
+	"uniform_failure_envelope",
+] as const);
+// v2.3 (first advertised by the pinned v2.5.0-rc.3 provider) retired three
+// v1-era identities from its advertisement. Pi never decodes those envelopes
+// on the negotiated v2 lane, so the v2.3 requirement list is the exact set the
+// v2.3 provider contract defines; earlier minors keep the full common list.
+// The load-time length assertion keeps this filter honest: if the common-list
+// identifier form ever drifts away from these bare identifiers, the module
+// fails loudly instead of silently requiring schemas the provider retired.
+const RETIRED_SCHEMAS_V23: readonly string[] = Object.freeze([
+	"gentle-ai.review-final-verification-incident/v1",
+	"gentle-ai.review-receipt/v2",
+	"gentle-ai.review-verification-evidence/v2",
+]);
+const REQUIRED_SCHEMAS_COMMON_V23 = Object.freeze(REQUIRED_SCHEMAS_COMMON.filter((schema) => !RETIRED_SCHEMAS_V23.includes(schema)));
+if (REQUIRED_SCHEMAS_COMMON_V23.length !== REQUIRED_SCHEMAS_COMMON.length - RETIRED_SCHEMAS_V23.length) {
+	throw new TypeError("v2.3 retired-schema filter must remove exactly the retired identities from the common schema list");
+}
+const CAPABILITIES_SCHEMA_IDENTITIES: Readonly<Record<string, { protocolMinor: number; requiredSchemas: readonly string[]; requiredMandatoryFeatures?: readonly string[]; optionalFeatureFloor?: number }>> = Object.freeze({
 	"gentle-ai.review-integration.capabilities/v2": Object.freeze({
 		protocolMinor: 0,
-		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2", "gentle-ai.review-integration.consent/v2", "gentle-ai.review-integration.status/v3"]),
+		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2", "gentle-ai.review-integration.consent/v2", "gentle-ai.review-integration.start/v3", "gentle-ai.review-integration.status/v3"]),
 	}),
 	"gentle-ai.review-integration.capabilities/v2.1": Object.freeze({
 		protocolMinor: 1,
-		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2.1", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.status/v3"]),
+		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2.1", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.start/v3", "gentle-ai.review-integration.status/v3"]),
 	}),
 	"gentle-ai.review-integration.capabilities/v2.2": Object.freeze({
 		protocolMinor: 2,
-		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2.2", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.status/v5"]),
+		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2.2", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.start/v3", "gentle-ai.review-integration.status/v5"]),
+	}),
+	"gentle-ai.review-integration.capabilities/v2.3": Object.freeze({
+		protocolMinor: 3,
+		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON_V23, "gentle-ai.review-integration.capabilities/v2.3", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.start/v4", "gentle-ai.review-integration.status/v5"]),
+		requiredMandatoryFeatures: REQUIRED_MANDATORY_FEATURES_V23,
+		optionalFeatureFloor: 14,
 	}),
 });
 const OPTIONAL_FEATURE_NAMES = Object.freeze([
@@ -292,6 +329,11 @@ export interface ReviewStartV3 {
 	raw: Readonly<Record<string, unknown>>;
 }
 
+export interface ReviewStartV4 extends Omit<ReviewStartV3, "action"> {
+	action: "created" | "replayed" | "closed" | "blocked-scope-action";
+	nextTransition?: ReviewNextTransitionV3;
+}
+
 export interface ReviewProjectionDescriptorV1 {
 	schema: "gentle-ai.review-integration.projection/v1";
 	kind: ReviewProjectionKind;
@@ -339,6 +381,7 @@ export interface ReviewTransitionArgumentV3 {
 export interface ReviewNextTransitionExecuteV3 {
 	operation: string;
 	arguments: readonly ReviewTransitionArgumentV3[];
+	selectorArguments?: readonly ReviewTransitionArgumentV3[];
 	preconditions: readonly ReviewTransitionArgumentV3[];
 	binding: { targetIdentity: string; lineageId?: string; revision?: string };
 	command?: string;
@@ -921,11 +964,12 @@ export function decodeReviewCapabilitiesV2(value: unknown, verifiedExecutableDig
 	assertSupersetOf(advertisedSchemas, identity.requiredSchemas, "capabilities schemas");
 
 	const features = exactRecord(body.features, "capabilities.features", ["mandatory", "optional"]);
-	const mandatory = array(features.mandatory, "capabilities.features.mandatory", (entry, label) => decodeFeature(entry, label), { minimum: 10 });
-	const optional = array(features.optional, "capabilities.features.optional", (entry, label) => decodeOptionalFeature(entry, label), { minimum: 17, unique: true });
+	const requiredMandatoryFeatures = identity.requiredMandatoryFeatures ?? REQUIRED_MANDATORY_FEATURES;
+	const mandatory = array(features.mandatory, "capabilities.features.mandatory", (entry, label) => decodeFeature(entry, label), { minimum: requiredMandatoryFeatures.length });
+	const optional = array(features.optional, "capabilities.features.optional", (entry, label) => decodeOptionalFeature(entry, label), { minimum: identity.optionalFeatureFloor ?? 17, unique: true });
 	const mandatoryNames = mandatory.map((feature) => feature.name);
 	const optionalNames = optional.map((feature) => feature.name);
-	assertExactSet(mandatoryNames, REQUIRED_MANDATORY_FEATURES, "mandatory capabilities");
+	assertExactSet(mandatoryNames, requiredMandatoryFeatures, "mandatory capabilities");
 	if (new Set(optionalNames).size !== optionalNames.length) throw new TypeError("optional capabilities contain duplicate names");
 	if (optionalNames.some((name) => mandatoryNames.includes(name as ReviewFeatureV2["name"]))) throw new TypeError("mandatory and optional capabilities overlap");
 	if (mandatory.some((feature) => !feature.supported)) throw new TypeError("mandatory capability is unsupported");
@@ -1017,7 +1061,7 @@ function decodeChangedPathEntry(value: unknown, label: string): ChangedPathEntry
 // start/v3
 // ---------------------------------------------------------------------------
 
-export function decodeReviewStartV3(value: unknown): ReviewStartV3 {
+export function decodeReviewStartV3(value: unknown, overlayIdentitySatisfiesRepositoryContext = false): ReviewStartV3 {
 	const overlayFields = ["target_mode", "target_identity", "base_tree", "candidate_tree"] as const;
 	const body = exactRecord(value, "start", [
 		"schema", "contract", "operation", "action", "lenses_required", "lineage_id", "state", "risk_level",
@@ -1051,9 +1095,12 @@ export function decodeReviewStartV3(value: unknown): ReviewStartV3 {
 		throw new TypeError("start with selected_lenses requires base_tree, candidate_tree, and changed_path_manifest");
 	}
 
-	const requiresRepositoryContext = (action === "created" || action === "resumed") && state === REVIEW_START_STATE.REVIEWING;
+	const reviewingCreatedOrResumed = (action === "created" || action === "resumed") && state === REVIEW_START_STATE.REVIEWING;
+	// START/v4 may render the frozen target as the overlay identity instead of
+	// repository_context; absence is only excused when that identity is present.
+	const requiresRepositoryContext = reviewingCreatedOrResumed && !(overlayIdentitySatisfiesRepositoryContext && targetIdentity !== undefined);
 	if (requiresRepositoryContext && body.repository_context === undefined) throw new TypeError("start.repository_context is required when action is created/resumed and state is reviewing");
-	if (!requiresRepositoryContext && body.repository_context !== undefined) throw new TypeError("start.repository_context is only valid when action is created/resumed and state is reviewing");
+	if (!reviewingCreatedOrResumed && body.repository_context !== undefined) throw new TypeError("start.repository_context is only valid when action is created/resumed and state is reviewing");
 
 	let repositoryContext: ReviewRepositoryContextV2 | undefined;
 	if (body.repository_context !== undefined) {
@@ -1104,6 +1151,78 @@ export function decodeReviewStartV3(value: unknown): ReviewStartV3 {
 		...(repositoryContext === undefined ? {} : { repositoryContext }),
 		raw: body,
 	};
+}
+
+function assertReviewStartV4StatusBinding(execute: ReviewNextTransitionExecuteV3, start: ReviewStartV3): void {
+	const expectedTargetIdentity = start.repositoryContext?.targetIdentity ?? start.targetIdentity;
+	const targetIdentityConflicts = expectedTargetIdentity === undefined || execute.binding.targetIdentity !== expectedTargetIdentity
+		|| (start.targetIdentity !== undefined && start.targetIdentity !== expectedTargetIdentity)
+		|| start.artifactSubjects.some((subject) => subject.targetIdentity !== expectedTargetIdentity);
+	if (targetIdentityConflicts) throw new TypeError("START/v4 status target identity binding conflicts with frozen START");
+	if (execute.binding.lineageId !== undefined && execute.binding.lineageId !== start.lineageId) {
+		throw new TypeError("START/v4 status lineage binding conflicts with frozen START");
+	}
+	const optionalSelectors: Readonly<Record<string, string | undefined>> = {
+		"base-ref": start.baseTree,
+		"base-tree": start.baseTree,
+		projection: start.projection,
+		target: expectedTargetIdentity,
+	};
+	const argumentsByName = new Map<string, string>();
+	for (const argument of execute.arguments) {
+		if (argumentsByName.has(argument.name)) throw new TypeError(`START/v4 status arguments duplicate ${argument.name} binding`);
+		argumentsByName.set(argument.name, argument.value);
+		if (Object.hasOwn(optionalSelectors, argument.name) && argument.value !== optionalSelectors[argument.name]) throw new TypeError(`START/v4 status ${argument.name} binding conflicts with frozen START`);
+	}
+	if (argumentsByName.get("lineage") !== start.lineageId) throw new TypeError("START/v4 status requires exactly one lineage binding for the frozen START");
+	if (execute.arguments.find((argument) => argument.name === "lineage")?.token !== `--lineage=${start.lineageId}`) throw new TypeError("START/v4 status lineage binding conflicts with frozen START");
+	for (const [name, value] of [["contract", REVIEW_INTEGRATION_CONTRACT], ["next-transition", "true"], ["agent", "pi"]]) {
+		if (argumentsByName.get(name) !== value || execute.arguments.find((argument) => argument.name === name)?.token !== `--${name}=${value}`) throw new TypeError(`START/v4 status ${name} binding conflicts with frozen START`);
+	}
+	const selectorArguments = execute.selectorArguments;
+	if (selectorArguments === undefined || selectorArguments.length === 0) throw new TypeError("START/v4 status selector arguments are required");
+	const selectorsByName = new Map<string, ReviewTransitionArgumentV3>();
+	for (const selector of selectorArguments) {
+		const full = execute.arguments.find((argument) => argument.name === selector.name);
+		if (selectorsByName.has(selector.name) || full === undefined || full.value !== selector.value || full.token !== selector.token) throw new TypeError(`START/v4 status selector ${selector.name} binding conflicts with full arguments`);
+		selectorsByName.set(selector.name, selector);
+	}
+	const selector = (name: string, value: string): void => {
+		if (selectorsByName.get(name)?.value !== value || selectorsByName.get(name)?.token !== `--${name}=${value}` || execute.arguments.find((argument) => argument.name === name)?.token !== `--${name}=${value}`) throw new TypeError(`START/v4 status selector ${name} binding conflicts with frozen START`);
+	};
+	const baseRef = argumentsByName.get("base-ref");
+	if (start.targetMode === "base-workspace-overlay") {
+		if (baseRef !== start.baseTree || argumentsByName.has("committed-only")) throw new TypeError("START/v4 status workspace overlay binding conflicts with frozen START");
+		selector("base-ref", start.baseTree!); selector("workspace-overlay", "true");
+	} else if (baseRef !== undefined) {
+		if (baseRef !== start.baseTree || argumentsByName.has("workspace-overlay")) throw new TypeError("START/v4 status committed range binding conflicts with frozen START");
+		selector("base-ref", start.baseTree!); selector("committed-only", "true");
+	} else {
+		if (argumentsByName.has("committed-only") || argumentsByName.has("workspace-overlay")) throw new TypeError("START/v4 status current projection binding conflicts with frozen START");
+		selector("projection", start.projection);
+	}
+}
+
+export function decodeReviewStartV4(value: unknown): ReviewStartV4 {
+	const overlayFields = ["target_mode", "target_identity", "base_tree", "candidate_tree"] as const;
+	const body = exactRecord(value, "start", [
+		"schema", "contract", "operation", "action", "lenses_required", "lineage_id", "state", "risk_level",
+		"selected_lenses", "projection", "changed_files", "changed_lines", "correction_budget", "risk_reasons", "artifact_subjects",
+	], [...overlayFields, "changed_path_manifest", "repository_context", "acknowledgement", "next_transition"]);
+	requireIdentity(body, "gentle-ai.review-integration.start/v4", REVIEW_INTEGRATION_OPERATION.START);
+	const action = enumeration(body.action, ["created", "replayed", "closed", "blocked-scope-action"] as const, "start.action");
+	const v3Action = action === "replayed" ? "resumed" : action;
+	const nextTransition = body.next_transition === undefined ? undefined : decodeReviewNextTransitionV3(body.next_transition);
+	const reviewing = (action === "created" || action === "replayed") && body.state === REVIEW_START_STATE.REVIEWING;
+	if (reviewing && nextTransition?.kind !== "execute") throw new TypeError("reviewing created/replayed START requires next_transition.execute");
+	if (reviewing && nextTransition.execute?.operation !== "review.status") throw new TypeError("reviewing created/replayed START next_transition.execute.operation must be review.status");
+	const closedApprovedZeroLens = action === "closed" && body.state === REVIEW_START_STATE.APPROVED && Array.isArray(body.selected_lenses) && body.selected_lenses.length === 0;
+	if (closedApprovedZeroLens && nextTransition !== undefined) throw new TypeError("closed approved zero-lens START cannot carry next_transition");
+	const v3Body = { ...body };
+	delete v3Body.next_transition;
+	const decoded = decodeReviewStartV3({ ...v3Body, schema: "gentle-ai.review-integration.start/v3", action: v3Action }, true);
+	if (reviewing) assertReviewStartV4StatusBinding(nextTransition!.execute!, decoded);
+	return { ...decoded, action, ...(nextTransition === undefined ? {} : { nextTransition }), raw: body };
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,7 +1328,7 @@ export function decodeAuthorityRepairAssessmentV1(value: unknown): AuthorityRepa
 // collect inputs and the execute binding.
 // ---------------------------------------------------------------------------
 
-const NEXT_TRANSITION_OPERATIONS = ["review.start", "review.recover", "review.repair", "review.acknowledge-approved"] as const;
+const NEXT_TRANSITION_OPERATIONS = ["review.start", "review.status", "review.recover", "review.repair", "review.acknowledge-approved"] as const;
 
 function decodeTransitionArguments(value: unknown, label: string): readonly ReviewTransitionArgumentV3[] {
 	return array(value, label, (entry, entryLabel) => {
@@ -1512,6 +1631,7 @@ export function decodeReviewNextTransitionV3(value: unknown, options: { v5?: boo
 		const execute = exactRecord(transition.execute, "next_transition.execute", ["operation", "arguments", "preconditions", "binding"], ["command", "selector_arguments", "artifacts"]);
 		const operation = enumeration(execute.operation, NEXT_TRANSITION_OPERATIONS, "next_transition.execute.operation");
 		const argumentsList = decodeTransitionArguments(execute.arguments, "next_transition.execute.arguments");
+		const selectorArguments = execute.selector_arguments === undefined ? undefined : decodeTransitionArguments(execute.selector_arguments, "next_transition.execute.selector_arguments");
 		const preconditions = decodeTransitionArguments(execute.preconditions, "next_transition.execute.preconditions");
 		// The schema gives `binding` no declared properties and no required list:
 		// it is an OPEN object. Closing it here made Pi stricter than the
@@ -1522,7 +1642,7 @@ export function decodeReviewNextTransitionV3(value: unknown, options: { v5?: boo
 		const lineageId = binding.lineage_id === undefined ? undefined : lineage(binding.lineage_id, "next_transition.execute.binding.lineage_id");
 		const revision = binding.revision === undefined ? undefined : sha256(binding.revision, "next_transition.execute.binding.revision");
 		const command = execute.command === undefined ? undefined : nonempty(execute.command, "next_transition.execute.command");
-		const decodedExecute: ReviewNextTransitionExecuteV3 = { operation, arguments: argumentsList, preconditions, binding: { targetIdentity, ...(lineageId === undefined ? {} : { lineageId }), ...(revision === undefined ? {} : { revision }) }, ...(command === undefined ? {} : { command }) };
+		const decodedExecute: ReviewNextTransitionExecuteV3 = { operation, arguments: argumentsList, ...(selectorArguments === undefined ? {} : { selectorArguments }), preconditions, binding: { targetIdentity, ...(lineageId === undefined ? {} : { lineageId }), ...(revision === undefined ? {} : { revision }) }, ...(command === undefined ? {} : { command }) };
 		if (operation === "review.acknowledge-approved") assertReviewApprovedAcknowledgementExecuteV1(decodedExecute);
 		if (transition.collect !== undefined) throw new TypeError("next_transition.collect is incompatible with execute");
 		return { kind, reasonCode, execute: decodedExecute, ...(correctionRequest === undefined ? {} : { correctionRequest }) };
