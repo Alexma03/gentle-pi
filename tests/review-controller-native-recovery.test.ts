@@ -79,8 +79,19 @@ test("native abandon carries the exact discarded-work authorization and audit re
 		actor: "maintainer",
 		reason: "discard candidate",
 	};
+	const authorization = nativeReviewAbandonAuthorization(request);
+	assert.equal(authorization, [
+		"gentle-ai.review-abandon-authorization/v2",
+		"lineage=abandoned",
+		"revision=revision-1",
+		`snapshot_identity=${SHA}`,
+		"reason=discard candidate",
+		"captured_lens_results=00-risk.json",
+		"findings_present=true",
+		"actor=maintainer",
+	].join("\n"));
 	const queue = queuedAdapter([{ stdout: JSON.stringify({ operation: "review/abandon", record: { schema: "gentle-ai.review-reclaim-audit/v1", lineage_id: "abandoned", status: "committed" } }) }]);
-	const result = await client(queue.adapter).abandon({ ...request, maintainerAuthorization: nativeReviewAbandonAuthorization(request) });
+	const result = await client(queue.adapter).abandon({ ...request, maintainerAuthorization: authorization });
 	assert.equal(result.record.status, "committed");
 	assert.deepEqual(queue.calls[0]?.arguments.slice(0, 10), ["review", "abandon", "--cwd", "/repo", "--lineage", "abandoned", "--expected-revision", "revision-1", "--actor", "maintainer"]);
 });

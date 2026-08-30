@@ -1415,7 +1415,6 @@ export function nativeReviewAbandonAuthorization(request: Pick<NativeReviewAband
 		`reason=${request.reason}`,
 		`captured_lens_results=${request.capturedLensResults.join(",")}`,
 		`findings_present=${request.findingsPresent}`,
-		`evidence_records_present=${request.evidenceRecordsPresent}`,
 		`actor=${request.actor.trim()}`,
 	].join("\n");
 }
