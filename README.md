@@ -567,6 +567,8 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/gentle:models`                 | Opens global model + effort assignment UI. Press `x` to export and `r` to restore saved routing. |
 | `/gentle:persona`                | Switches global persona mode, with project override support.        |
 | `/gentle:background-subagents`   | Shows or sets the managed background-subagents policy (`status\|enable\|disable`), naming the source that decided it. |
+| `/gentle:pinned-main`            | Registers, inspects, or clears a digest- and provenance-bound local Gentle AI main snapshot (`status\|<path>\|off`). |
+| `/gentle:dev-binary`             | Registers, inspects, or clears the unpinned field-test binary override (`status\|<path>\|off`). |
 | `/gentle:banner`                 | Configures startup banner rose, text logo, and color preset.        |
 | `/gentle:toggle-rose`            | Toggles the startup rose.                                           |
 | `/gentle:toggle-text-logo`       | Toggles the startup text logo.                                      |
@@ -578,6 +580,14 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/skill-creation`                | Creates or updates an LLM-first skill using the packaged `gentle-ai-skill-creator` contract and style guide. |
 
 Package-owned global SDD runtime assets are also refreshed automatically on session start when `gentle-pi` changes. Project-local `.pi/agents` and `.pi/chains` remain manual overrides and are never overwritten by startup refresh.
+
+### Gentle AI binary channels
+
+Custom binary resolution is fail-closed and ordered: an explicit session `GENTLE_PI_GENTLE_AI_DEV_BINARY`, a persistent pinned-main snapshot, the legacy persistent dev registration, then the signed package release. A declared but invalid channel never falls through to another binary.
+
+`/gentle:pinned-main <absolute snapshot binary>` reads the adjacent `integrity.json`, requires `sourceBranch: main` or `custom/main` (any other branch fails closed), requires an HTTPS `sourceRepository` with a non-empty host and no embedded credentials, binds the source revision and source-tree digest, binds the exact `buildCommand`, computes the binary SHA-256, and writes `~/.pi/gentle-ai/pinned-main-binary.json` with mode `0600`. Every resolution recomputes the digest and rechecks the snapshot manifest. `/gentle:pinned-main off` removes only the registration, never the snapshot. A `GENTLE_PI_GENTLE_AI_DEV_BINARY` present as an empty string is a declared invalid channel and fails closed; it never falls through to another binary.
+
+The `/gentle:dev-binary` lane remains intentionally unpinned for short-lived field tests. Registering one channel clears the other persistent channel so status output always identifies the effective mode accurately.
 
 ### Background subagents policy
 

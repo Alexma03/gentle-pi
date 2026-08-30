@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -73,6 +73,34 @@ function sha256(value: Buffer): string {
 export const GENTLE_AI_DEV_BINARY_ENV = "GENTLE_PI_GENTLE_AI_DEV_BINARY";
 export const GENTLE_AI_DEV_BINARY_REGISTRATION_SCHEMA = "gentle-pi.dev-binary/v1";
 export const GENTLE_AI_DEV_BINARY_OVERRIDE_INVALID_CODE = "dev-binary-override-invalid";
+export const GENTLE_AI_LOCAL_MAIN_SNAPSHOT_SCHEMA = "gentle-pi.local-main-snapshot/v1";
+export const GENTLE_AI_PINNED_MAIN_REGISTRATION_SCHEMA = "gentle-pi.pinned-main-binary/v1";
+export const GENTLE_AI_PINNED_MAIN_BINARY_INVALID_CODE = "pinned-main-binary-invalid";
+
+export interface GentleAiPinnedMainBinary {
+	path: string;
+	sha256: string;
+	sourceRepository: string;
+	sourceBranch: "main" | "custom/main";
+	sourceRevision: string;
+	sourceTreeSha256: string;
+	versionOutput: string;
+	buildCommand: string;
+}
+
+export class GentleAiPinnedMainBinaryError extends Error {
+	readonly code = GENTLE_AI_PINNED_MAIN_BINARY_INVALID_CODE;
+	readonly origin: string;
+	constructor(origin: string, reason: string) {
+		super(`${GENTLE_AI_PINNED_MAIN_BINARY_INVALID_CODE}: ${origin} ${reason}. Fix or remove the pinned-main registration; no fallback binary will run while it is declared.`);
+		this.name = "GentleAiPinnedMainBinaryError";
+		this.origin = origin;
+	}
+}
+
+export type GentleAiBinaryActivation =
+	| { kind: "dev"; binary: GentleAiDevBinaryOverride }
+	| { kind: "pinned-main"; binary: GentleAiPinnedMainBinary };
 
 export interface GentleAiDevBinaryEnvironment {
 	env: Record<string, string | undefined>;
@@ -110,9 +138,16 @@ function ambientDevBinaryEnvironment(): GentleAiDevBinaryEnvironment {
 	return devBinaryEnvironmentTestingOverlay ?? { env: process.env, home: homedir() };
 }
 
+function gentleAiBinaryConfigHome(environment: GentleAiDevBinaryEnvironment): string {
+	return environment.env.GENTLE_PI_CONFIG_HOME ?? join(environment.home, ".pi", "gentle-ai");
+}
+
 export function gentleAiDevBinaryRegistrationPath(environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment()): string {
-	const configHome = environment.env.GENTLE_PI_CONFIG_HOME ?? join(environment.home, ".pi", "gentle-ai");
-	return join(configHome, "dev-binary.json");
+	return join(gentleAiBinaryConfigHome(environment), "dev-binary.json");
+}
+
+export function gentleAiPinnedMainRegistrationPath(environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment()): string {
+	return join(gentleAiBinaryConfigHome(environment), "pinned-main-binary.json");
 }
 
 function validateDevBinary(source: "env" | "registration", origin: string, path: string, platform: string): GentleAiDevBinaryOverride {
@@ -157,20 +192,204 @@ function readDevBinaryRegistration(registrationPath: string): string {
 	return record.path;
 }
 
+const PINNED_MAIN_REGISTRATION_KEYS = Object.freeze([
+	"buildCommand", "path", "schema", "sha256", "sourceBranch", "sourceRepository", "sourceRevision", "sourceTreeSha256", "versionOutput",
+]);
+const LOCAL_MAIN_SNAPSHOT_KEYS = Object.freeze([
+	"binarySha256", "buildCommand", "schema", "sourceBranch", "sourceRepository", "sourceRevision", "sourceTreeSha256", "versionOutput",
+]);
+
+function readPinnedObject(path: string): Record<string, unknown> {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		throw new GentleAiPinnedMainBinaryError(path, "is not valid readable JSON");
+	}
+	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new GentleAiPinnedMainBinaryError(path, "must be a JSON object");
+	return parsed as Record<string, unknown>;
+}
+
+function requireExactPinnedKeys(record: Record<string, unknown>, expected: readonly string[], origin: string): void {
+	const keys = Object.keys(record).sort();
+	if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+		throw new GentleAiPinnedMainBinaryError(origin, `must carry exactly ${expected.join(", ")}`);
+	}
+}
+
+function pinnedString(record: Record<string, unknown>, key: string, origin: string): string {
+	const value = record[key];
+	if (typeof value !== "string" || value.length === 0) throw new GentleAiPinnedMainBinaryError(origin, `must declare a non-empty ${key}`);
+	return value;
+}
+
+function validatePinnedMainIdentity(record: Record<string, unknown>, origin: string): Omit<GentleAiPinnedMainBinary, "path" | "sha256"> {
+	const sourceRepository = pinnedString(record, "sourceRepository", origin);
+	const sourceBranch = pinnedString(record, "sourceBranch", origin);
+	const sourceRevision = pinnedString(record, "sourceRevision", origin);
+	const sourceTreeSha256 = pinnedString(record, "sourceTreeSha256", origin);
+	const versionOutput = pinnedString(record, "versionOutput", origin);
+	const buildCommand = pinnedString(record, "buildCommand", origin);
+	if (!isValidHttpsRepository(sourceRepository)) throw new GentleAiPinnedMainBinaryError(origin, "must bind an HTTPS sourceRepository with a non-empty host and no credentials");
+	if (sourceBranch !== "main" && sourceBranch !== "custom/main") throw new GentleAiPinnedMainBinaryError(origin, `must bind sourceBranch main or custom/main, received ${sourceBranch}`);
+	if (!/^[0-9a-f]{40}$/.test(sourceRevision)) throw new GentleAiPinnedMainBinaryError(origin, "must bind a canonical 40-hex sourceRevision");
+	if (!/^[0-9a-f]{64}$/.test(sourceTreeSha256)) throw new GentleAiPinnedMainBinaryError(origin, "must bind a canonical sourceTreeSha256");
+	if (!versionOutput.startsWith("gentle-ai ")) throw new GentleAiPinnedMainBinaryError(origin, "must bind the exact gentle-ai version output");
+	return { sourceRepository, sourceBranch, sourceRevision, sourceTreeSha256, versionOutput, buildCommand };
+}
+
+function isValidHttpsRepository(value: string): boolean {
+	let parsed: URL;
+	try {
+		parsed = new URL(value);
+	} catch {
+		// Malformed URL (including invalid port syntax) fails closed.
+		return false;
+	}
+	if (parsed.protocol !== "https:") return false;
+	if (parsed.hostname.length === 0) return false;
+	if (parsed.username.length > 0 || parsed.password.length > 0) return false;
+	// A repository URL must name a non-root path; a bare host or "/" is not a repo.
+	if (parsed.pathname.length < 2 || parsed.pathname === "/") return false;
+	if (parsed.search !== "" || parsed.hash !== "") return false;
+	return true;
+}
+
+function validatePinnedExecutable(path: string, expectedSha256: string, origin: string, platform: string): string {
+	if (!isAbsolute(path)) throw new GentleAiPinnedMainBinaryError(origin, `must name an absolute path, received "${path}"`);
+	let details: ReturnType<typeof lstatSync>;
+	try {
+		details = lstatSync(path);
+	} catch {
+		throw new GentleAiPinnedMainBinaryError(origin, `names "${path}", which does not exist`);
+	}
+	if (!details.isFile() || details.isSymbolicLink()) throw new GentleAiPinnedMainBinaryError(origin, `names "${path}", which is not a regular non-symlink file`);
+	if (platform !== "win32" && (details.mode & 0o111) === 0) throw new GentleAiPinnedMainBinaryError(origin, `names "${path}", which is not executable`);
+	const digest = sha256(readFileSync(path));
+	if (!/^[0-9a-f]{64}$/.test(expectedSha256) || digest !== expectedSha256) throw new GentleAiPinnedMainBinaryError(origin, `binary digest mismatch for "${path}"`);
+	return digest;
+}
+
+function readLocalMainSnapshot(binaryPath: string, platform: string): GentleAiPinnedMainBinary {
+	const manifestPath = join(dirname(binaryPath), "integrity.json");
+	let details: ReturnType<typeof lstatSync>;
+	try {
+		details = lstatSync(manifestPath);
+	} catch {
+		throw new GentleAiPinnedMainBinaryError(manifestPath, "is missing");
+	}
+	if (!details.isFile() || details.isSymbolicLink()) throw new GentleAiPinnedMainBinaryError(manifestPath, "must be a regular non-symlink file");
+	const manifest = readPinnedObject(manifestPath);
+	requireExactPinnedKeys(manifest, LOCAL_MAIN_SNAPSHOT_KEYS, manifestPath);
+	if (manifest.schema !== GENTLE_AI_LOCAL_MAIN_SNAPSHOT_SCHEMA) throw new GentleAiPinnedMainBinaryError(manifestPath, `must declare schema ${GENTLE_AI_LOCAL_MAIN_SNAPSHOT_SCHEMA}`);
+	pinnedString(manifest, "buildCommand", manifestPath);
+	const sha256Value = pinnedString(manifest, "binarySha256", manifestPath);
+	validatePinnedExecutable(binaryPath, sha256Value, manifestPath, platform);
+	return { path: binaryPath, sha256: sha256Value, ...validatePinnedMainIdentity(manifest, manifestPath) };
+}
+
+function pinnedMainRegistrationDocument(binary: GentleAiPinnedMainBinary): Record<string, string> {
+	return {
+		schema: GENTLE_AI_PINNED_MAIN_REGISTRATION_SCHEMA,
+		path: binary.path,
+		sha256: binary.sha256,
+		sourceRepository: binary.sourceRepository,
+		sourceBranch: binary.sourceBranch,
+		sourceRevision: binary.sourceRevision,
+		sourceTreeSha256: binary.sourceTreeSha256,
+		versionOutput: binary.versionOutput,
+		buildCommand: binary.buildCommand,
+	};
+}
+
+export function resolveGentleAiPinnedMainBinary(
+	environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment(),
+	platform = process.platform,
+): GentleAiPinnedMainBinary | undefined {
+	const registrationPath = gentleAiPinnedMainRegistrationPath(environment);
+	if (!existsSync(registrationPath)) return undefined;
+	const record = readPinnedObject(registrationPath);
+	requireExactPinnedKeys(record, PINNED_MAIN_REGISTRATION_KEYS, registrationPath);
+	if (record.schema !== GENTLE_AI_PINNED_MAIN_REGISTRATION_SCHEMA) throw new GentleAiPinnedMainBinaryError(registrationPath, `must declare schema ${GENTLE_AI_PINNED_MAIN_REGISTRATION_SCHEMA}`);
+	const path = pinnedString(record, "path", registrationPath);
+	const expected = {
+		path,
+		sha256: pinnedString(record, "sha256", registrationPath),
+		...validatePinnedMainIdentity(record, registrationPath),
+	};
+	validatePinnedExecutable(path, expected.sha256, registrationPath, platform);
+	const snapshot = readLocalMainSnapshot(path, platform);
+	if (JSON.stringify(pinnedMainRegistrationDocument(snapshot)) !== JSON.stringify(pinnedMainRegistrationDocument(expected))) {
+		throw new GentleAiPinnedMainBinaryError(registrationPath, "does not match the snapshot integrity manifest");
+	}
+	return expected;
+}
+
+export function registerGentleAiPinnedMainBinary(
+	path: string,
+	environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment(),
+	platform = process.platform,
+): { registrationPath: string; binary: GentleAiPinnedMainBinary } {
+	const binary = readLocalMainSnapshot(path, platform);
+	const registrationPath = gentleAiPinnedMainRegistrationPath(environment);
+	mkdirSync(dirname(registrationPath), { recursive: true, mode: 0o700 });
+	writeFileSync(registrationPath, `${JSON.stringify(pinnedMainRegistrationDocument(binary))}\n`, { mode: 0o600 });
+	chmodSync(registrationPath, 0o600);
+	return { registrationPath, binary };
+}
+
+export function unregisterGentleAiPinnedMainBinary(environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment()): boolean {
+	const registrationPath = gentleAiPinnedMainRegistrationPath(environment);
+	if (!existsSync(registrationPath)) return false;
+	rmSync(registrationPath);
+	return true;
+}
+
 /**
  * Resolves the active dev-binary override, if any. Returns undefined only when
  * neither activation path is present; a present-but-invalid override always
  * throws a typed GentleAiDevBinaryOverrideError naming its origin.
  */
+function resolveGentleAiEnvironmentDevBinaryOverride(
+	environment: GentleAiDevBinaryEnvironment,
+	platform: string,
+): GentleAiDevBinaryOverride | undefined {
+	const envValue = environment.env[GENTLE_AI_DEV_BINARY_ENV];
+	if (envValue === undefined) return undefined;
+	// A declared-but-empty env channel is an invalid override: it must fail
+	// closed with the typed error rather than falling through to another lane.
+	return validateDevBinary("env", GENTLE_AI_DEV_BINARY_ENV, envValue, platform);
+}
+
+function resolveGentleAiRegisteredDevBinaryOverride(
+	environment: GentleAiDevBinaryEnvironment,
+	platform: string,
+): GentleAiDevBinaryOverride | undefined {
+	const registrationPath = gentleAiDevBinaryRegistrationPath(environment);
+	return existsSync(registrationPath)
+		? validateDevBinary("registration", registrationPath, readDevBinaryRegistration(registrationPath), platform)
+		: undefined;
+}
+
 export function resolveGentleAiDevBinaryOverride(
 	environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment(),
 	platform = process.platform,
 ): GentleAiDevBinaryOverride | undefined {
-	const envValue = environment.env[GENTLE_AI_DEV_BINARY_ENV];
-	if (envValue !== undefined && envValue.length > 0) return validateDevBinary("env", GENTLE_AI_DEV_BINARY_ENV, envValue, platform);
-	const registrationPath = gentleAiDevBinaryRegistrationPath(environment);
-	if (!existsSync(registrationPath)) return undefined;
-	return validateDevBinary("registration", registrationPath, readDevBinaryRegistration(registrationPath), platform);
+	return resolveGentleAiEnvironmentDevBinaryOverride(environment, platform)
+		?? resolveGentleAiRegisteredDevBinaryOverride(environment, platform);
+}
+
+/** Resolves custom binary activation in strict precedence: session dev, pinned main, legacy persistent dev. */
+export function resolveGentleAiBinaryActivation(
+	environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment(),
+	platform = process.platform,
+): GentleAiBinaryActivation | undefined {
+	const environmentDev = resolveGentleAiEnvironmentDevBinaryOverride(environment, platform);
+	if (environmentDev !== undefined) return { kind: "dev", binary: environmentDev };
+	const pinnedMain = resolveGentleAiPinnedMainBinary(environment, platform);
+	if (pinnedMain !== undefined) return { kind: "pinned-main", binary: pinnedMain };
+	const registeredDev = resolveGentleAiRegisteredDevBinaryOverride(environment, platform);
+	return registeredDev === undefined ? undefined : { kind: "dev", binary: registeredDev };
 }
 
 /**
@@ -181,7 +400,7 @@ export function resolveGentleAiDevBinaryOverride(
  */
 export function gentleAiDevBinaryOverrideConfigured(environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment()): boolean {
 	const envValue = environment.env[GENTLE_AI_DEV_BINARY_ENV];
-	if (envValue !== undefined && envValue.length > 0) return true;
+	if (envValue !== undefined) return true;
 	return existsSync(gentleAiDevBinaryRegistrationPath(environment));
 }
 
@@ -272,12 +491,11 @@ export function resolveGentleAiBinary(
 	readBinary: (path: string) => Buffer = readFileSync,
 	environment: GentleAiDevBinaryEnvironment = ambientDevBinaryEnvironment(),
 ): string {
-	// The explicit dev-binary override wins over the pinned supply-chain path.
-	// Its typed errors propagate: a declared override never falls back to the
-	// pin. Without a declared override this call returns undefined and the
-	// pinned resolution below is byte-identical to the pre-override behavior.
-	const override = resolveGentleAiDevBinaryOverride(environment, platform);
-	if (override !== undefined) return override.path;
+	// Custom activation precedes the signed release pin: an explicit session
+	// dev override, then a digest-bound main snapshot, then the legacy unpinned
+	// registration. Every declared-but-invalid lane fails closed without fallback.
+	const activation = resolveGentleAiBinaryActivation(environment, platform);
+	if (activation !== undefined) return activation.binary.path;
 	const binaryPath = gentleAiBinaryPath(packageRoot, platform);
 	const versionDirectory = dirname(binaryPath);
 	const manifestPath = join(versionDirectory, "integrity.json");
