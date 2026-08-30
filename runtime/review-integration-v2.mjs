@@ -118,7 +118,6 @@ const REQUIRED_SCHEMAS_COMMON = Object.freeze([
 	"gentle-ai.review-integration.operation/v2",
 	"gentle-ai.review-integration.projection/v1",
 	"gentle-ai.review-integration.repair/v2",
-	"gentle-ai.review-integration.start/v3",
 	"gentle-ai.review-receipt/v1",
 	"gentle-ai.review-receipt/v2",
 	"gentle-ai.review-result-artifact/v2",
@@ -131,15 +130,19 @@ const REQUIRED_SCHEMAS_COMMON = Object.freeze([
 const CAPABILITIES_SCHEMA_IDENTITIES                                                                                          = Object.freeze({
 	"gentle-ai.review-integration.capabilities/v2": Object.freeze({
 		protocolMinor: 0,
-		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2", "gentle-ai.review-integration.consent/v2", "gentle-ai.review-integration.status/v3"]),
+		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2", "gentle-ai.review-integration.consent/v2", "gentle-ai.review-integration.start/v3", "gentle-ai.review-integration.status/v3"]),
 	}),
 	"gentle-ai.review-integration.capabilities/v2.1": Object.freeze({
 		protocolMinor: 1,
-		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2.1", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.status/v3"]),
+		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2.1", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.start/v3", "gentle-ai.review-integration.status/v3"]),
 	}),
 	"gentle-ai.review-integration.capabilities/v2.2": Object.freeze({
 		protocolMinor: 2,
-		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2.2", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.status/v5"]),
+		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2.2", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.start/v3", "gentle-ai.review-integration.status/v5"]),
+	}),
+	"gentle-ai.review-integration.capabilities/v2.3": Object.freeze({
+		protocolMinor: 3,
+		requiredSchemas: Object.freeze([...REQUIRED_SCHEMAS_COMMON, "gentle-ai.review-integration.capabilities/v2.3", "gentle-ai.review-integration.consent/v3", "gentle-ai.review-integration.start/v4", "gentle-ai.review-integration.status/v5"]),
 	}),
 });
 const OPTIONAL_FEATURE_NAMES = Object.freeze([
@@ -268,6 +271,12 @@ const REQUIRED_MANDATORY_FEATURES = Object.freeze(FEATURE_NAMES.filter((name) =>
 
 
 const REPOSITORY_CONTEXT_OUTCOMES = ["applied", "pending", "blocked_conflict", "durability_limited"]         ;
+
+
+
+
+
+
 
 
 
@@ -1018,7 +1027,7 @@ function decodeChangedPathEntry(value         , label        )                  
 // start/v3
 // ---------------------------------------------------------------------------
 
-export function decodeReviewStartV3(value         )                {
+export function decodeReviewStartV3(value         , overlayIdentitySatisfiesRepositoryContext = false)                {
 	const overlayFields = ["target_mode", "target_identity", "base_tree", "candidate_tree"]         ;
 	const body = exactRecord(value, "start", [
 		"schema", "contract", "operation", "action", "lenses_required", "lineage_id", "state", "risk_level",
@@ -1052,9 +1061,12 @@ export function decodeReviewStartV3(value         )                {
 		throw new TypeError("start with selected_lenses requires base_tree, candidate_tree, and changed_path_manifest");
 	}
 
-	const requiresRepositoryContext = (action === "created" || action === "resumed") && state === REVIEW_START_STATE.REVIEWING;
+	const reviewingCreatedOrResumed = (action === "created" || action === "resumed") && state === REVIEW_START_STATE.REVIEWING;
+	// START/v4 may render the frozen target as the overlay identity instead of
+	// repository_context; absence is only excused when that identity is present.
+	const requiresRepositoryContext = reviewingCreatedOrResumed && !(overlayIdentitySatisfiesRepositoryContext && targetIdentity !== undefined);
 	if (requiresRepositoryContext && body.repository_context === undefined) throw new TypeError("start.repository_context is required when action is created/resumed and state is reviewing");
-	if (!requiresRepositoryContext && body.repository_context !== undefined) throw new TypeError("start.repository_context is only valid when action is created/resumed and state is reviewing");
+	if (!reviewingCreatedOrResumed && body.repository_context !== undefined) throw new TypeError("start.repository_context is only valid when action is created/resumed and state is reviewing");
 
 	let repositoryContext                                       ;
 	if (body.repository_context !== undefined) {
@@ -1105,6 +1117,78 @@ export function decodeReviewStartV3(value         )                {
 		...(repositoryContext === undefined ? {} : { repositoryContext }),
 		raw: body,
 	};
+}
+
+function assertReviewStartV4StatusBinding(execute                               , start               )       {
+	const expectedTargetIdentity = start.repositoryContext?.targetIdentity ?? start.targetIdentity;
+	const targetIdentityConflicts = expectedTargetIdentity === undefined || execute.binding.targetIdentity !== expectedTargetIdentity
+		|| (start.targetIdentity !== undefined && start.targetIdentity !== expectedTargetIdentity)
+		|| start.artifactSubjects.some((subject) => subject.targetIdentity !== expectedTargetIdentity);
+	if (targetIdentityConflicts) throw new TypeError("START/v4 status target identity binding conflicts with frozen START");
+	if (execute.binding.lineageId !== undefined && execute.binding.lineageId !== start.lineageId) {
+		throw new TypeError("START/v4 status lineage binding conflicts with frozen START");
+	}
+	const optionalSelectors                                               = {
+		"base-ref": start.baseTree,
+		"base-tree": start.baseTree,
+		projection: start.projection,
+		target: expectedTargetIdentity,
+	};
+	const argumentsByName = new Map                ();
+	for (const argument of execute.arguments) {
+		if (argumentsByName.has(argument.name)) throw new TypeError(`START/v4 status arguments duplicate ${argument.name} binding`);
+		argumentsByName.set(argument.name, argument.value);
+		if (Object.hasOwn(optionalSelectors, argument.name) && argument.value !== optionalSelectors[argument.name]) throw new TypeError(`START/v4 status ${argument.name} binding conflicts with frozen START`);
+	}
+	if (argumentsByName.get("lineage") !== start.lineageId) throw new TypeError("START/v4 status requires exactly one lineage binding for the frozen START");
+	if (execute.arguments.find((argument) => argument.name === "lineage")?.token !== `--lineage=${start.lineageId}`) throw new TypeError("START/v4 status lineage binding conflicts with frozen START");
+	for (const [name, value] of [["contract", REVIEW_INTEGRATION_CONTRACT], ["next-transition", "true"], ["agent", "pi"]]) {
+		if (argumentsByName.get(name) !== value || execute.arguments.find((argument) => argument.name === name)?.token !== `--${name}=${value}`) throw new TypeError(`START/v4 status ${name} binding conflicts with frozen START`);
+	}
+	const selectorArguments = execute.selectorArguments;
+	if (selectorArguments === undefined || selectorArguments.length === 0) throw new TypeError("START/v4 status selector arguments are required");
+	const selectorsByName = new Map                                    ();
+	for (const selector of selectorArguments) {
+		const full = execute.arguments.find((argument) => argument.name === selector.name);
+		if (selectorsByName.has(selector.name) || full === undefined || full.value !== selector.value || full.token !== selector.token) throw new TypeError(`START/v4 status selector ${selector.name} binding conflicts with full arguments`);
+		selectorsByName.set(selector.name, selector);
+	}
+	const selector = (name        , value        )       => {
+		if (selectorsByName.get(name)?.value !== value || selectorsByName.get(name)?.token !== `--${name}=${value}` || execute.arguments.find((argument) => argument.name === name)?.token !== `--${name}=${value}`) throw new TypeError(`START/v4 status selector ${name} binding conflicts with frozen START`);
+	};
+	const baseRef = argumentsByName.get("base-ref");
+	if (start.targetMode === "base-workspace-overlay") {
+		if (baseRef !== start.baseTree || argumentsByName.has("committed-only")) throw new TypeError("START/v4 status workspace overlay binding conflicts with frozen START");
+		selector("base-ref", start.baseTree ); selector("workspace-overlay", "true");
+	} else if (baseRef !== undefined) {
+		if (baseRef !== start.baseTree || argumentsByName.has("workspace-overlay")) throw new TypeError("START/v4 status committed range binding conflicts with frozen START");
+		selector("base-ref", start.baseTree ); selector("committed-only", "true");
+	} else {
+		if (argumentsByName.has("committed-only") || argumentsByName.has("workspace-overlay")) throw new TypeError("START/v4 status current projection binding conflicts with frozen START");
+		selector("projection", start.projection);
+	}
+}
+
+export function decodeReviewStartV4(value         )                {
+	const overlayFields = ["target_mode", "target_identity", "base_tree", "candidate_tree"]         ;
+	const body = exactRecord(value, "start", [
+		"schema", "contract", "operation", "action", "lenses_required", "lineage_id", "state", "risk_level",
+		"selected_lenses", "projection", "changed_files", "changed_lines", "correction_budget", "risk_reasons", "artifact_subjects",
+	], [...overlayFields, "changed_path_manifest", "repository_context", "acknowledgement", "next_transition"]);
+	requireIdentity(body, "gentle-ai.review-integration.start/v4", REVIEW_INTEGRATION_OPERATION.START);
+	const action = enumeration(body.action, ["created", "replayed", "closed", "blocked-scope-action"]         , "start.action");
+	const v3Action = action === "replayed" ? "resumed" : action;
+	const nextTransition = body.next_transition === undefined ? undefined : decodeReviewNextTransitionV3(body.next_transition);
+	const reviewing = (action === "created" || action === "replayed") && body.state === REVIEW_START_STATE.REVIEWING;
+	if (reviewing && nextTransition?.kind !== "execute") throw new TypeError("reviewing created/replayed START requires next_transition.execute");
+	if (reviewing && nextTransition.execute?.operation !== "review.status") throw new TypeError("reviewing created/replayed START next_transition.execute.operation must be review.status");
+	const closedApprovedZeroLens = action === "closed" && body.state === REVIEW_START_STATE.APPROVED && Array.isArray(body.selected_lenses) && body.selected_lenses.length === 0;
+	if (closedApprovedZeroLens && nextTransition !== undefined) throw new TypeError("closed approved zero-lens START cannot carry next_transition");
+	const v3Body = { ...body };
+	delete v3Body.next_transition;
+	const decoded = decodeReviewStartV3({ ...v3Body, schema: "gentle-ai.review-integration.start/v3", action: v3Action }, true);
+	if (reviewing) assertReviewStartV4StatusBinding(nextTransition .execute , decoded);
+	return { ...decoded, action, ...(nextTransition === undefined ? {} : { nextTransition }), raw: body };
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,7 +1294,7 @@ export function decodeAuthorityRepairAssessmentV1(value         )               
 // collect inputs and the execute binding.
 // ---------------------------------------------------------------------------
 
-const NEXT_TRANSITION_OPERATIONS = ["review.start", "review.recover", "review.repair", "review.acknowledge-approved"]         ;
+const NEXT_TRANSITION_OPERATIONS = ["review.start", "review.status", "review.recover", "review.repair", "review.acknowledge-approved"]         ;
 
 function decodeTransitionArguments(value         , label        )                                        {
 	return array(value, label, (entry, entryLabel) => {
@@ -1513,6 +1597,7 @@ export function decodeReviewNextTransitionV3(value         , options            
 		const execute = exactRecord(transition.execute, "next_transition.execute", ["operation", "arguments", "preconditions", "binding"], ["command", "selector_arguments", "artifacts"]);
 		const operation = enumeration(execute.operation, NEXT_TRANSITION_OPERATIONS, "next_transition.execute.operation");
 		const argumentsList = decodeTransitionArguments(execute.arguments, "next_transition.execute.arguments");
+		const selectorArguments = execute.selector_arguments === undefined ? undefined : decodeTransitionArguments(execute.selector_arguments, "next_transition.execute.selector_arguments");
 		const preconditions = decodeTransitionArguments(execute.preconditions, "next_transition.execute.preconditions");
 		// The schema gives `binding` no declared properties and no required list:
 		// it is an OPEN object. Closing it here made Pi stricter than the
@@ -1523,7 +1608,7 @@ export function decodeReviewNextTransitionV3(value         , options            
 		const lineageId = binding.lineage_id === undefined ? undefined : lineage(binding.lineage_id, "next_transition.execute.binding.lineage_id");
 		const revision = binding.revision === undefined ? undefined : sha256(binding.revision, "next_transition.execute.binding.revision");
 		const command = execute.command === undefined ? undefined : nonempty(execute.command, "next_transition.execute.command");
-		const decodedExecute                                = { operation, arguments: argumentsList, preconditions, binding: { targetIdentity, ...(lineageId === undefined ? {} : { lineageId }), ...(revision === undefined ? {} : { revision }) }, ...(command === undefined ? {} : { command }) };
+		const decodedExecute                                = { operation, arguments: argumentsList, ...(selectorArguments === undefined ? {} : { selectorArguments }), preconditions, binding: { targetIdentity, ...(lineageId === undefined ? {} : { lineageId }), ...(revision === undefined ? {} : { revision }) }, ...(command === undefined ? {} : { command }) };
 		if (operation === "review.acknowledge-approved") assertReviewApprovedAcknowledgementExecuteV1(decodedExecute);
 		if (transition.collect !== undefined) throw new TypeError("next_transition.collect is incompatible with execute");
 		return { kind, reasonCode, execute: decodedExecute, ...(correctionRequest === undefined ? {} : { correctionRequest }) };
