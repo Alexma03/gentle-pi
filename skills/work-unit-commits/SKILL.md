@@ -30,6 +30,7 @@ Use it for:
 | Tell a story | A reviewer should understand why each commit exists from its diff and message. |
 | Future PR-ready | Each commit should be a candidate chained PR when the change grows. |
 | SDD workload guard | If SDD forecasts natural architectural or review boundaries, group commits into coherent PR slices before implementation. |
+| Reviewability is not code-golf | Never shrink a diff by deleting comments, blank lines, docs, or tests, or by compressing code. Slice only at natural work-unit boundaries. |
 
 ## Work Unit Checklist
 

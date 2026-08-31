@@ -16,6 +16,7 @@ Load this skill when SDD forecasts `Chained PRs recommended: Yes`, the work cros
 - Split only at natural architectural, domain, interface, risk, or verification boundaries.
 - Never estimate, count, display, or gate on changed lines or review minutes.
 - Never deform a correct cohesive solution merely to create smaller diffs.
+- Never delete comments, blank lines, docs, or tests, and never compress or restyle code, to reduce review workload.
 - Use one deliverable work unit per PR; keep tests/docs with the unit they verify.
 - State start, end, prior dependencies, follow-up work, and out-of-scope items in every chained PR.
 - Every child PR must include a dependency diagram marking the current PR with `📍`.

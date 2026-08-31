@@ -80,6 +80,8 @@ If `Decision needed before apply: Yes` or `Chained PRs recommended: Yes`, contin
 
 Never estimate or count changed lines, and never rewrite or split correct cohesive work to satisfy a numeric threshold. If no required delivery decision is provided, STOP before writing code and return `blocked` with the exact qualitative decision needed.
 
+Reviewability constrains how work is sliced, never the code itself. Never delete comments, blank lines, docs, or tests, and never compress or restyle code, to reduce review workload. If the assigned slice cannot be divided at a natural boundary, implement it honestly and explain why it must remain cohesive.
+
 ## Strict TDD Gate
 
 If `openspec/config.yaml` declares strict TDD and a test runner, or the parent prompt says strict TDD is active:
