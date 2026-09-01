@@ -191,6 +191,17 @@ export function resolveSddStatusRouting(status: SddStatus, workUnits: readonly S
 
 export const routeSddStatus = resolveSddStatusRouting;
 
+function renderWorkUnitReadiness(routing: SddStatusRoutingV1): string[] {
+	if (routing.workUnits.length === 0) return ["- no work-unit DAG entries supplied; readiness remains artifact-only."];
+	return routing.workUnits.map((unit) => {
+		const dependencies = unit.incompleteDependencies.length > 0
+			? `; incomplete dependencies: ${unit.incompleteDependencies.join(", ")}`
+			: "";
+		const conflict = unit.conflict ? "; writer conflict" : "";
+		return `- ${unit.id}: ${unit.state} (provider-ready: ${unit.providerReady ? "yes" : "no"}${dependencies}${conflict})`;
+	});
+}
+
 export interface ResolveSddStatusOptions {
 	cwd: string;
 	changeName?: string;
@@ -710,7 +721,10 @@ export function renderNativeSddPhasePrompt(status: SddStatus, phase?: SddPhase):
 	].join("\n");
 }
 
-export function renderSddDispatcherMarkdown(status: SddStatus): string {
+export function renderSddDispatcherMarkdown(
+	status: SddStatus,
+	routing: SddStatusRoutingV1 = resolveSddStatusRouting(status),
+): string {
 	const isNonAuthoritative = isNonAuthoritativeStatus(status);
 	const statusSection = isNonAuthoritative
 		? [
@@ -737,7 +751,8 @@ export function renderSddDispatcherMarkdown(status: SddStatus): string {
 	return [
 		`## Native SDD Dispatcher: ${status.changeName ?? "unresolved"}`,
 		"",
-		`nextPhase: ${status.nextRecommended}`,
+		`nextPhase: ${routing.nextPhase}`,
+		`statusNextRecommended: ${status.nextRecommended}`,
 		`apply: ${status.dependencies.apply}`,
 		`verify: ${status.dependencies.verify}`,
 		`sync: ${status.dependencies.sync}`,
@@ -745,17 +760,23 @@ export function renderSddDispatcherMarkdown(status: SddStatus): string {
 		"",
 		statusSection,
 		"",
+		"### Work-unit readiness (artifact-only)",
+		...renderWorkUnitReadiness(routing),
+		"",
 		...(instructionsSection.length > 0
 			? ["### Instructions for next phase", ...instructionsSection, ""]
 			: []),
 		"### Status JSON",
 		"```json",
-		JSON.stringify(status, null, 2),
+		JSON.stringify({ ...status, routing }, null, 2),
 		"```",
 	].join("\n");
 }
 
-export function renderSddStatusMarkdown(status: SddStatus): string {
+export function renderSddStatusMarkdown(
+	status: SddStatus,
+	routing: SddStatusRoutingV1 = resolveSddStatusRouting(status),
+): string {
 	const title = status.changeName ?? "unresolved";
 	const lines = [
 		`## SDD Status: ${title}`,
@@ -778,6 +799,10 @@ export function renderSddStatusMarkdown(status: SddStatus): string {
 		"",
 		"### Dependencies",
 		...Object.entries(status.dependencies).map(([phase, state]) => `- ${phase}: ${state}`),
+		"",
+		"### Work-unit readiness (artifact-only)",
+		`- routed next phase: ${routing.nextPhase}`,
+		...renderWorkUnitReadiness(routing),
 	];
 	if (status.collisions.length > 0) {
 		lines.push("", "### Same-domain active changes");
@@ -790,7 +815,7 @@ export function renderSddStatusMarkdown(status: SddStatus): string {
 	if (status.blockedReasons.length > 0) {
 		lines.push("", "### Blockers", ...status.blockedReasons.map((reason) => `- ${reason}`));
 	}
-	lines.push("", "### JSON", "```json", JSON.stringify(status, null, 2), "```");
+	lines.push("", "### JSON", "```json", JSON.stringify({ ...status, routing }, null, 2), "```");
 	return lines.join("\n");
 }
 

@@ -209,3 +209,58 @@ test("integration stays blocked until every unit has evidence and final verifica
 	assert.doesNotThrow(() => plan.recordFinalVerification({ passed: true, evidence: ["full verification passed"] }));
 	assert.throws(() => plan.recordFinalVerification({ passed: false, evidence: ["different result"] }), (error: unknown) => error instanceof WorkUnitSchedulerError && error.code === "settlement_conflict");
 });
+
+test("public final-verification accessor returns the recorded detached evidence", () => {
+	const plan = scheduler([unit("read")]);
+	assert.equal(plan.finalVerification(), undefined);
+	plan.recordFinalVerification({ passed: true, evidence: ["full verification passed"] });
+	const verification = plan.finalVerification();
+	assert.deepEqual(verification, { passed: true, evidence: ["full verification passed"] });
+	assert.notEqual(verification?.evidence, ["full verification passed"]);
+});
+
+test("successful final verification requires bounded non-empty evidence", () => {
+	const plan = scheduler([unit("read")]);
+	assert.throws(
+		() => plan.recordFinalVerification({ passed: true, evidence: [] }),
+		(error: unknown) => error instanceof WorkUnitSchedulerError && error.code === "invalid_settlement",
+	);
+	assert.equal(plan.integrationReady(), false);
+});
+
+test("null write surfaces fail with a typed graph validation error", () => {
+	assert.throws(
+		() => scheduler([unit("invalid", { mode: undefined, writeSurface: null as unknown as readonly string[] })]),
+		(error: unknown) => error instanceof WorkUnitSchedulerError && error.code === "invalid_unit",
+	);
+});
+
+test("settlement requires the complete bound lease identity", () => {
+	const evidence = {
+		outcome: "passed" as const,
+		focusedChecks: ["check"],
+		runtimeHarness: "N/A",
+		finalVerification: "pending" as const,
+		rollbackBoundary: "read",
+	};
+	const variants: readonly Partial<ReturnType<WorkUnitSchedulerV1["acquireLease"]>>[] = [
+		{ repository: "another-repository" },
+		{ worktree: "another-worktree" },
+		{ mode: "verify" },
+		{ writeSurface: ["src/other.ts"] },
+	];
+	for (const variant of variants) {
+		const plan = scheduler([unit("read")]);
+		const lease = plan.acquireLease("read", { idempotencyKey: "settle-identity" });
+		assert.throws(
+			() => plan.settle({ ...lease, ...variant }, evidence),
+			(error: unknown) => error instanceof WorkUnitSchedulerError && error.code === "lease_missing",
+		);
+		assert.equal(plan.status("read").status, "leased");
+		assert.doesNotThrow(() => plan.settle(lease, evidence));
+		assert.throws(
+			() => plan.settle({ ...lease, worktree: "another-worktree" }, evidence),
+			(error: unknown) => error instanceof WorkUnitSchedulerError && error.code === "lease_missing",
+		);
+	}
+});

@@ -62,6 +62,16 @@ export interface CorrectionFindingScopeV1 {
 	readonly paths: readonly string[];
 }
 
+/** Explicit path selection for one confirmed finding. */
+export interface CorrectionFindingPathSelectionV1 {
+	readonly findingId: string;
+	readonly paths: readonly string[];
+}
+
+export type CorrectionPathSelectionInput =
+	| readonly CorrectionFindingPathSelectionV1[]
+	| Readonly<Record<string, readonly string[]>>;
+
 export interface CorrectionScopeRequestV1 {
 	readonly mode: CorrectionReviewMode;
 	readonly confirmedFindings: readonly CorrectionFindingScopeV1[];
@@ -69,6 +79,8 @@ export interface CorrectionScopeRequestV1 {
 	readonly findingIds: readonly string[];
 	/** Git-derived paths touched by this correction; no unrelated path is valid. */
 	readonly paths: readonly string[];
+	/** Each selected path must be assigned to the finding whose frozen scope contains it. */
+	readonly pathsByFinding?: CorrectionPathSelectionInput;
 	readonly forecast: CorrectionForecastV1;
 }
 
@@ -76,6 +88,8 @@ export interface CorrectionForecastV1 {
 	readonly positive: true;
 	readonly findingIds: readonly string[];
 	readonly paths: readonly string[];
+	/** The forecast repeats the exact per-finding path assignment. */
+	readonly pathsByFinding?: CorrectionPathSelectionInput;
 	readonly effects: readonly string[];
 }
 
@@ -83,6 +97,7 @@ export interface BoundedCorrectionPlanV1 {
 	readonly mode: CorrectionReviewMode;
 	readonly findingIds: readonly string[];
 	readonly paths: readonly string[];
+	readonly pathsByFinding: readonly CorrectionFindingPathSelectionV1[];
 	readonly correctionBatches: 1 | 2;
 	readonly validatorRuns: 0 | 1;
 	readonly judgmentRounds: 0 | 2;
@@ -122,6 +137,60 @@ function scopeIds(value: unknown): readonly string[] {
 	return Object.freeze(sorted);
 }
 
+function pathSelectionEntries(value: unknown, label: string): readonly { findingId: string; paths: unknown }[] {
+	if (Array.isArray(value)) {
+		return value.map((entry) => {
+			if (!entry || typeof entry !== "object" || typeof entry.findingId !== "string") {
+				throw new CorrectionScopeError(`${label} must identify each finding explicitly`);
+			}
+			return { findingId: entry.findingId, paths: entry.paths };
+		});
+	}
+	if (value && typeof value === "object") {
+		return Object.entries(value).map(([findingId, paths]) => ({ findingId, paths }));
+	}
+	throw new CorrectionScopeError(`${label} must map every finding to its selected paths`);
+}
+
+function normalizePathsByFinding(
+	value: unknown,
+	findings: readonly { id: string; paths: readonly string[] }[],
+	overallPaths: readonly string[],
+	label: string,
+): readonly CorrectionFindingPathSelectionV1[] {
+	const known = new Map(findings.map((finding) => [finding.id, finding]));
+	const entries = pathSelectionEntries(value, label);
+	if (entries.length === 0 || entries.length > MAX_CORRECTION_SCOPE_ENTRIES) {
+		throw new CorrectionScopeError(`${label} must map every finding to bounded paths`);
+	}
+	const ids = scopeIds(entries.map(({ findingId }) => findingId));
+	const knownIds = findings.map(({ id }) => id).sort((left, right) => left.localeCompare(right));
+	if (JSON.stringify(ids) !== JSON.stringify(knownIds)) {
+		throw new CorrectionScopeError(`${label} must contain exactly every confirmed finding`);
+	}
+	const normalized = entries.map(({ findingId, paths }) => {
+		const finding = known.get(findingId);
+		if (finding === undefined) throw new CorrectionScopeError(`${label} references unknown finding ${findingId}`);
+		const selected = scopeList(paths, `${label} for ${findingId}`);
+		if (selected.some((path) => !finding.paths.includes(path))) {
+			throw new CorrectionScopeError(`${label} for ${findingId} contains a path outside that finding's frozen scope`);
+		}
+		return { findingId, paths: selected };
+	});
+	const union = scopeList(
+		[...new Set(normalized.flatMap(({ paths }) => paths))],
+		`${label} union`,
+	);
+	if (JSON.stringify(union) !== JSON.stringify(overallPaths)) {
+		throw new CorrectionScopeError(`${label} must cover exactly the correction paths`);
+	}
+	return Object.freeze(
+		normalized
+			.sort((left, right) => left.findingId.localeCompare(right.findingId))
+			.map(({ findingId, paths }) => Object.freeze({ findingId, paths: Object.freeze([...paths]) })),
+	);
+}
+
 /**
  * Resolve one immutable, finding/path-bounded correction plan. This planner
  * owns no attempt token, line counter, lens discovery, refuter dispatch, or
@@ -145,14 +214,33 @@ export function resolveBoundedCorrectionPlan(request: CorrectionScopeRequestV1):
 	if (new Set(knownIds).size !== knownIds.length) throw new CorrectionScopeError("confirmedFindings must not contain duplicate identifiers");
 	if (JSON.stringify(findingIds) !== JSON.stringify(knownIds)) throw new CorrectionScopeError("the correction must address exactly every confirmed finding");
 	const paths = scopeList(request.paths, "correction paths");
-	const relevantPaths = new Set(findings.flatMap(({ paths: findingPaths }) => findingPaths));
-	if (paths.some((path) => !relevantPaths.has(path))) throw new CorrectionScopeError("correction paths must belong to a confirmed finding scope");
+	let pathsByFinding: readonly CorrectionFindingPathSelectionV1[];
+	if (request.pathsByFinding === undefined) {
+		const owners = paths.map((path) => findings.filter(({ paths: findingPaths }) => findingPaths.includes(path)));
+		if (owners.some((matches) => matches.length !== 1)) {
+			throw new CorrectionScopeError("correction paths require an unambiguous per-finding assignment");
+		}
+		pathsByFinding = normalizePathsByFinding(
+			findings.map((finding) => ({ findingId: finding.id, paths: paths.filter((path) => finding.paths.includes(path)) })),
+			findings,
+			paths,
+			"correction paths by finding",
+		);
+	} else {
+		pathsByFinding = normalizePathsByFinding(request.pathsByFinding, findings, paths, "correction paths by finding");
+	}
 	const forecast = request.forecast;
 	if (!forecast || typeof forecast !== "object" || forecast.positive !== true) throw new CorrectionScopeError("correction requires a positive pre-edit forecast");
 	const forecastFindingIds = scopeIds(forecast.findingIds);
 	const forecastPaths = scopeList(forecast.paths, "forecast paths");
 	if (JSON.stringify(forecastFindingIds) !== JSON.stringify(findingIds) || JSON.stringify(forecastPaths) !== JSON.stringify(paths)) {
 		throw new CorrectionScopeError("forecast must preserve the exact finding and path scope");
+	}
+	const forecastPathsByFinding = forecast.pathsByFinding === undefined
+		? pathsByFinding
+		: normalizePathsByFinding(forecast.pathsByFinding, findings, forecastPaths, "forecast paths by finding");
+	if (JSON.stringify(forecastPathsByFinding) !== JSON.stringify(pathsByFinding)) {
+		throw new CorrectionScopeError("forecast must preserve the exact per-finding path assignment");
 	}
 	if (!Array.isArray(forecast.effects) || forecast.effects.length === 0 || forecast.effects.length > MAX_CORRECTION_SCOPE_ENTRIES || forecast.effects.some((effect) => typeof effect !== "string" || effect.length === 0 || effect.length > 4096 || /[\u0000-\u001f\u007f]/.test(effect))) {
 		throw new CorrectionScopeError("forecast effects must be bounded non-empty text");
@@ -162,6 +250,7 @@ export function resolveBoundedCorrectionPlan(request: CorrectionScopeRequestV1):
 		mode: request.mode,
 		findingIds,
 		paths,
+		pathsByFinding,
 		correctionBatches: judgmentDay ? 2 : 1,
 		validatorRuns: judgmentDay ? 0 : 1,
 		judgmentRounds: judgmentDay ? 2 : 0,
@@ -174,6 +263,7 @@ export function resolveBoundedCorrectionPlan(request: CorrectionScopeRequestV1):
 			positive: true,
 			findingIds: forecastFindingIds,
 			paths: forecastPaths,
+			pathsByFinding,
 			effects: Object.freeze([...forecast.effects]),
 		}),
 		changedLineBudget: "none",

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	SddStatusRoutingError,
+	renderSddDispatcherMarkdown,
+	renderSddStatusMarkdown,
 	resolveSddStatusRouting,
 	type SddStatus,
 	type SddWorkUnitReadinessV1,
@@ -58,4 +60,16 @@ test("status routing rejects duplicate work-unit identities and does not mutate 
 		SddStatusRoutingError,
 	);
 	assert.deepEqual(workUnits[0], { id: "apply-core", state: "ready", dependencies: [], incompleteDependencies: [], conflict: false, providerReady: true });
+});
+
+test("status command renderers include the artifact-only routed projection", () => {
+	const current = status("sdd-apply");
+	const routing = resolveSddStatusRouting(current, workUnits);
+	const statusMarkdown = renderSddStatusMarkdown(current, routing);
+	const dispatcherMarkdown = renderSddDispatcherMarkdown(current, routing);
+	assert.match(statusMarkdown, /Work-unit readiness \(artifact-only\)/);
+	assert.match(statusMarkdown, /apply-core: ready/);
+	assert.match(dispatcherMarkdown, /nextPhase: sdd-apply/);
+	assert.match(dispatcherMarkdown, /verify-core: blocked/);
+	assert.match(dispatcherMarkdown, /"artifactOnly": true/);
 });

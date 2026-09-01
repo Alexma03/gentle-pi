@@ -58,9 +58,11 @@ import {
 	renderNativeSddPhasePrompt,
 	renderSddDispatcherMarkdown,
 	renderSddStatusMarkdown,
+	resolveSddStatusRouting,
 	resolveSddStatus,
 	sddStatusSeverity,
 	type SddPhase,
+	type SddWorkUnitReadinessV1,
 } from "../lib/sdd-status.ts";
 import {
 	REVIEW_HOST_RELAY_FAILURE,
@@ -5019,6 +5021,7 @@ export const __testing = {
 	resolveBackgroundSubagentsCapability,
 	renderBackgroundSubagentsStatusLine,
 	resolveControllerSddStatus,
+	resolveControllerSddStatusRouting,
 	resolveStartupControllerSddStatus,
 	createGentleAiExtension: createGentleAiExtensionForTesting,
 };
@@ -5030,6 +5033,17 @@ function resolveControllerSddStatus(
 	artifactStore: SddPreflightPreferences["artifactStore"] | undefined,
 ) {
 	return resolveSddStatus({ cwd, changeName, includeInstructions, artifactStore });
+}
+
+function resolveControllerSddStatusRouting(
+	cwd: string,
+	changeName: string | undefined,
+	includeInstructions: boolean,
+	artifactStore: SddPreflightPreferences["artifactStore"] | undefined,
+	workUnits: readonly SddWorkUnitReadinessV1[] = [],
+) {
+	const status = resolveControllerSddStatus(cwd, changeName, includeInstructions, artifactStore);
+	return { status, routing: resolveSddStatusRouting(status, workUnits) };
 }
 
 function resolveStartupControllerSddStatus(
@@ -5048,6 +5062,8 @@ export interface GentleAiRuntimeDependencies {
 	subagentRuntime?: SubagentRuntimeV1 | null;
 	/** Explicit bound-workspace seam; a resolver may bind each session cwd. */
 	workspaceGuard?: WorkspaceGuardV1 | ((cwd: string) => WorkspaceGuardV1) | null;
+	/** Optional parent-owned artifact DAG readiness projected by SDD commands. */
+	sddWorkUnits?: readonly SddWorkUnitReadinessV1[] | ((cwd: string, changeName?: string) => readonly SddWorkUnitReadinessV1[]);
 	// An injected registry gives tests and host integrations explicit ownership;
 	// normal package registrations share the module-local process-memory registry.
 	pendingReviewConsentRegistry?: PendingReviewConsentRegistry;
@@ -5200,6 +5216,10 @@ function createGentleAiExtensionForTesting(
 	const reviewConsentNow = dependencies.now ?? (() => Date.now());
 	const reviewConsentScheduleTimer = dependencies.scheduleTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
 	const pendingReviewConsentRegistry = dependencies.pendingReviewConsentRegistry ?? processPendingReviewConsentRegistry;
+	const sddWorkUnitsFor = (cwd: string, changeName: string | undefined): readonly SddWorkUnitReadinessV1[] => {
+		const configured = dependencies.sddWorkUnits;
+		return typeof configured === "function" ? configured(cwd, changeName) : configured ?? [];
+	};
 	return function gentleAi(pi: ExtensionAPI): void {
 		const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
 		const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
@@ -5460,14 +5480,15 @@ function createGentleAiExtensionForTesting(
 
 	const handleSddStatusCommand = async (args: string, ctx: ExtensionContext) => {
 		const parsed = parseSddStatusCommandArgs(args);
-		const status = resolveControllerSddStatus(
+		const { status, routing } = resolveControllerSddStatusRouting(
 			ctx.cwd,
 			parsed.changeName,
 			true,
 			getSddPreflightPreferences(ctx)?.artifactStore,
+			sddWorkUnitsFor(ctx.cwd, parsed.changeName),
 		);
 		ctx.ui.notify(
-			parsed.json ? JSON.stringify(status, null, 2) : renderSddStatusMarkdown(status),
+			parsed.json ? JSON.stringify({ ...status, routing }, null, 2) : renderSddStatusMarkdown(status, routing),
 			sddStatusSeverity(status),
 		);
 	};
@@ -5481,14 +5502,15 @@ function createGentleAiExtensionForTesting(
 
 	const handleSddContinueCommand = async (args: string, ctx: ExtensionContext) => {
 		const parsed = parseSddStatusCommandArgs(args);
-		const status = resolveControllerSddStatus(
+		const { status, routing } = resolveControllerSddStatusRouting(
 			ctx.cwd,
 			parsed.changeName,
 			true,
 			getSddPreflightPreferences(ctx)?.artifactStore,
+			sddWorkUnitsFor(ctx.cwd, parsed.changeName),
 		);
 		ctx.ui.notify(
-			parsed.json ? JSON.stringify(status, null, 2) : renderSddDispatcherMarkdown(status),
+			parsed.json ? JSON.stringify({ ...status, routing }, null, 2) : renderSddDispatcherMarkdown(status, routing),
 			sddStatusSeverity(status),
 		);
 	};

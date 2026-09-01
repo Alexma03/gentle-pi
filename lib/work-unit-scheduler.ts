@@ -132,10 +132,11 @@ interface MutableRecord {
 	readonly unit: NormalizedWorkUnitV1;
 	status: WorkUnitStatusV1;
 	lease?: WorkUnitLeaseV1;
+	settledLease?: WorkUnitLeaseV1;
 	settlement?: WorkUnitSettlementV1;
 }
 
-interface FinalVerificationV1 {
+export interface FinalVerificationV1 {
 	readonly passed: boolean;
 	readonly evidence: readonly string[];
 }
@@ -170,6 +171,9 @@ function normalizeSurface(value: readonly string[] | undefined, label: string): 
 }
 
 function normalizeMode(unit: WorkUnitDefinitionV1): WorkUnitModeV1 {
+	if (unit.writeSurface !== undefined && !Array.isArray(unit.writeSurface)) {
+		throw new WorkUnitSchedulerError("invalid_unit", "Work-unit write surface must be an array of bounded strings.", unit.id);
+	}
 	if (unit.mode === undefined) return unit.writeSurface !== undefined && unit.writeSurface.length > 0 ? "write" : "read";
 	if (unit.mode === "reader") return "read";
 	if (unit.mode === "writer") return "write";
@@ -323,6 +327,15 @@ function settlementMatches(settlement: WorkUnitSettlementV1, input: WorkUnitSett
 		&& JSON.stringify(settlement.blockers) === JSON.stringify(input.blockers ?? []);
 }
 
+function sameLeaseIdentity(expected: WorkUnitLeaseV1, candidate: WorkUnitLeaseV1): boolean {
+	return expected.repository === candidate.repository
+		&& expected.worktree === candidate.worktree
+		&& expected.mode === candidate.mode
+		&& Array.isArray(candidate.writeSurface)
+		&& expected.writeSurface.length === candidate.writeSurface.length
+		&& expected.writeSurface.every((surface, index) => surface === candidate.writeSurface[index]);
+}
+
 /**
  * Return all graph-ready units in stable id order. This pure helper is useful
  * before any provider/native attempt acquire and has no lease or attempt state.
@@ -348,7 +361,7 @@ export function selectReadyWorkUnits(units: readonly WorkUnitDefinitionV1[], com
 /** Parent-owned scheduler for DAG readiness, leases, and integration evidence. */
 export class WorkUnitSchedulerV1 {
 	private readonly records: Map<string, MutableRecord>;
-	private finalVerification?: FinalVerificationV1;
+	private finalVerificationRecord?: FinalVerificationV1;
 
 	constructor(units: readonly WorkUnitDefinitionV1[]) {
 		const graph = validateWorkUnitGraph(units);
@@ -455,10 +468,13 @@ export class WorkUnitSchedulerV1 {
 		const record = this.requireRecord(lease.workUnitId);
 		const normalized = normalizeSettlement(input, lease.workUnitId);
 		if (record.settlement !== undefined) {
+			if (record.settledLease === undefined || record.settledLease.leaseKey !== lease.leaseKey || !sameLeaseIdentity(record.settledLease, lease)) {
+				throw new WorkUnitSchedulerError("lease_missing", `Lease for work-unit ${lease.workUnitId} is not active or belongs to another request.`, lease.workUnitId);
+			}
 			if (settlementMatches(record.settlement, normalized)) return record.settlement;
 			throw new WorkUnitSchedulerError("settlement_conflict", `Work-unit ${lease.workUnitId} already has a different settlement.`, lease.workUnitId);
 		}
-		if (record.lease === undefined || record.lease.leaseKey !== lease.leaseKey) {
+		if (record.lease === undefined || record.lease.leaseKey !== lease.leaseKey || !sameLeaseIdentity(record.lease, lease)) {
 			throw new WorkUnitSchedulerError("lease_missing", `Lease for work-unit ${lease.workUnitId} is not active or belongs to another request.`, lease.workUnitId);
 		}
 		const settlement: WorkUnitSettlementV1 = Object.freeze({
@@ -475,6 +491,7 @@ export class WorkUnitSchedulerV1 {
 			blockers: Object.freeze([...(normalized.blockers ?? [])]),
 		});
 		record.settlement = settlement;
+		record.settledLease = detachedLease(lease);
 		record.status = settlement.status;
 		// Releasing the lease is the only local cleanup. Native attempt settlement
 		// remains the caller/provider's responsibility and is not mirrored here.
@@ -502,19 +519,19 @@ export class WorkUnitSchedulerV1 {
 	}
 
 	recordFinalVerification(input: FinalVerificationV1): void {
-		if (!input || typeof input !== "object" || typeof input.passed !== "boolean" || !Array.isArray(input.evidence) || input.evidence.some((entry) => !isNonEmptyText(entry))) {
+		if (!input || typeof input !== "object" || typeof input.passed !== "boolean" || !Array.isArray(input.evidence) || input.evidence.length > MAX_SURFACE_ENTRIES || input.evidence.some((entry) => !isNonEmptyText(entry)) || (input.passed && input.evidence.length === 0)) {
 			throw new WorkUnitSchedulerError("invalid_settlement", "Final verification requires a boolean result and evidence.");
 		}
 		const next = { passed: input.passed, evidence: Object.freeze([...input.evidence]) } as const;
-		if (this.finalVerification !== undefined) {
-			if (this.finalVerification.passed === next.passed && JSON.stringify(this.finalVerification.evidence) === JSON.stringify(next.evidence)) return;
+		if (this.finalVerificationRecord !== undefined) {
+			if (this.finalVerificationRecord.passed === next.passed && JSON.stringify(this.finalVerificationRecord.evidence) === JSON.stringify(next.evidence)) return;
 			throw new WorkUnitSchedulerError("settlement_conflict", "Final verification is already recorded with different evidence.");
 		}
-		this.finalVerification = Object.freeze(next);
+		this.finalVerificationRecord = Object.freeze(next);
 	}
 
 	integrationReady(): boolean {
-		if (this.finalVerification?.passed !== true) return false;
+		if (this.finalVerificationRecord?.passed !== true || this.finalVerificationRecord.evidence.length === 0) return false;
 		return [...this.records.values()].every((record) => record.status === "completed" && record.settlement !== undefined && record.settlement.evidence.focusedChecks.length > 0 && record.settlement.evidence.finalVerification !== "failed");
 	}
 
@@ -523,6 +540,6 @@ export class WorkUnitSchedulerV1 {
 	}
 
 	finalVerification(): FinalVerificationV1 | undefined {
-		return this.finalVerification === undefined ? undefined : Object.freeze({ passed: this.finalVerification.passed, evidence: Object.freeze([...this.finalVerification.evidence]) });
+		return this.finalVerificationRecord === undefined ? undefined : Object.freeze({ passed: this.finalVerificationRecord.passed, evidence: Object.freeze([...this.finalVerificationRecord.evidence]) });
 	}
 }

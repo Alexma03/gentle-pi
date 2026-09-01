@@ -96,3 +96,70 @@ test("correction scope returns detached data and does not mutate its request", (
 	assert.notEqual(plan.paths, input.paths);
 	assert.deepEqual(input, before);
 });
+
+test("correction paths remain explicitly bounded to each confirmed finding", () => {
+	const pathsByFinding = [
+		{ findingId: "finding-a", paths: ["src/a.ts", "src/shared.ts"] },
+		{ findingId: "finding-b", paths: ["src/b.ts"] },
+	];
+	const input = request({
+		pathsByFinding,
+		forecast: { ...request().forecast!, pathsByFinding },
+	} as Partial<CorrectionScopeRequestV1>);
+	const plan = resolveBoundedCorrectionPlan(input);
+	assert.deepEqual(plan.pathsByFinding, pathsByFinding);
+
+	const crossBounded = request({
+		pathsByFinding: [
+			{ findingId: "finding-a", paths: ["src/b.ts"] },
+			{ findingId: "finding-b", paths: ["src/a.ts", "src/shared.ts"] },
+		],
+	} as Partial<CorrectionScopeRequestV1>);
+	assert.throws(
+		() => resolveBoundedCorrectionPlan(crossBounded),
+		(error: unknown) => error instanceof CorrectionScopeError,
+	);
+});
+
+test("correction scope rejects ambiguous shared paths without an explicit assignment", () => {
+	const shared = "src/shared.ts";
+	const sharedFindings = request({
+		confirmedFindings: [
+			{ id: "finding-a", paths: [shared] },
+			{ id: "finding-b", paths: [shared] },
+		],
+		findingIds: ["finding-a", "finding-b"],
+		paths: [shared],
+		forecast: {
+			positive: true,
+			findingIds: ["finding-a", "finding-b"],
+			paths: [shared],
+			effects: ["Correct the shared path for both findings"],
+		},
+	});
+	assert.throws(
+		() => resolveBoundedCorrectionPlan(sharedFindings),
+		(error: unknown) => error instanceof CorrectionScopeError,
+	);
+
+	const explicit = request({
+		confirmedFindings: sharedFindings.confirmedFindings,
+		findingIds: sharedFindings.findingIds,
+		paths: [shared],
+		pathsByFinding: {
+			"finding-a": [shared],
+			"finding-b": [shared],
+		},
+		forecast: {
+			...sharedFindings.forecast,
+			pathsByFinding: {
+				"finding-a": [shared],
+				"finding-b": [shared],
+			},
+		},
+	} as Partial<CorrectionScopeRequestV1>);
+	assert.deepEqual(resolveBoundedCorrectionPlan(explicit).pathsByFinding, [
+		{ findingId: "finding-a", paths: [shared] },
+		{ findingId: "finding-b", paths: [shared] },
+	]);
+});

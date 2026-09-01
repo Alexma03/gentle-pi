@@ -484,10 +484,28 @@ async function run() {
 		const statusCtx = createCtx(promptCwd, true);
 		await commands.get("sdd-status").handler("status-demo --json", statusCtx);
 		assert.match(statusCtx.ui.notifications.at(-1).message, /"schemaName": "gentle-pi\.sdd-status"/);
+		assert.match(statusCtx.ui.notifications.at(-1).message, /"schemaName": "gentle-pi\.sdd-status-routing"/);
+		assert.match(statusCtx.ui.notifications.at(-1).message, /"artifactOnly": true/);
+		assert.doesNotMatch(statusCtx.ui.notifications.at(-1).message, /attemptToken|attemptCounter|attempts\s*:/i);
 		const continueCtx = createCtx(promptCwd, true);
 		await commands.get("sdd-continue").handler("status-demo", continueCtx);
 		assert.match(continueCtx.ui.notifications.at(-1).message, /Native SDD Dispatcher/);
 		assert.match(continueCtx.ui.notifications.at(-1).message, /nextPhase: sdd-apply/);
+		assert.match(continueCtx.ui.notifications.at(-1).message, /work-unit readiness.*artifact-only/i);
+		const routedPi = createPi();
+		const { createGentleAiExtension } = await import(pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href + "?status-routing-harness");
+		createGentleAiExtension({
+			nativeReviewCli: null,
+			sddWorkUnits: [
+				{ id: "apply-core", state: "ready", dependencies: [], incompleteDependencies: [], conflict: false, providerReady: true },
+				{ id: "verify-core", state: "blocked", dependencies: ["apply-core"], incompleteDependencies: ["apply-core"], conflict: false, providerReady: false },
+			],
+		})(routedPi.pi);
+		const routedStatusCtx = createCtx(promptCwd, true);
+		await routedPi.commands.get("sdd-status").handler("status-demo --json", routedStatusCtx);
+		const routedStatus = JSON.parse(routedStatusCtx.ui.notifications.at(-1).message);
+		assert.deepEqual(routedStatus.routing.workUnits.map(({ id }) => id), ["apply-core", "verify-core"]);
+		assert.equal(routedStatus.routing.artifactOnly, true);
 		const { execFileSync } = await import("node:child_process");
 		execFileSync("git", ["init"], { cwd: promptCwd, stdio: "ignore" });
 		const recoveryRequiredDirectory = join(promptCwd, ".git", "gentle-ai", "reviews", "control", "recovery-required-v1");
