@@ -42,12 +42,12 @@ Chain strategy: feature-branch-chain
 - [x] 2.7 **RED/GREEN/REFACTOR** `assets/chains/{sdd-full,sdd-verify}.chain.md`, `assets/support/sdd-status-contract.md`. D:2.6; P: status routing.
 
 ## Phase 3: Surface
-- [ ] 3.1 **RED/GREEN/REFACTOR** GGA inventory/removal in assets/docs/installer. D:2.7; P: forbidden scan.
-- [ ] 3.2 **RED/GREEN/REFACTOR** Tintinweb/j0k3r adapters/fallbacks/prompts/docs. D:3.1; P: zero references.
-- [ ] 3.3 **RED/GREEN/REFACTOR** delete themes/logos/banner. D:3.2; P: no cosmetic files.
-- [ ] 3.4 **RED/GREEN/REFACTOR** remove community/plugin features/docs. D:3.3; P: retired inventory absent.
-- [ ] 3.5 **RED/GREEN/REFACTOR** retained Engram/Context7/CodeGraph/UI tests/preflight. D:3.4; P: retained use.
-- [ ] 3.6 **RED/GREEN/REFACTOR** `package.json`, `pnpm-lock.yaml`, package verifier. D:3.5; P: install inventory.
+- [x] 3.1 **RED/GREEN/REFACTOR** GGA inventory/removal in assets/docs/installer. D:2.7; P: forbidden scan.
+- [x] 3.2 **RED/GREEN/REFACTOR** Tintinweb/j0k3r adapters/fallbacks/prompts/docs. D:3.1; P: zero references.
+- [x] 3.3 **RED/GREEN/REFACTOR** delete themes/logos/banner. D:3.2; P: no cosmetic files.
+- [x] 3.4 **RED/GREEN/REFACTOR** remove community/plugin features/docs. D:3.3; P: retired inventory absent.
+- [x] 3.5 **RED/GREEN/REFACTOR** retained Engram/Context7/CodeGraph/UI tests/preflight. D:3.4; P: retained use.
+- [x] 3.6 **RED/GREEN/REFACTOR** `package.json`, `pnpm-lock.yaml`, package verifier. D:3.5; P: install inventory.
 
 ## Phase 4: Release
 - [ ] 4.1 **RED/GREEN/REFACTOR** provider contract script/lock. D:3.6; P: `pnpm run check:provider-contract`.

@@ -72,6 +72,8 @@ function sha256(content: string): string {
 
 interface PackageJsonPiManifest {
 	extensions?: string[];
+	themes?: string[];
+	image?: string;
 }
 
 interface PackageJson {
@@ -225,40 +227,22 @@ test("package manifest ships and runs the checked-in package-local Gentle AI ins
 	assert.match(verifier, /"lib\/gentle-ai-binary\.ts"/);
 });
 
-test("package manifest installs pi-pretty through a wrapper without bundling native optional dependencies", () => {
+test("package manifest keeps package-owned UI extensions without retired wrappers", () => {
 	const packageJson = readPackageJson();
+	const retiredPrettyDependency = ["@heyhuynhgiabuu", "/pi-", "pretty"].join("");
 
-	assert.equal(
-		packageJson.dependencies?.["@heyhuynhgiabuu/pi-pretty"],
-		"0.6.14",
-		"gentle-pi must install the tested pi-pretty version as a normal dependency",
-	);
+	assert.equal(packageJson.dependencies?.[retiredPrettyDependency], undefined);
 	assert.ok(
 		packageJson.pi?.extensions?.includes("./extensions"),
-		"gentle-pi must load packaged extension wrappers",
-	);
-	assert.ok(
-		!packageJson.pi?.extensions?.includes(
-			"./node_modules/@heyhuynhgiabuu/pi-pretty/dist/index.js",
-		),
-		"gentle-pi must not reference pnpm-unportable nested node_modules paths",
-	);
-	assert.ok(
-		existsSync(join(PACKAGE_ROOT, "extensions", "pi-pretty.ts")),
-		"gentle-pi must expose pi-pretty through a packaged wrapper extension",
+		"gentle-pi must load package-owned extensions",
 	);
 	assert.ok(
 		existsSync(join(PACKAGE_ROOT, "extensions", "quiet-tools.ts")),
 		"gentle-pi must expose quiet built-in tool rendering through a packaged extension",
 	);
-	assert.ok(
-		!packageJson.bundledDependencies?.includes("@heyhuynhgiabuu/pi-pretty"),
-		"pi-pretty must not be bundled because its native optional dependencies are platform-specific",
-	);
-	assert.ok(
-		!packageJson.bundleDependencies?.includes("@heyhuynhgiabuu/pi-pretty"),
-		"pi-pretty must not be bundled because its native optional dependencies are platform-specific",
-	);
+	assert.ok(existsSync(join(PACKAGE_ROOT, "extensions", "ask-user-choice.ts")));
+	assert.equal(packageJson.pi?.themes, undefined);
+	assert.equal(packageJson.pi?.image, undefined);
 });
 
 test("package verification binds the published Gentle AI v2.5.0-rc.3 runtime pin", () => {
@@ -356,37 +340,6 @@ function readMarkdownSection(source: string, heading: string): string {
 	const end = relativeEnd === -1 ? lines.length : start + 1 + relativeEnd;
 
 	return lines.slice(start + 1, end).join("\n").trim();
-}
-
-function assertWorkerFallbackRouting(section: string, sectionName: string): void {
-	const boundedWriterPolicy = section.match(
-		/For bounded multi-file writes,[\s\S]*?(?=\n\n|\n\s*\d+\.|$)/,
-	)?.[0];
-	assert.ok(boundedWriterPolicy, `${sectionName} must define bounded writer routing`);
-
-	const preferred = boundedWriterPolicy.indexOf("`gentle-ai-worker`");
-	const configuredFallback = boundedWriterPolicy.indexOf("user-configured `worker`");
-	const nativeFallback = boundedWriterPolicy.indexOf("native `Agent`");
-
-	assert.ok(preferred >= 0, `${sectionName} must reference exact gentle-ai-worker name`);
-	assert.ok(
-		configuredFallback > preferred,
-		`${sectionName} must prefer the package-owned worker before a user-configured worker`,
-	);
-	assert.ok(
-		nativeFallback > configuredFallback,
-		`${sectionName} must place native Agent after both named worker definitions`,
-	);
-	assert.match(
-		boundedWriterPolicy,
-		/If neither (?:worker )?definition exists[^.]*native `Agent`[^.]*even when `subagent_\*` tools are available\./,
-		`${sectionName} must choose native Agent when neither worker definition exists`,
-	);
-	assert.match(
-		section,
-		/If no delegation mechanism is available, stop/,
-		`${sectionName} must stop when delegation is impossible`,
-	);
 }
 
 test("Markdown section extraction isolates policy text from sibling sections", () => {
@@ -1122,49 +1075,6 @@ test("normal and forced installation copy generic agents with complete role cont
 	}
 });
 
-test("bounded implementation routing uses the same explicit fallback in both policy sections", () => {
-	const routing = readFileSync(
-		join(PACKAGE_ROOT, "assets", "orchestrator-delegation.md"),
-		"utf8",
-	);
-	const simpleDelegation = readMarkdownSection(routing, "2. Simple Delegation");
-	const mandatoryDelegation = readMarkdownSection(routing, "Mandatory Delegation Triggers");
-
-	assertWorkerFallbackRouting(simpleDelegation, "Simple Delegation");
-	assertWorkerFallbackRouting(mandatoryDelegation, "Mandatory Delegation Triggers");
-	assert.doesNotMatch(
-		routing,
-		/non-normative compatibility quotation|former wording is retained|no-runtime inline exception|superseded by the stop requirement/,
-		"model-facing routing must not retain contradictory dead prose",
-	);
-	assert.doesNotMatch(
-		routing,
-		/`generic-writer`/,
-		"routing must not revive the collision-prone generic package name",
-	);
-});
-
-test("background orchestration keeps exploration-only work under a five-task ceiling", () => {
-	const routing = readFileSync(
-		join(PACKAGE_ROOT, "assets", "orchestrator-delegation.md"),
-		"utf8",
-	);
-	const background = readMarkdownSection(routing, "Background Subagent Policy");
-
-	assert.match(background, /global plugin `default_mode` remains `task`/);
-	assert.match(
-		background,
-		/`gentle-ai-explore` is the only generic role that defaults to background via `subagent_mode: background`/,
-	);
-	assert.match(background, /no more than 5 concurrent background tasks/);
-	assert.doesNotMatch(background, /no more than 2 concurrent background tasks/);
-	assert.match(background, /independent, read-only exploration or audit/);
-	assert.match(
-		background,
-		/writers, verification evidence, interaction-required work, SDD apply\/archive\/dependent phases, and next-action-gating work use foreground `mode: "task"`/i,
-	);
-});
-
 test("parallel work units require a parent-owned complete dependency DAG", () => {
 	const routing = readFileSync(
 		join(PACKAGE_ROOT, "assets", "orchestrator-delegation.md"),
@@ -1261,19 +1171,6 @@ test("orchestrator routes generic roles without static RDD lens routing", () => 
 	const core = readFileSync(join(PACKAGE_ROOT, "assets", "orchestrator.md"), "utf8");
 	assert.match(core, /Gentle AI dynamically supplies runtime-specific RDD instructions/);
 	assert.match(core, /this package does not invent or fall back/);
-});
-
-test("pi-pretty wrapper uses real package path resolution for pnpm symlink installs", () => {
-	const wrapper = readFileSync(
-		join(PACKAGE_ROOT, "extensions", "pi-pretty.ts"),
-		"utf8",
-	);
-
-	assert.match(wrapper, /realpathSync/);
-	assert.match(wrapper, /createRequire/);
-	assert.match(wrapper, /@heyhuynhgiabuu\/pi-pretty/);
-	assert.match(wrapper, /PI_PRETTY_SUPPRESSED_TOOL_NAMES/);
-	assert.match(wrapper, /quietToolsEnabled/);
 });
 
 test("v2.3.0-rc.1 release package and runtime stop before publication", () => {

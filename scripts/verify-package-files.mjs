@@ -7,6 +7,91 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(fileURLToPath(new URL("..", import.meta.url)));
 
+// This inventory is the package's single source of truth for the surfaces
+// retired by the personal-gentle-stack PR3.  Keep each operational token
+// explicit, but split it in source so the scanner can inspect this file too
+// without reporting its own inventory declaration.
+const retiredSurface = (...parts) => parts.join("");
+
+export const RETIRED_PACKAGE_SURFACES = Object.freeze([
+  retiredSurface("pi-subagents", "-j0", "k3r"),
+  retiredSurface("@tintinweb", "/pi-subagents"),
+  retiredSurface("subagent", "_run"),
+  retiredSurface("rpi", "v:ask-user:blocked"),
+  retiredSurface("rpi", "v"),
+  retiredSurface("pi-web", "-access"),
+  retiredSurface("pi", "-btw"),
+  retiredSurface("@juicesharp", "/rpi", "v-todo"),
+  retiredSurface("@juicesharp", "/rpi", "v-ask-user-question"),
+  retiredSurface("@heyhuynhgiabuu", "/pi-", "pretty"),
+  retiredSurface("gentle-pi.background", "-subagents/v1"),
+  retiredSurface("GENTLE_PI_BACKGROUND", "_SUBAGENTS"),
+  retiredSurface("{{GENTLE_PI_BACKGROUND", "_POLICY}}"),
+]);
+
+// Paths are checked independently from textual references: a package can be
+// text-clean while still accidentally shipping a retired file.
+export const FORBIDDEN_PACKAGE_SURFACES = Object.freeze([
+  "extensions/pi-pretty.ts",
+  "extensions/startup-banner.ts",
+  "themes/Gentle.json",
+  "themes/Gentleman-Cute.json",
+  "themes/Gentleman-Sexy.json",
+  "assets/gentle-logo-only.png",
+  "tests/gentle-theme.test.ts",
+  "tests/background-subagents.test.ts",
+  "tests/writer-edit-surface-scope.test.ts",
+]);
+
+export const REQUIRED_PACKAGE_SURFACES = Object.freeze([
+  "extensions/ask-user-choice.ts",
+  "extensions/codegraph-tools.ts",
+  "extensions/quiet-tools.ts",
+  "extensions/sdd-init.ts",
+  "extensions/skill-registry.ts",
+  "lib/nicobailon-subagent-adapter.ts",
+  "lib/subagent-runtime.ts",
+  "lib/sdd-preflight.ts",
+  "assets/migrations/managed-assets-v0.10.7.json",
+  "assets/migrations/managed-assets-v0.13.json",
+  "assets/migrations/managed-assets-v0.14.json",
+]);
+
+const RETIRED_SCAN_DIRECTORY_EXCLUSIONS = new Set([".git", ".codegraph", "openspec"]);
+const RETIRED_SCAN_FILE_EXCLUSIONS = new Set(["tests/fixtures/orchestrator.pre-diet.md"]);
+
+function listRetiredScanFiles(directory, relativeDirectory = "") {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const relativePath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+    const absolutePath = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (RETIRED_SCAN_DIRECTORY_EXCLUSIONS.has(entry.name)) return [];
+      return listRetiredScanFiles(absolutePath, relativePath);
+    }
+    if (!entry.isFile() || RETIRED_SCAN_FILE_EXCLUSIONS.has(relativePath)) return [];
+    return [absolutePath];
+  });
+}
+
+/**
+ * Return every retired operational token found in package-owned text files.
+ * Binary assets are ignored by their NUL marker; approved migration/history
+ * files remain visible unless they are under the explicitly approved fixture.
+ */
+export function scanRetiredSurfaceReferences(packageRoot) {
+  const findings = [];
+  for (const absolutePath of listRetiredScanFiles(packageRoot)) {
+    const bytes = readFileSync(absolutePath);
+    if (bytes.includes(0)) continue;
+    const text = bytes.toString("utf8");
+    const relativePath = relative(packageRoot, absolutePath).split(sep).join("/");
+    for (const surface of RETIRED_PACKAGE_SURFACES) {
+      if (text.includes(surface)) findings.push({ relativePath, surface });
+    }
+  }
+  return findings.sort((left, right) => left.relativePath.localeCompare(right.relativePath) || left.surface.localeCompare(right.surface));
+}
+
 const requiredPaths = [
   "assets/orchestrator.md",
   "assets/orchestrator-delegation.md",
@@ -90,6 +175,7 @@ const requiredPaths = [
   "contracts/review-provider-contract-mirror/v1.1.0/bundle/vectors/targeted-validator.json",
   "contracts/review-provider-contract-mirror/v1.1.0/generated/provider-capabilities.baseline.json",
   "contracts/review-provider-contract-mirror/v1.1.0/generated/provider-roles.baseline.json",
+  "contracts/pi-subagents-rpc-v1.lock.json",
   "prompts/skill-creation.md",
   "skills/_shared/review-ledger-contract.md",
   "skills/branch-pr/SKILL.md",
@@ -180,6 +266,7 @@ const contractHashes = {
 };
 
 requiredPaths.push(...Object.keys(contractHashes));
+requiredPaths.push(...REQUIRED_PACKAGE_SURFACES);
 
 function listFilesRecursively(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -301,6 +388,25 @@ async function main() {
       console.error(`- ${relativePath}`);
     }
     console.error("\nRefusing to pack/publish an incomplete npm package.");
+    process.exit(1);
+  }
+
+  const forbiddenPresent = FORBIDDEN_PACKAGE_SURFACES.filter((relativePath) => {
+    const absolutePath = join(root, relativePath);
+    return existsSync(absolutePath);
+  });
+  if (forbiddenPresent.length > 0) {
+    console.error("gentle-pi package contains retired PR3 surfaces:");
+    for (const relativePath of forbiddenPresent) console.error(`- ${relativePath}`);
+    console.error("\nRefusing to pack/publish a package with retired presentation or community surfaces.");
+    process.exit(1);
+  }
+
+  const retiredReferences = scanRetiredSurfaceReferences(root);
+  if (retiredReferences.length > 0) {
+    console.error("gentle-pi package contains retired operational references:");
+    for (const { relativePath, surface } of retiredReferences) console.error(`- ${relativePath}: ${surface}`);
+    console.error("\nRefusing to pack/publish a package with retired operational references.");
     process.exit(1);
   }
 
