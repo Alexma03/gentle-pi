@@ -62,6 +62,12 @@ test("ready selection is dependency-aware and deterministic", () => {
 		unit("child", { dependencies: ["m-middle"] }),
 	]);
 	assert.deepEqual(plan.readyUnits().map(({ id }) => id), ["a-first", "m-middle"]);
+	assert.deepEqual(selectReadyWorkUnits([
+		unit("z-last", { dependencies: ["a-first"] }),
+		unit("a-first"),
+		unit("m-middle"),
+		unit("child", { dependencies: ["m-middle"] }),
+	], ["a-first", "m-middle"]).map(({ id }) => id), ["child", "z-last"]);
 	const first = plan.acquireLease("a-first", { idempotencyKey: "a-first-launch" });
 	assert.deepEqual(plan.readyUnits().map(({ id }) => id), ["m-middle"]);
 	plan.settle(first, {
@@ -200,4 +206,6 @@ test("integration stays blocked until every unit has evidence and final verifica
 	plan.recordFinalVerification({ passed: true, evidence: ["full verification passed"] });
 	assert.equal(plan.integrationReady(), true);
 	assert.doesNotThrow(() => plan.assertIntegrationReady());
+	assert.doesNotThrow(() => plan.recordFinalVerification({ passed: true, evidence: ["full verification passed"] }));
+	assert.throws(() => plan.recordFinalVerification({ passed: false, evidence: ["different result"] }), (error: unknown) => error instanceof WorkUnitSchedulerError && error.code === "settlement_conflict");
 });

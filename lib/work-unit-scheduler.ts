@@ -340,7 +340,7 @@ export function selectReadyWorkUnits(units: readonly WorkUnitDefinitionV1[], com
 	// roots; callers may pass provider-owned completed identities for later DAG
 	// layers without introducing local attempt state.
 	for (const unit of graph) {
-		if (unit.dependencies.every((dependency) => complete.has(dependency))) result.push(unit);
+		if (!complete.has(unit.id) && unit.dependencies.every((dependency) => complete.has(dependency))) result.push(unit);
 	}
 	return Object.freeze([...result].sort((left, right) => left.id.localeCompare(right.id)));
 }
