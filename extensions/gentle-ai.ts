@@ -150,6 +150,17 @@ import {
 } from "../lib/review-integration-v2.ts";
 import { reconcileUnknownReviewLastEventCapture } from "../lib/review-last-event-controller.ts";
 import { recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
+import {
+	assertSubagentTaskV1,
+	type SubagentResultV1,
+	type SubagentRuntimeV1,
+	type SubagentTaskV1,
+} from "../lib/subagent-runtime.ts";
+import {
+	bindWorkspace,
+	createWorkspaceGuard,
+	type WorkspaceGuardV1,
+} from "../lib/workspace-guard.ts";
 
 const GRAPH_V1_ORDINARY_READ_ONLY = "Graph-v1 ordinary review authority is read-only; use native compact-v2 review operations";
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -5227,6 +5238,10 @@ function resolveStartupControllerSddStatus(
 export interface GentleAiRuntimeDependencies {
 	nativeReviewCli?: NativeReviewCli | null;
 	candidateViews?: CandidateViewRegistry | null;
+	/** Explicit provider-neutral runtime seam used by delegation tests/hosts. */
+	subagentRuntime?: SubagentRuntimeV1 | null;
+	/** Explicit bound-workspace seam; a resolver may bind each session cwd. */
+	workspaceGuard?: WorkspaceGuardV1 | ((cwd: string) => WorkspaceGuardV1) | null;
 	// An injected registry gives tests and host integrations explicit ownership;
 	// normal package registrations share the module-local process-memory registry.
 	pendingReviewConsentRegistry?: PendingReviewConsentRegistry;
@@ -5236,6 +5251,104 @@ export interface GentleAiRuntimeDependencies {
 	// sleep and without relying on the queued cleanup macrotask firing.
 	now?: () => number;
 	scheduleTimer?: (callback: () => void, delayMs: number) => { unref: () => void };
+}
+
+const SUBAGENT_DELEGATION_PARAMETERS = {
+	type: "object",
+	additionalProperties: false,
+	required: ["role", "task", "context", "dependencies", "expectedOutcome"],
+	properties: {
+		role: { type: "string", minLength: 1, description: "Controller-owned runtime role." },
+		task: { type: "string", minLength: 1, description: "Portable task objective." },
+		context: { type: "string", description: "Portable task context." },
+		dependencies: { type: "array", items: { type: "string" }, description: "Completed prerequisite work-unit identifiers." },
+		expectedOutcome: { type: "string", minLength: 1, description: "Portable acceptance outcome." },
+	},
+} as const;
+
+interface SubagentDelegationParameters extends SubagentTaskV1 {
+	readonly role: string;
+}
+
+const SUBAGENT_DELEGATION_KEYS = new Set([
+	"role",
+	"task",
+	"context",
+	"dependencies",
+	"expectedOutcome",
+]);
+
+function parseSubagentDelegationParameters(value: unknown): SubagentDelegationParameters {
+	if (!isRecord(value)) throw new Error("Gentle subagent parameters must be an object.");
+	const unexpected = Object.keys(value).find((key) => !SUBAGENT_DELEGATION_KEYS.has(key));
+	if (unexpected !== undefined) throw new Error(`Gentle subagent does not accept provider-specific field '${unexpected}'.`);
+	if (typeof value.role !== "string" || value.role.trim().length === 0 || /[\r\n]/.test(value.role)) {
+		throw new Error("Gentle subagent role must be a non-empty controller-owned string.");
+	}
+	const task = assertSubagentTaskV1({
+		task: value.task,
+		context: value.context,
+		dependencies: value.dependencies,
+		expectedOutcome: value.expectedOutcome,
+	});
+	return { role: value.role.trim(), ...task };
+}
+
+function runtimeForExtension(dependencies: GentleAiRuntimeDependencies): SubagentRuntimeV1 | null {
+	return dependencies.subagentRuntime ?? null;
+}
+
+function workspaceGuardForExtension(
+	dependencies: GentleAiRuntimeDependencies,
+	ctx: ExtensionContext,
+): WorkspaceGuardV1 {
+	const injected = dependencies.workspaceGuard;
+	if (typeof injected === "function") return injected(ctx.cwd);
+	if (injected !== undefined && injected !== null) return injected;
+	return createWorkspaceGuard(bindWorkspace(ctx.cwd));
+}
+
+function registerSubagentDelegationTool(
+	pi: ExtensionAPI,
+	runtime: SubagentRuntimeV1,
+	dependencies: GentleAiRuntimeDependencies,
+): void {
+	pi.registerTool({
+		name: "gentle_subagent",
+		label: "Gentle Subagent",
+		description: "Delegate one provider-neutral task through the negotiated runtime in the controller-bound worktree.",
+		parameters: SUBAGENT_DELEGATION_PARAMETERS,
+		executionMode: "sequential",
+		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
+			if (signal?.aborted) throw new Error("Subagent delegation was cancelled");
+			const input = parseSubagentDelegationParameters(parameters);
+			const guard = workspaceGuardForExtension(dependencies, ctx);
+			guard.assertPath(ctx.cwd);
+			const { role, ...task } = input;
+			await runtime.negotiate();
+			const handle = await runtime.start(task, {
+				role,
+				cwd: guard.binding.worktree,
+				signal,
+			});
+			try {
+				const result: SubagentResultV1 = await runtime.result(handle, { signal });
+				return {
+					content: [{ type: "text", text: JSON.stringify(result) }],
+					details: result,
+				};
+			} catch (error) {
+				if (signal?.aborted) {
+					try {
+						await runtime.cancel(handle, "delegation cancelled");
+					} catch {
+						// Preserve the original cancellation/error; stop is best effort.
+					}
+				}
+				throw error;
+			}
+		},
+	});
 }
 
 export function createGentleAiExtension(dependencies: GentleAiRuntimeDependencies = {}): (pi: ExtensionAPI) => void {
@@ -5254,6 +5367,8 @@ function createGentleAiExtensionForTesting(
 	const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
 	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
 	const herdrLifecycle = createHerdrConfirmationLifecycle(pi.events);
+	const subagentRuntime = runtimeForExtension(dependencies);
+	if (subagentRuntime !== null) registerSubagentDelegationTool(pi, subagentRuntime, dependencies);
 
 	pi.on("session_shutdown", (_event, context) => {
 		const sessionKey = pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey);
