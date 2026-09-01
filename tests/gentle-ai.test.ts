@@ -15,6 +15,8 @@ import type {
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
 import type { ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
+import { MANDATORY_SUBAGENT_CAPABILITIES, type SubagentResultV1, type SubagentRuntimeCapabilitiesV1, type SubagentRuntimeHandleV1, type SubagentRuntimeStatusV1, type SubagentTaskV1 } from "../lib/subagent-runtime.ts";
+import type { WorkspaceBindingV1, WorkspaceGuardV1 } from "../lib/workspace-guard.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
 
 initTheme("dark");
@@ -59,6 +61,192 @@ function lifecycleContext(overrides: Record<string, unknown> = {}): Record<strin
 		...overrides,
 	};
 }
+
+test("injected runtime routes provider-neutral delegation through the workspace guard", async () => {
+	const tools = new Map<string, any>();
+	const handlers = new Map<string, (...args: any[]) => unknown>();
+	const calls: string[] = [];
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-runtime-route-"));
+	const binding: WorkspaceBindingV1 = {
+		cwd: root,
+		worktree: root,
+		commonDir: join(root, ".git"),
+		repositoryId: join(root, ".git"),
+	};
+	const guard: WorkspaceGuardV1 = {
+		binding,
+		checkPath: (path) => ({ allowed: true, code: "allowed", path }),
+		assertPath(path) {
+			calls.push(`path:${path}`);
+			return path;
+		},
+		checkCommand: (command) => ({ allowed: true, code: "allowed", command }),
+		assertCommand(command) {
+			calls.push(`command:${command}`);
+			return command;
+		},
+	};
+	const capabilities: SubagentRuntimeCapabilitiesV1 = {
+		protocol: 1,
+		provider: "nicobailon",
+		capabilities: [...MANDATORY_SUBAGENT_CAPABILITIES],
+	};
+	const handle: SubagentRuntimeHandleV1 = { id: "runtime-route-1" };
+	const result: SubagentResultV1 = {
+		status: "completed",
+		summary: "delegated",
+		evidence: ["runtime evidence"],
+		blockers: [],
+	};
+	const runtime = {
+		capabilities,
+		isNegotiated: true,
+		async negotiate() {
+			calls.push("negotiate");
+			return capabilities;
+		},
+		async start(task: SubagentTaskV1, options: { role?: string; cwd?: string }) {
+			calls.push(`start:${task.task}:${options.role}:${options.cwd}`);
+			return handle;
+		},
+		async status(_run: SubagentRuntimeHandleV1): Promise<SubagentRuntimeStatusV1> {
+			calls.push("status");
+			return { id: handle.id, status: "completed", result };
+		},
+		async result(_run: SubagentRuntimeHandleV1): Promise<SubagentResultV1> {
+			calls.push("result");
+			return result;
+		},
+		async cancel(_run: SubagentRuntimeHandleV1, reason?: string) {
+			calls.push(`cancel:${reason ?? ""}`);
+		},
+	} as unknown;
+	const pi = {
+		events: { on() {}, emit() {} },
+		on(name: string, handler: (...args: any[]) => unknown) {
+			handlers.set(name, handler);
+		},
+		registerCommand() {},
+		registerTool(tool: { name: string }) {
+			tools.set(tool.name, tool);
+		},
+		getActiveTools() {
+			throw new Error("legacy capability probes must not run for injected runtime delegation");
+		},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null, subagentRuntime: runtime as never, workspaceGuard: guard })(pi);
+	const delegate = tools.get("gentle_subagent");
+	assert.ok(delegate, "injected runtime must register provider-neutral delegation");
+	const output = await delegate.execute("call-1", {
+		task: "Run focused verification",
+		context: "Use the approved worktree",
+		dependencies: ["runtime"],
+		expectedOutcome: "A portable result",
+		role: "gentle-ai-worker",
+	}, undefined, undefined, { cwd: root, hasUI: false } as unknown as ExtensionContext);
+	assert.deepEqual(JSON.parse(output.content[0].text), result);
+	assert.deepEqual(calls, [
+		`path:${root}`,
+		"negotiate",
+		`start:Run focused verification:gentle-ai-worker:${root}`,
+		"result",
+	]);
+});
+
+test("provider-neutral delegation denies before runtime start when the injected guard rejects", async () => {
+	const tools = new Map<string, any>();
+	let starts = 0;
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-runtime-deny-"));
+	const guard: WorkspaceGuardV1 = {
+		binding: { cwd: root, worktree: root, commonDir: root, repositoryId: root },
+		checkPath: () => ({ allowed: false, code: "outside-worktree", reason: "outside" }),
+		assertPath() {
+			throw new Error("workspace binding denied");
+		},
+		checkCommand: () => ({ allowed: false, code: "destructive-command", reason: "destructive" }),
+		assertCommand() {
+			throw new Error("command denied");
+		},
+	};
+	const runtime = {
+		async negotiate() {},
+		async start() {
+			starts += 1;
+			throw new Error("runtime start must not run");
+		},
+		async result() {
+			throw new Error("runtime result must not run");
+		},
+		async status() {
+			throw new Error("runtime status must not run");
+		},
+		async cancel() {},
+	} as unknown;
+	const pi = {
+		events: { on() {}, emit() {} },
+		on() {},
+		registerCommand() {},
+		registerTool(tool: { name: string }) {
+			tools.set(tool.name, tool);
+		},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null, subagentRuntime: runtime as never, workspaceGuard: guard })(pi);
+	const delegate = tools.get("gentle_subagent");
+	await assert.rejects(delegate.execute("call-denied", {
+		role: "gentle-ai-worker",
+		task: "must not start",
+		context: "",
+		dependencies: [],
+		expectedOutcome: "denied",
+	}, undefined, undefined, { cwd: root, hasUI: false } as unknown as ExtensionContext), /workspace binding denied/);
+	assert.equal(starts, 0);
+});
+
+test("provider-neutral delegation rejects provider-specific fields before crossing the runtime port", async () => {
+	const tools = new Map<string, any>();
+	let starts = 0;
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-runtime-contract-"));
+	const guard: WorkspaceGuardV1 = {
+		binding: { cwd: root, worktree: root, commonDir: root, repositoryId: root },
+		checkPath: (path) => ({ allowed: true, code: "allowed", path }),
+		assertPath: (path) => path,
+		checkCommand: (command) => ({ allowed: true, code: "allowed", command }),
+		assertCommand: (command) => command,
+	};
+	const runtime = {
+		async negotiate() {},
+		async start() {
+			starts += 1;
+			return { id: "must-not-start" };
+		},
+		async result() {
+			return { status: "completed", summary: "", evidence: [], blockers: [] };
+		},
+		async status() {
+			return { id: "must-not-start", status: "completed" };
+		},
+		async cancel() {},
+	} as unknown;
+	const pi = {
+		events: { on() {}, emit() {} },
+		on() {},
+		registerCommand() {},
+		registerTool(tool: { name: string }) {
+			tools.set(tool.name, tool);
+		},
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null, subagentRuntime: runtime as never, workspaceGuard: guard })(pi);
+	const delegate = tools.get("gentle_subagent");
+	await assert.rejects(delegate.execute("call-contract", {
+		role: "gentle-ai-worker",
+		task: "must not start",
+		context: "",
+		dependencies: [],
+		expectedOutcome: "denied",
+		provider: "forbidden",
+	}, undefined, undefined, { cwd: root, hasUI: false } as unknown as ExtensionContext), /unsupported|provider|field/i);
+	assert.equal(starts, 0);
+});
 
 test("registered Gentle Review tools render reusable rose lifecycle call rows", () => {
 	const tools = registeredGentleTools();

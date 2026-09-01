@@ -30,7 +30,7 @@ Chain strategy: feature-branch-chain
 - [x] 1.2 **RED** adapter lifecycle tests; **GREEN** `lib/nicobailon-subagent-adapter.ts`, RPC lock; **REFACTOR** gate. D:1.1; P: start/status/result/cancel.
 - [x] 1.3 **RED** mismatch tests; **GREEN** runtime/adapter correlation/errors; **REFACTOR** evidence. D:1.2; P: correlated RPC.
 - [x] 1.4 **RED** `tests/workspace-guard.test.ts` selectors/symlink/push variants; **GREEN** `lib/workspace-guard.ts`; **REFACTOR** denial API. D:1.3; P: protected denial.
-- [ ] 1.5 **RED** `tests/gentle-ai.test.ts` routing; **GREEN** `extensions/gentle-ai.ts`; **REFACTOR** remove probes. D:1.4; P: tests.
+- [x] 1.5 **RED** `tests/gentle-ai.test.ts` routing; **GREEN** `extensions/gentle-ai.ts`; **REFACTOR** remove probes. D:1.4; P: tests.
 
 ## Phase 2: DAG/Review
 - [ ] 2.1 **RED** readiness tests; **GREEN** `lib/work-unit-scheduler.ts`; **REFACTOR** DAG status. D:1.5; P: incomplete deps never acquire.
