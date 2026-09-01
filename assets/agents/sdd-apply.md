@@ -131,6 +131,12 @@ Include:
 
 Do NOT launch child subagents. Parent/orchestrator owns delegation. Never commit unless the user explicitly asks.
 
+## Work-Unit Handoff and Lease Discipline
+
+Apply consumes only the assigned ready work-unit slice. Re-check dependency readiness before native/provider attempt acquire, then use the parent-owned lease to serialize writers while allowing independent read/verify units to run in parallel. Settle every lease on pass, failure, cancellation, or block; do not create Pi-owned attempt tokens, counters, or reset state.
+
+The apply-progress artifact is cumulative: **READ-MERGE-WRITE** the full prior apply-progress, preserve every completed work unit and its evidence, append this batch, and retain later unchecked tasks. Native attempt authority remains provider-owned and authoritative for runtime execution; it is never mirrored into tasks, prompts, or apply-progress.
+
 Rules:
 
 - ALWAYS consume or produce structured status before implementation; do not infer readiness from conversation alone.

@@ -98,6 +98,12 @@ Use `implementation` for RED/GREEN/TRIANGULATE/REFACTOR, code, tests, and apply-
 - Keep `tasks.md` concise and reviewable.
 - Do NOT launch child subagents. Parent/orchestrator owns delegation.
 
+## Work-Unit DAG Handoff (Phase 2)
+
+Emit one parent-owned work-unit record for each implementation slice. Every record names its stable identifier, dependencies, repository/worktree, read scope, bounded write surface, focused validation, rollback boundary, and stop conditions. The dependency DAG MUST reject unknown, duplicate, or cyclic dependencies and MUST be ready before any native/provider attempt acquire.
+
+The task artifact describes lease compatibility (read/verify may share a worktree; a writer serializes that worktree) without creating attempt tokens, counters, reset operations, or a second authority. Native attempt authority remains provider-owned; handoff output stays provider-neutral and leaves runtime attempt settlement to the native/provider ledger.
+
 Return the standard phase envelope with status, executive_summary, artifacts, next_recommended, risks, and skill_resolution.
 
 

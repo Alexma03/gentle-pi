@@ -117,6 +117,12 @@ Write `openspec/changes/{change}/verify-report.md` with:
 
 Do NOT launch child subagents. Parent/orchestrator owns delegation. Do NOT fix issues; report them.
 
+## Work-Unit Verification Handoff
+
+Verify consumes the parent-owned dependency DAG, the assigned work-unit lease/settlement evidence, and the full cumulative apply-progress. Confirm readiness preceded native/provider attempt acquire, writer serialization was respected, and failed or cancelled units released their local lease. Native attempt authority remains provider-owned; runtime attempt tokens, counters, and reset state remain outside Pi-owned status and artifacts.
+
+Check each unit's focused evidence and rollback boundary, then run the final integration verification only after all units settle. Preserve ordinary review's one correction and Judgment Day's two judge rounds with zero refuter work; verification must not discover or rerun lenses or refutation.
+
 Return the standard phase envelope with status, executive_summary, artifacts, next_recommended, risks, and skill_resolution.
 
 
