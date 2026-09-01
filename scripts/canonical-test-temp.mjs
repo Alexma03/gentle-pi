@@ -1,12 +1,17 @@
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 
-// Test fixtures must compare the same path identity that Git and realpath()
-// expose. macOS reports /var/... from os.tmpdir() while canonical filesystem
-// APIs report /private/var/..., so normalize the inherited temp environment
-// before any test worker or child process creates a fixture.
-const canonicalTempRoot = realpathSync(tmpdir());
+// macOS reports /var/... from os.tmpdir() while canonical filesystem APIs
+// report /private/var/.... Normalize that platform alias before any test
+// worker creates a fixture, but retain native temp-path identity elsewhere
+// (notably Windows, where realpath can return an 8.3 short path).
+export function canonicalTestTempRoot(platform, tempRoot) {
+	return platform === "darwin" ? realpathSync(tempRoot) : tempRoot;
+}
 
-process.env.TMPDIR = canonicalTempRoot;
-process.env.TMP = canonicalTempRoot;
-process.env.TEMP = canonicalTempRoot;
+if (process.platform === "darwin") {
+	const canonicalTempRoot = canonicalTestTempRoot(process.platform, tmpdir());
+	process.env.TMPDIR = canonicalTempRoot;
+	process.env.TMP = canonicalTempRoot;
+	process.env.TEMP = canonicalTempRoot;
+}

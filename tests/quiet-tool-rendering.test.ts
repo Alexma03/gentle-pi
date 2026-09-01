@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { initTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { imageFallback, visibleWidth } from "@earendil-works/pi-tui";
@@ -143,8 +144,9 @@ test("quiet tool rendering registers noisy built-in tools", () => {
 
 test("quiet tool execution uses the tool-call cwd", async () => {
 	const tool = registeredQuietTools().get("bash");
-	const output = extractTextContent(await tool.execute("tool-call", { command: "pwd" }, new AbortController().signal, undefined, { cwd: "/tmp" })).trim();
-	assert.equal(output, realpathSync("/tmp"));
+	const cwd = tmpdir();
+	const output = extractTextContent(await tool.execute("tool-call", { command: "pwd" }, new AbortController().signal, undefined, { cwd })).trim();
+	assert.equal(output, realpathSync(cwd));
 	assert.notEqual(output, process.cwd());
 });
 
