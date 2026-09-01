@@ -116,7 +116,7 @@ function normalizeProviderStatus(value: unknown): SubagentRuntimeStatusV1["statu
 
 function providerId(value: unknown): string | undefined {
 	if (!isRecord(value)) return undefined;
-	for (const key of ["runId", "id", "asyncId", "requestId"]) {
+	for (const key of ["runId", "id", "asyncId"]) {
 		if (validId(value[key])) return value[key];
 	}
 	for (const key of ["details", "result", "data"]) {
@@ -145,6 +145,14 @@ function strings(value: unknown): readonly string[] {
 	return value.filter((item): item is string => typeof item === "string" && item.length > 0).slice(0, 256);
 }
 
+function strictStrings(value: unknown, label: string): readonly string[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.length > 256 || value.some((item) => typeof item !== "string" || item.length === 0)) {
+		throw new NicobailonAdapterError("invalid_provider_status", `Nicobailon completion ${label} is malformed.`);
+	}
+	return [...value] as string[];
+}
+
 function findProviderRecord(value: unknown): Record<string, unknown> | undefined {
 	if (!isRecord(value)) return undefined;
 	if (Object.keys(value).some((key) => PROVIDER_STATUS_KEYS.has(key))) return value;
@@ -168,6 +176,28 @@ function resultFromProvider(value: unknown, fallbackStatus?: unknown): SubagentR
 	const summary = providerText(record) ?? "";
 	const evidence = strings(record.evidence);
 	const blockers = strings(record.blockers);
+	return assertSubagentResultV1({ status, summary, evidence, blockers });
+}
+
+function completionFromProvider(value: unknown, expectedId: string): SubagentResultV1 {
+	const parsed = parseJsonText(value);
+	const record = findProviderRecord(parsed);
+	const id = providerId(parsed);
+	if (!record || id !== expectedId) {
+		throw new NicobailonAdapterError("invalid_provider_status", "Nicobailon completion identity is missing or does not match the requested run.");
+	}
+	const rawStatus = record.status ?? record.state;
+	if (typeof rawStatus !== "string") {
+		throw new NicobailonAdapterError("invalid_provider_status", "Nicobailon completion did not contain a terminal status.");
+	}
+	const status = normalizeProviderStatus(rawStatus);
+	if (!TERMINAL_STATUS.has(status)) {
+		throw new NicobailonAdapterError("invalid_provider_status", "Nicobailon completion reported a nonterminal status.");
+	}
+	const resultRecord = isRecord(record.result) ? record.result : record;
+	const summary = providerText(resultRecord) ?? "";
+	const evidence = strictStrings(resultRecord.evidence, "evidence");
+	const blockers = strictStrings(resultRecord.blockers, "blockers");
 	return assertSubagentResultV1({ status, summary, evidence, blockers });
 }
 
@@ -220,6 +250,7 @@ export class NICObailonSubagentAdapter implements SubagentRuntimeAdapterV1 {
 	private negotiation: Promise<SubagentRuntimeCapabilitiesV1> | undefined;
 	private readonly readyPayloads: unknown[] = [];
 	private readonly completions = new Map<string, SubagentResultV1>();
+	private readonly completionErrors = new Map<string, NicobailonAdapterError>();
 	private readonly waiters = new Map<string, Set<{ resolve: (result: SubagentResultV1) => void; reject: (error: unknown) => void }>>();
 	private readonly unsubscribers: Array<() => void> = [];
 	private readonly requestTimeoutMs: number;
@@ -240,6 +271,10 @@ export class NICObailonSubagentAdapter implements SubagentRuntimeAdapterV1 {
 	}
 
 	private async request(method: NicobailonRpcMethodV1, params?: unknown, signal?: AbortSignal): Promise<unknown> {
+		return (await this.requestWithId(method, params, signal)).data;
+	}
+
+	private async requestWithId(method: NicobailonRpcMethodV1, params?: unknown, signal?: AbortSignal): Promise<{ data: unknown; requestId: string }> {
 		if (this.disposed) throw new NicobailonAdapterError("rpc_error", "Nicobailon subagent adapter is disposed.");
 		const requestId = this.requestId();
 		if (!validId(requestId)) throw new NicobailonAdapterError("invalid_reply", "Nicobailon RPC request id is malformed.");
@@ -285,7 +320,7 @@ export class NICObailonSubagentAdapter implements SubagentRuntimeAdapterV1 {
 					reject(new NicobailonAdapterError("invalid_reply", `Nicobailon RPC ${method} reply omitted data.`, requestId));
 					return;
 				}
-				resolve(payload.data);
+				resolve({ data: payload.data, requestId });
 			});
 			signal?.addEventListener("abort", abort, { once: true });
 			try {
@@ -300,14 +335,26 @@ export class NICObailonSubagentAdapter implements SubagentRuntimeAdapterV1 {
 	}
 
 	private handleCompletion(payload: unknown): void {
-		const id = completionId(payload);
+		const parsed = parseJsonText(payload);
+		const id = completionId(parsed);
 		if (!id) return;
-		const result = resultFromProvider(parseJsonText(payload));
-		this.completions.set(id, result);
 		const waiters = this.waiters.get(id);
-		if (!waiters) return;
-		this.waiters.delete(id);
-		for (const waiter of waiters) waiter.resolve(result);
+		try {
+			const result = completionFromProvider(parsed, id);
+			this.completions.set(id, result);
+			this.completionErrors.delete(id);
+			if (!waiters) return;
+			this.waiters.delete(id);
+			for (const waiter of waiters) waiter.resolve(result);
+		} catch (error) {
+			const adapterError = error instanceof NicobailonAdapterError
+				? error
+				: new NicobailonAdapterError("invalid_provider_status", error instanceof Error ? error.message : String(error));
+			this.completionErrors.set(id, adapterError);
+			if (!waiters) return;
+			this.waiters.delete(id);
+			for (const waiter of waiters) waiter.reject(adapterError);
+		}
 	}
 
 	async negotiate(): Promise<SubagentRuntimeCapabilitiesV1> {
@@ -337,12 +384,15 @@ export class NICObailonSubagentAdapter implements SubagentRuntimeAdapterV1 {
 		const params = {
 			agent: options.role,
 			task: task.task,
+			context: task.context,
+			dependencies: [...task.dependencies],
+			expectedOutcome: task.expectedOutcome,
 			async: true,
 			...(options.cwd === undefined ? {} : { cwd: options.cwd }),
 		};
-		const data = await this.request("spawn", params, options.signal);
-		const id = providerId(data);
-		if (!id) throw new NicobailonAdapterError("missing_handle", "Nicobailon spawn reply did not contain a run id.");
+		const reply = await this.requestWithId("spawn", params, options.signal);
+		const id = providerId(reply.data);
+		if (!id || id === reply.requestId) throw new NicobailonAdapterError("missing_handle", "Nicobailon spawn reply did not contain a distinct provider run id.", reply.requestId);
 		return { id };
 	}
 
@@ -352,6 +402,8 @@ export class NICObailonSubagentAdapter implements SubagentRuntimeAdapterV1 {
 		const data = parseJsonText(await this.request("status", { id: handle.id }, signal));
 		const record = findProviderRecord(data);
 		if (!record) throw new NicobailonAdapterError("invalid_provider_status", "Nicobailon status reply did not contain a status object.");
+		const returnedId = providerId(data);
+		if (returnedId !== handle.id) throw new NicobailonAdapterError("invalid_provider_status", "Nicobailon status reply belongs to a different run.");
 		const status = normalizeProviderStatus(record.status ?? record.state);
 		const result = record.result !== undefined ? resultFromProvider(record.result, status) : TERMINAL_STATUS.has(status) ? resultFromProvider(record, status) : undefined;
 		return {
@@ -367,6 +419,8 @@ export class NICObailonSubagentAdapter implements SubagentRuntimeAdapterV1 {
 
 	async waitForCompletion(handle: SubagentRuntimeHandleV1, signal?: AbortSignal): Promise<SubagentResultV1> {
 		if (!validId(handle?.id)) throw new NicobailonAdapterError("missing_handle", "Nicobailon completion requires a valid handle id.");
+		const completionError = this.completionErrors.get(handle.id);
+		if (completionError !== undefined) return Promise.reject(completionError);
 		const cached = this.completions.get(handle.id);
 		if (cached !== undefined) return assertSubagentResultV1(cached);
 		return new Promise((resolve, reject) => {
@@ -398,6 +452,7 @@ export class NICObailonSubagentAdapter implements SubagentRuntimeAdapterV1 {
 			for (const waiter of waiters) waiter.reject(new NicobailonAdapterError("cancelled", "Nicobailon adapter was disposed."));
 		}
 		this.waiters.clear();
+		this.completionErrors.clear();
 	}
 }
 
