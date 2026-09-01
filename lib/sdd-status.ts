@@ -114,6 +114,83 @@ export interface SddStatus {
 	isNonAuthoritative: boolean;
 }
 
+export type SddWorkUnitStateV1 = "pending" | "ready" | "blocked" | "leased" | "completed" | "failed" | "cancelled";
+
+/** Artifact-only readiness projection used by structured parent routing. */
+export interface SddWorkUnitReadinessV1 {
+	id: string;
+	state: SddWorkUnitStateV1;
+	dependencies: string[];
+	incompleteDependencies: string[];
+	conflict: boolean;
+	/** Provider/native execution may be considered only after this is true. */
+	providerReady: boolean;
+}
+
+export interface SddStatusRoutingV1 {
+	schemaName: "gentle-pi.sdd-status-routing";
+	schemaVersion: 1;
+	changeName: string | null;
+	nextPhase: string;
+	blockedReasons: string[];
+	workUnits: readonly SddWorkUnitReadinessV1[];
+	/** This projection never carries runtime authority or delivery authority. */
+	artifactOnly: true;
+}
+
+export class SddStatusRoutingError extends Error {
+	constructor(message: string) {
+		super(`sdd-status-routing-invalid: ${message}`);
+		this.name = "SddStatusRoutingError";
+	}
+}
+
+const SDD_WORK_UNIT_STATES: readonly SddWorkUnitStateV1[] = ["pending", "ready", "blocked", "leased", "completed", "failed", "cancelled"];
+
+function detachWorkUnitReadiness(value: SddWorkUnitReadinessV1): SddWorkUnitReadinessV1 {
+	if (!value || typeof value !== "object" || typeof value.id !== "string" || value.id.trim() !== value.id || value.id.length === 0) {
+		throw new SddStatusRoutingError("work-unit readiness requires a canonical identifier");
+	}
+	if (!SDD_WORK_UNIT_STATES.includes(value.state) || !Array.isArray(value.dependencies) || !Array.isArray(value.incompleteDependencies) || value.dependencies.some((entry) => typeof entry !== "string") || value.incompleteDependencies.some((entry) => typeof entry !== "string") || typeof value.conflict !== "boolean" || typeof value.providerReady !== "boolean") {
+		throw new SddStatusRoutingError(`work-unit ${value.id} readiness is malformed`);
+	}
+	return Object.freeze({
+		id: value.id,
+		state: value.state,
+		dependencies: Object.freeze([...value.dependencies]),
+		incompleteDependencies: Object.freeze([...value.incompleteDependencies]),
+		conflict: value.conflict,
+		providerReady: value.providerReady,
+	});
+}
+
+/**
+ * Project artifact status plus parent-owned DAG readiness into one bounded
+ * routing DTO. Attempt tokens/counters and RDD delivery authority are
+ * intentionally not representable in this shape.
+ */
+export function resolveSddStatusRouting(status: SddStatus, workUnits: readonly SddWorkUnitReadinessV1[] = []): SddStatusRoutingV1 {
+	if (!status || typeof status !== "object" || typeof status.nextRecommended !== "string") {
+		throw new SddStatusRoutingError("status must include nextRecommended");
+	}
+	if (!Array.isArray(workUnits)) throw new SddStatusRoutingError("workUnits must be an array");
+	const detached = workUnits.map(detachWorkUnitReadiness).sort((left, right) => left.id.localeCompare(right.id));
+	if (new Set(detached.map(({ id }) => id)).size !== detached.length) throw new SddStatusRoutingError("work-unit readiness contains duplicate identifiers");
+	const knownPhase = ["sdd-apply", "sdd-verify", "sdd-sync", "sdd-archive"].includes(status.nextRecommended);
+	const nextPhase = knownPhase ? status.nextRecommended : status.blockedReasons.length > 0 ? "resolve-blockers" : status.nextRecommended;
+	return Object.freeze({
+		schemaName: "gentle-pi.sdd-status-routing",
+		schemaVersion: 1,
+		changeName: status.changeName,
+		nextPhase,
+		blockedReasons: Object.freeze([...status.blockedReasons]),
+		workUnits: Object.freeze(detached),
+		artifactOnly: true,
+	});
+}
+
+export const routeSddStatus = resolveSddStatusRouting;
+
 export interface ResolveSddStatusOptions {
 	cwd: string;
 	changeName?: string;
@@ -323,6 +400,7 @@ export function renderPhaseInstructions(status: SddStatus): SddPhaseInstructions
 				? "All implementation tasks are checked complete; do not edit."
 				: "Implement only unchecked implementation-owned tasks from the tasks artifact.",
 			`Implementation tasks: ${status.taskProgress.complete}/${status.taskProgress.total} complete`,
+			"DAG readiness must be proven before provider/native execution acquire; report work-unit leases separately from artifact status.",
 			"Update persisted task checkboxes for implementation-owned tasks immediately after completing each task.",
 			...status.taskProgress.unchecked.map((line) => `Remaining implementation task: ${line}`),
 			`Deferred parent lifecycle actions: ${status.deferredParentActions.complete}/${status.deferredParentActions.total} complete`,
@@ -333,6 +411,7 @@ export function renderPhaseInstructions(status: SddStatus): SddPhaseInstructions
 			`Change: ${change}`,
 			`State: ${status.dependencies.verify}`,
 			"Verify task completion, spec coverage, implementation correctness, design coherence, and tests when available.",
+			"Consume settled work-unit evidence and final integration verification; status remains artifact-only and RDD-independent.",
 			"Unchecked implementation tasks are CRITICAL archive blockers.",
 			...status.taskProgress.unchecked.map((line) => `Unchecked blocker: ${line}`),
 		],

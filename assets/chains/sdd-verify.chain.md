@@ -20,6 +20,8 @@ progress: true
 
 Implement pending approved tasks for {task}; update OpenSpec tasks and apply-progress with strict TDD evidence.
 
+Apply only the dependency-ready work-unit slice, with one writer lease per bound worktree and parallel read/verify units where safe. Read-merge-write the cumulative apply-progress; native/provider attempt authority is separate and remains authoritative.
+
 ## sdd-verify
 
 reads: init.md+apply-progress.md
@@ -28,6 +30,8 @@ outputMode: file-only
 progress: true
 
 Run focused and full verification for {task} using the apply-progress and project artifacts. Include review/judgment blockers.
+
+Consume the previous apply-progress before running the DAG readiness and final verification checks. Do not discover or rerun review lenses or refutation; report unresolved unit blockers instead.
 
 ## sdd-sync
 

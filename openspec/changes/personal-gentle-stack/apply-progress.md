@@ -151,3 +151,122 @@ The boundary includes only `lib/subagent-runtime.ts`, `lib/nicobailon-subagent-a
 - **PR1 blockers:** none observed; the complete test command, provider-contract check, runtime-module check, and harness pass.
 - **Deferred work:** tasks 2.1–4.6 remain unchecked by design.
 - **Next recommended:** parent consumes this completed PR1 handoff and proceeds to the next chained slice only after its own routing checks.
+
+## PR2 / Phase 2 — DAG/Review
+
+This section is appended to the complete PR1 record above. It preserves all PR1 evidence and records the completed PR2 child slice only.
+
+- **Change:** `personal-gentle-stack`
+- **Phase:** Phase 2 — DAG/Review
+- **Slice:** PR2, `feature-branch-chain` child of PR1, with `delivery_strategy: ask-on-risk`; the workload decision was already resolved as `Decision needed before apply: No`.
+- **Worktree:** `/home/alex/Projects/forks/gentle-pi-worktrees/pr2-dag-review`
+- **Branch:** `codex/personal-gentle-stack-pr2-dag-review`
+- **Base:** `0ee6ae07`
+- **Artifact store:** hybrid (OpenSpec plus Engram mirror owned by the parent orchestrator)
+- **Strict TDD:** enabled; exact full command is `pnpm test`.
+- **Native attempt authority:** the parent orchestrator supplied the pre-acquired native attempt; this writer did not acquire, settle, reset, or create Pi-owned attempt state.
+
+### Cumulative status
+
+PR1 tasks 1.1–1.5 remain complete with all prior evidence retained above. PR2 tasks 2.1–2.7 are complete in this slice. Phase 3 and Phase 4 tasks remain unchecked and were not implemented.
+
+| Task | Status | Commit(s) | Scope |
+| --- | --- | --- | --- |
+| 2.1 | complete | `737450b0`, `b85b67c9` | Dependency-safe DAG graph validation, deterministic readiness, completed-layer exclusion, and readiness-before-native-acquire checks. |
+| 2.2 | complete | `737450b0`, `b85b67c9` | Work-unit leases, read/verify parallelism, writer/worktree serialization, idempotent leases and settlement, failure/cancel release, and final-verification evidence. |
+| 2.3 | complete | `820f7f36`, `ffe901ba` | Provider-neutral pre-start candidate decoration, immutable registry binding, detached task/context projection, and fail-closed missing-registry/conflict handling. |
+| 2.4 | complete | `672b4d87` | Finding- and repository-path-bounded one-correction lifecycle with ordinary/Judgment Day semantics, no changed-line budget, lens rerun, or refuter discovery. |
+| 2.5 | complete | `c678d8f0`, `53316851` | Provider-neutral orchestrator DAG/lease contract and gatekeeper rerun routing subordinate to native acquire. |
+| 2.6 | complete | `a25e75d5` | `sdd-tasks`, `sdd-apply`, and `sdd-verify` work-unit ownership, cumulative handoff, and provider-attempt authority assets. |
+| 2.7 | complete | final PR2 commit below | `sdd-full`/`sdd-verify` chain assets and artifact-only, RDD-independent structured status routing. |
+
+### Implementation evidence
+
+- `lib/work-unit-scheduler.ts` and `tests/work-unit-scheduler.test.ts` define and exercise unknown/duplicate/cyclic dependency rejection, deterministic ready selection, readiness-before-acquire, safe read/verify parallelism, writer serialization, isolated worktrees, duplicate/idempotent leases, settlement release, conflicting settlement rejection, and final-verification idempotency.
+- `lib/review-candidate-view.ts`, `extensions/gentle-ai.ts`, and `tests/review-candidate-decoration.test.ts` add the provider-neutral pre-start decoration seam. Review tasks resolve the current immutable registry candidate before the runtime starts; missing registry, drift, conflicting candidate text, invalid roles, and unsafe task shapes fail closed. The legacy native `subagent_run` injection hook is retained only for compatibility and is not the new orchestration seam.
+- `lib/review-correction-lifecycle.ts` and `tests/review-correction-scope.test.ts` require the exact corroborated finding set, safe repository-relative path subset, and positive forecast before creating a detached bounded plan. The plan keeps ordinary and Judgment Day correction/validation semantics while explicitly disabling lens/refuter reruns and changed-line quotas.
+- `lib/sdd-status.ts` and `tests/sdd-status-routing.test.ts` add a separate structured work-unit readiness projection. It is artifact-only and RDD-independent, rejects duplicate/malformed units, deterministically sorts detached state, and never carries attempt tokens, lease tokens, counters, or reset operations.
+- `assets/orchestrator-delegation.md`, `assets/sdd-orchestrator-workflow.md`, `assets/agents/{sdd-tasks,sdd-apply,sdd-verify}.md`, `assets/chains/{sdd-full,sdd-verify}.chain.md`, and `assets/support/sdd-status-contract.md` document the same contracts for provider-neutral orchestration, handoff, chaining, and status routing.
+
+### TDD cycle evidence
+
+Each PR2 behavior followed RED → GREEN → TRIANGULATE → REFACTOR. The RED evidence below records the first failing condition rather than a fabricated count when the initial failure was an import/export or contract absence.
+
+| Work unit | RED | GREEN | TRIANGULATE / REFACTOR |
+| --- | --- | --- | --- |
+| 2.1 | `node --experimental-strip-types --test tests/work-unit-scheduler.test.ts` first failed with `ERR_MODULE_NOT_FOUND` for the new scheduler module. | Final scheduler run: **11 tests, 11 passed, 0 failed**. | Readiness, dependency, lease, and integration cases remained deterministic and pure; completed IDs are excluded from later ready layers. |
+| 2.2 | The same initial scheduler RED exposed the absent lease/settlement implementation before lease behavior could run. | Final scheduler run: **11 tests, 11 passed, 0 failed**. | Existing runtime/guard/policy coverage plus the scheduler suite verified provider-owned attempts, safe parallelism, writer serialization, release, and idempotency. |
+| 2.3 | `tests/review-candidate-decoration.test.ts` first failed because `decorateReviewCandidateTask` was not exported. | Candidate decoration plus selected extension integration: **26 tests, 26 passed, 0 failed**. | Candidate/status/controller/policy suite: **185 tests, 185 passed, 0 failed**; immutable projection has no live/provider fallback. |
+| 2.4 | Scope tests first failed because `CorrectionScopeError` and the positive-forecast contract were absent; the forecast RED was **1 failed / 5 passed**. | Correction scope plus existing lifecycle: **20 tests, 20 passed, 0 failed**. | Ordinary and Judgment Day policy suites passed in the combined 185-test triangulation; one detached plan is bounded to corroborated findings and paths. |
+| 2.5 | The new orchestration contract test initially had **0 passing assertions** because the required DAG/lease asset markers were absent. | Asset/orchestration contract: **4 tests, 4 passed, 0 failed**. | Native attempt-authority regression: **17 tests, 17 passed, 0 failed** after the gatekeeper rerun sentence was bound to fresh native acquire. |
+| 2.6 | The same contract RED covered the missing phase-agent handoff markers. | Asset/orchestration contract: **4 tests, 4 passed, 0 failed** with agent handoffs present. | Full package tests and generated-asset/language checks passed; handoffs preserve cumulative apply-progress and forbid Pi-owned attempt state. |
+| 2.7 | Status-routing tests first failed on the missing structured routing export and the contract marker was absent. | Status-routing plus orchestration contract: **7 tests, 7 passed, 0 failed**. | Existing SDD status tests and the full package run verified artifact-only routing, no attempt fields, and no Phase 3/4 drift. |
+
+### Verification evidence
+
+Focused checks:
+
+```text
+node --experimental-strip-types --test tests/work-unit-scheduler.test.ts
+ℹ tests 11
+ℹ pass 11
+ℹ fail 0
+
+node --experimental-strip-types --test tests/review-candidate-decoration.test.ts tests/gentle-ai.test.ts --test-name-pattern='review delegation decorates|provider-neutral review decoration'
+ℹ tests 26
+ℹ pass 26
+ℹ fail 0
+
+node --experimental-strip-types --test tests/review-correction-scope.test.ts tests/review-correction-lifecycle.test.ts
+ℹ tests 20
+ℹ pass 20
+ℹ fail 0
+
+node --experimental-strip-types --test tests/work-unit-orchestration-contract.test.ts tests/sdd-status-routing.test.ts
+ℹ tests 7
+ℹ pass 7
+ℹ fail 0
+
+node --experimental-strip-types --test tests/native-sdd-attempt-authority.test.ts
+ℹ tests 17
+ℹ pass 17
+ℹ fail 0
+```
+
+The combined candidate/status/controller/correction/policy check passed **185 tests, 185 passed, 0 failed**. The final full repository command exited **0**:
+
+```text
+pnpm test
+ℹ tests 1204
+ℹ pass 1203
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+```
+
+The companion checks also exited **0**:
+
+- `pnpm run check:provider-contract` — provider contract mirror passed (contract 1.1.0, 8 bundle entries, 2 generated baselines, acquisition `field-test-local`).
+- `pnpm run check:runtime-modules` — runtime matches TypeScript sources (4 modules).
+- `pnpm run test:harness` — exit 0.
+- `git diff --check` — clean.
+
+### Rollback boundary
+
+PR2 can be reverted in reverse order without touching Phase 3/4 or the PR1 foundation:
+
+1. final PR2 commit — chain/status assets, `lib/sdd-status.ts`, routing/contract tests, and Phase 2 task/progress records;
+2. `a25e75d5` — phase-agent handoffs;
+3. `53316851` — native-acquire gatekeeper rerun binding;
+4. `c678d8f0` — orchestrator DAG/lease assets;
+5. `672b4d87` — bounded correction scope;
+6. `ffe901ba` — fail-closed candidate registry;
+7. `820f7f36` — provider-neutral candidate decoration;
+8. `b85b67c9` — completed-layer/final-verification scheduler correction;
+9. `737450b0` — scheduler graph and leases.
+
+No push, PR, merge, or release operation was performed. The parent orchestrator retains native attempt settlement authority.
+
+### Remaining unchecked tasks
+
+The following tasks remain unchecked and intentionally outside this PR2 slice: **3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 4.1, 4.2, 4.3, 4.4, 4.5, and 4.6**.

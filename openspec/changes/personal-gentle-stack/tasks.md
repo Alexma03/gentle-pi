@@ -33,13 +33,13 @@ Chain strategy: feature-branch-chain
 - [x] 1.5 **RED** `tests/gentle-ai.test.ts` routing; **GREEN** `extensions/gentle-ai.ts`; **REFACTOR** remove probes. D:1.4; P: tests.
 
 ## Phase 2: DAG/Review
-- [ ] 2.1 **RED** readiness tests; **GREEN** `lib/work-unit-scheduler.ts`; **REFACTOR** DAG status. D:1.5; P: incomplete deps never acquire.
-- [ ] 2.2 **RED** lease conflict/parallel tests; **GREEN** leases/settle; **REFACTOR** serialization. D:2.1; P: safe concurrency.
-- [ ] 2.3 **RED** immutable identity/no-fallback tests; **GREEN** `lib/review-candidate-view.ts`, `lib/sdd-status.ts`; **REFACTOR** resolver errors. D:2.2; P: pre-actor denial.
-- [ ] 2.4 **RED** finding/path/RDD tests; **GREEN** `lib/review-correction-lifecycle.ts`; **REFACTOR** Judgment Day. D:2.3; P: no rerun/discovery.
-- [ ] 2.5 **RED/GREEN/REFACTOR** `assets/orchestrator-delegation.md`, `assets/sdd-orchestrator-workflow.md`. D:2.4; P: provider-neutral contracts.
-- [ ] 2.6 **RED/GREEN/REFACTOR** `assets/agents/{sdd-tasks,sdd-apply,sdd-verify}.md`. D:2.5; P: handoffs.
-- [ ] 2.7 **RED/GREEN/REFACTOR** `assets/chains/{sdd-full,sdd-verify}.chain.md`, `assets/support/sdd-status-contract.md`. D:2.6; P: status routing.
+- [x] 2.1 **RED** readiness tests; **GREEN** `lib/work-unit-scheduler.ts`; **REFACTOR** DAG status. D:1.5; P: incomplete deps never acquire.
+- [x] 2.2 **RED** lease conflict/parallel tests; **GREEN** leases/settle; **REFACTOR** serialization. D:2.1; P: safe concurrency.
+- [x] 2.3 **RED** immutable identity/no-fallback tests; **GREEN** `lib/review-candidate-view.ts`, `lib/sdd-status.ts`; **REFACTOR** resolver errors. D:2.2; P: pre-actor denial.
+- [x] 2.4 **RED** finding/path/RDD tests; **GREEN** `lib/review-correction-lifecycle.ts`; **REFACTOR** Judgment Day. D:2.3; P: no rerun/discovery.
+- [x] 2.5 **RED/GREEN/REFACTOR** `assets/orchestrator-delegation.md`, `assets/sdd-orchestrator-workflow.md`. D:2.4; P: provider-neutral contracts.
+- [x] 2.6 **RED/GREEN/REFACTOR** `assets/agents/{sdd-tasks,sdd-apply,sdd-verify}.md`. D:2.5; P: handoffs.
+- [x] 2.7 **RED/GREEN/REFACTOR** `assets/chains/{sdd-full,sdd-verify}.chain.md`, `assets/support/sdd-status-contract.md`. D:2.6; P: status routing.
 
 ## Phase 3: Surface
 - [ ] 3.1 **RED/GREEN/REFACTOR** GGA inventory/removal in assets/docs/installer. D:2.7; P: forbidden scan.

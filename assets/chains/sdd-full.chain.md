@@ -69,6 +69,8 @@ progress: true
 
 Implement only approved implementation-owned tasks for {task}; enforce strict TDD when active and stop before writing if workload decisions are unresolved. Update OpenSpec tasks and apply-progress with evidence. When implementation completes, continue directly to independent verification. The SDD route is apply -> verify -> sync -> archive; no RDD authority, receipt, or delivery gate is required between phases.
 
+Before each runtime-bearing slice, validate the DAG readiness gate and settle its parent-owned lease. Use the feature-branch-chain boundary when selected: writers serialize their bound worktree, read/verify units may run in parallel, and only settled units proceed to final integration.
+
 ## sdd-verify
 
 reads: proposal.md+spec.md+design.md+tasks.md+apply-progress.md
@@ -77,6 +79,8 @@ outputMode: file-only
 progress: true
 
 Verify {task} against specs, design, tasks, implementation, apply-progress, strict TDD evidence, assertion quality, and review workload boundaries.
+
+Verification consumes the full cumulative apply-progress and all settled work-unit evidence. Run final integration verification only after DAG readiness is complete; preserve the ordinary/Judgment Day review semantics without starting lens or refuter reruns.
 
 ## sdd-sync
 

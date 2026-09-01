@@ -134,3 +134,7 @@ Every command or agent that acts on a change MUST show or consume status before 
 - task progress and unchecked task list when tasks exist;
 - next recommended action;
 - any `actionContext` or edit-root warnings.
+
+## Work-Unit Readiness Projection
+
+Status may describe artifact-level work-unit readiness and the next bounded route (`pending`, `ready`, `leased`, `completed`, `failed`, or `cancelled`) so the parent can route DAG slices deterministically. This projection is artifact-only: it reports dependencies, local lease conflicts, and evidence presence without carrying runtime attempt tokens, attempt counters, or reset state. Native/provider attempt authority remains separate and authoritative, and status MUST never embed those values.
