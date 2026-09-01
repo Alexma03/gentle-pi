@@ -106,6 +106,23 @@ test("workspace guard denies destructive and ambiguous push forms", () => {
 	}
 });
 
+test("workspace guard fails closed for wrapped commands, bare sensitive files, and attached selectors", () => {
+	const { nested, outside } = fixture();
+	const guard = createWorkspaceGuard(bindWorkspace(nested));
+	for (const [command, code] of [
+		["cat .env", "sensitive-path"],
+		["env rm -rf ./src", "destructive-command"],
+		["sudo git reset --hard", "destructive-command"],
+		[`env git --work-tree=${outside} status`, "outside-worktree"],
+		[`git -C${outside} status`, "outside-worktree"],
+		["env git push", "ambiguous-command"],
+	] as const) {
+		const result = guard.checkCommand(command);
+		assert.equal(result.allowed, false, command);
+		assert.equal(result.code, code, command);
+	}
+});
+
 test("workspace guard rejects a nested repository instead of treating it as the bound worktree", () => {
 	const { root, nested } = fixture();
 	const nestedRepo = join(root, "nested-repo");
@@ -132,5 +149,15 @@ test("workspace guard rejects a binding whose declared cwd is symlinked", () => 
 		worktree: root,
 		commonDir: join(root, ".git"),
 		repositoryId: join(root, ".git"),
+	}), WorkspaceGuardError);
+});
+
+test("workspace guard rejects a binding with a mismatched repository identity", () => {
+	const { root, nested } = fixture();
+	assert.throws(() => createWorkspaceGuard({
+		cwd: nested,
+		worktree: root,
+		commonDir: join(root, ".git"),
+		repositoryId: join(root, "other.git"),
 	}), WorkspaceGuardError);
 });
