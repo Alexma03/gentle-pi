@@ -544,11 +544,8 @@ async function run() {
 				{ toolName: "subagent_run", input: writerDispatch },
 				createCtx(toolCwd),
 			);
-			assert.equal(writerResult?.block, true, `${label} writer scope must be blocked before dispatch`);
-			assert.match(writerResult?.reason ?? "", /derive|map/i);
-			assert.match(writerResult?.reason ?? "", /relaunch/i);
-			assert.match(writerResult?.reason ?? "", /do not ask.*human.*paths or globs/i);
-			assert.equal(writerDispatch.task, task, "writer guard must not mutate child input");
+			assert.equal(writerResult, undefined, `${label} legacy writer dispatch must not be intercepted`);
+			assert.equal(writerDispatch.task, task, "legacy delegation hook must not mutate child input");
 		}
 
 		const scopedWriterDispatch = {
@@ -606,7 +603,7 @@ async function run() {
 			],
 		]) {
 			const writerResult = await toolHook({ toolName: "subagent_run", input }, createCtx(toolCwd));
-			assert.equal(writerResult?.block, true, `${label} must block writer dispatch`);
+			assert.equal(writerResult, undefined, `${label} legacy writer dispatch must not be intercepted`);
 		}
 		assert.equal(
 			await toolHook(

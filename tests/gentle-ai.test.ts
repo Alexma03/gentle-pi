@@ -12,7 +12,7 @@ import type {
 	Theme,
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
+import gentleAi, { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
 import type { ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 import { MANDATORY_SUBAGENT_CAPABILITIES, type SubagentResultV1, type SubagentRuntimeCapabilitiesV1, type SubagentRuntimeHandleV1, type SubagentRuntimeStatusV1, type SubagentTaskV1 } from "../lib/subagent-runtime.ts";
@@ -48,7 +48,7 @@ function registeredGentleTools(): Map<string, any> {
 			tools.set(tool.name, tool);
 		},
 	} as unknown as ExtensionAPI;
-	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	createGentleAiExtension({ nativeReviewCli: null, subagentRuntime: null })(pi);
 	return tools;
 }
 
@@ -246,6 +246,116 @@ test("provider-neutral delegation rejects provider-specific fields before crossi
 		provider: "forbidden",
 	}, undefined, undefined, { cwd: root, hasUI: false } as unknown as ExtensionContext), /unsupported|provider|field/i);
 	assert.equal(starts, 0);
+});
+
+test("default extension wires the Pi event bus through the Nicobailon runtime", async () => {
+	const tools = new Map<string, any>();
+	const events = new Map<string, Set<(payload: unknown) => void>>();
+	const root = process.cwd();
+	const on = (event: string, handler: (payload: unknown) => void): (() => void) => {
+		const handlers = events.get(event) ?? new Set();
+		handlers.add(handler);
+		events.set(event, handlers);
+		return () => handlers.delete(handler);
+	};
+	const emit = (event: string, payload: unknown): void => {
+		for (const handler of [...(events.get(event) ?? [])]) handler(payload);
+	};
+	const pi = {
+		events: { on, emit },
+		on() {},
+		registerCommand() {},
+		registerTool(tool: { name: string }) {
+			tools.set(tool.name, tool);
+		},
+	} as unknown as ExtensionAPI;
+	emit("subagents:rpc:v1:ready", {
+		version: 1,
+		methods: ["ping", "spawn", "status", "stop"],
+		capabilities: { spawn: true, asyncSpawn: true, status: true, stop: true },
+		events: {
+			ready: "subagents:rpc:v1:ready",
+			request: "subagents:rpc:v1:request",
+			replyPrefix: "subagents:rpc:v1:reply:",
+			asyncComplete: "subagent:async-complete",
+		},
+	});
+	// The host must answer requests after extension registration; production
+	// wiring is verified by observing the adapter's event-bus requests.
+	on("subagents:rpc:v1:request", (payload) => {
+		const request = payload as { requestId: string; method: string };
+		const data = request.method === "ping"
+			? {
+				version: 1,
+				methods: ["ping", "spawn", "status", "stop"],
+				capabilities: { spawn: true, asyncSpawn: true, status: true, stop: true },
+				events: { asyncComplete: "subagent:async-complete" },
+			}
+			: request.method === "spawn"
+				? { runId: "default-runtime-1", state: "queued" }
+				: { runId: "default-runtime-1", state: "completed", summary: "default wired" };
+		emit(`subagents:rpc:v1:reply:${request.requestId}`, {
+			version: 1,
+			requestId: request.requestId,
+			method: request.method,
+			success: true,
+			data,
+		});
+	});
+	gentleAi(pi);
+	const delegate = tools.get("gentle_subagent");
+	assert.ok(delegate, "default extension must register provider-neutral delegation");
+	const output = await delegate.execute("default-call", {
+		role: "gentle-ai-worker",
+		task: "Run default wiring",
+		context: "Use the event bus",
+		dependencies: ["runtime"],
+		expectedOutcome: "A result",
+	}, undefined, undefined, { cwd: root, hasUI: false } as unknown as ExtensionContext);
+	assert.equal(JSON.parse(output.content[0].text).summary, "default wired");
+});
+
+test("workspace guard factory is bound once for the extension session", async () => {
+	const tools = new Map<string, any>();
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-guard-cache-"));
+	let bindings = 0;
+	const guard: WorkspaceGuardV1 = {
+		binding: { cwd: root, worktree: root, commonDir: root, repositoryId: root },
+		checkPath: (path) => ({ allowed: true, code: "allowed", path }),
+		assertPath: (path) => path,
+		checkCommand: (command) => ({ allowed: true, code: "allowed", command }),
+		assertCommand: (command) => command,
+	};
+	const result: SubagentResultV1 = { status: "completed", summary: "cached", evidence: [], blockers: [] };
+	const runtime = {
+		async negotiate() {},
+		async start() { return { id: "cached" }; },
+		async result() { return result; },
+		async status() { return { id: "cached", status: "completed", result }; },
+		async cancel() {},
+	} as unknown;
+	const pi = {
+		events: { on() {}, emit() {} },
+		on() {},
+		registerCommand() {},
+		registerTool(tool: { name: string }) { tools.set(tool.name, tool); },
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({
+		nativeReviewCli: null,
+		subagentRuntime: runtime as never,
+		workspaceGuard: () => { bindings += 1; return guard; },
+	})(pi);
+	const delegate = tools.get("gentle_subagent");
+	for (let index = 0; index < 2; index += 1) {
+		await delegate.execute(`cached-${index}`, {
+			role: "worker",
+			task: "task",
+			context: "",
+			dependencies: [],
+			expectedOutcome: "done",
+		}, undefined, undefined, { cwd: root, hasUI: false } as unknown as ExtensionContext);
+	}
+	assert.equal(bindings, 1);
 });
 
 test("registered Gentle Review tools render reusable rose lifecycle call rows", () => {
@@ -868,7 +978,7 @@ test("concurrent guarded confirmations coalesce the Herdr lifecycle per extensio
 			registerCommand() {},
 			registerTool() {},
 		} as unknown as ExtensionAPI;
-		createGentleAiExtension({ nativeReviewCli: null })(pi);
+		createGentleAiExtension({ nativeReviewCli: null, subagentRuntime: null })(pi);
 		return { handlers, emitted, confirmations };
 	};
 	const first = createHarness();
@@ -951,7 +1061,7 @@ test("RPIV questionnaire blockers emit only a private, balanced Herdr projection
 		registerCommand() {},
 		registerTool() {},
 	} as unknown as ExtensionAPI;
-	createGentleAiExtension({ nativeReviewCli: null })(pi);
+	createGentleAiExtension({ nativeReviewCli: null, subagentRuntime: null })(pi);
 	assert.equal(eventHandlers.size, 2);
 	assert.equal(eventHandlers.has("gentle-pi:ask-user-choice:blocked"), true);
 	assert.equal(eventHandlers.has("rpiv:ask-user:blocked"), true);
@@ -1018,7 +1128,7 @@ test("Herdr coordinates guarded confirmations and RPIV labels without inactive r
 			registerCommand() {},
 			registerTool() {},
 		} as unknown as ExtensionAPI;
-		createGentleAiExtension({ nativeReviewCli: null })(pi);
+		createGentleAiExtension({ nativeReviewCli: null, subagentRuntime: null })(pi);
 		const context = {
 			cwd: process.cwd(),
 			hasUI: true,

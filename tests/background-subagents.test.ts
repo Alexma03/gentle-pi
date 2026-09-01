@@ -23,14 +23,9 @@ import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
 // global file > env var > default off, strict schema decode, fail-closed to
 // "off" on any malformed input.
 //
-// Capability answers one question: is `subagent_run` callable? The live pi
-// tool registry answers it directly and wins when it carries any signal. With
-// no registry handle (prompt rendering outside a session, or a runtime without
-// getActiveTools) capability falls back to the installed pi-subagents package.
-// That fallback probes the package root's own package.json, NOT an `agents/`
-// subdirectory: pi-subagents-j0k3r v1.5.2 ships index.ts, src/, skills/ and
-// scripts/ and no agents/ at all, so the old agents-dir probe reported
-// "absent" on every real install and left the background policy inert.
+// Capability is reported only from the negotiated provider-neutral runtime.
+// Filesystem/package presence and Pi's active tool registry are not capability
+// evidence: the runtime must advertise the complete protocol-1 contract.
 // ---------------------------------------------------------------------------
 
 const {
@@ -38,7 +33,6 @@ const {
 	resolveBackgroundSubagentsPolicy,
 	parseBackgroundSubagentsPolicyFile,
 	resolveBackgroundSubagentsCapability,
-	readActiveToolNames,
 	renderBackgroundSubagentsStatusLine,
 	renderOrchestratorPrompt,
 	getOrchestratorPrompt,
@@ -65,29 +59,6 @@ function writePolicyFile(dir: string, policy: string): void {
 }
 
 const EMPTY_ENV = {} as Record<string, string | undefined>;
-
-/**
- * Materialize an installed subagents package under the cwd-relative candidate
- * root. `agentsDir` reproduces the hypothetical legacy layout; omitting it
- * reproduces the real published layout, which ships no agents/ directory.
- */
-function installSubagentsPackage(
-	cwd: string,
-	packageName: string,
-	options: { agentsDir?: boolean } = {},
-): void {
-	const root = join(cwd, ".pi", "npm", "node_modules", packageName);
-	mkdirSync(root, { recursive: true });
-	writeFileSync(
-		join(root, "package.json"),
-		JSON.stringify({ name: packageName, version: "1.5.2", type: "module" }),
-	);
-	// The real package ships these; none of them is an agents/ directory.
-	for (const shipped of ["src", "skills", "scripts"]) {
-		mkdirSync(join(root, shipped), { recursive: true });
-	}
-	if (options.agentsDir) mkdirSync(join(root, "agents"), { recursive: true });
-}
 
 // ---------------------------------------------------------------------------
 // Strict decode
@@ -206,102 +177,34 @@ test("a malformed higher-priority file fails closed to off instead of falling th
 });
 
 // ---------------------------------------------------------------------------
-// Capability degrade
+// Negotiated capability (fail closed without a runtime advertisement)
 // ---------------------------------------------------------------------------
 
-test("capability is absent when no subagents package exists anywhere", () => {
-	const cwd = makeScratch("gp-bg-cap-absent-");
-	assert.equal(resolveBackgroundSubagentsCapability(cwd), "absent");
+const negotiatedRuntime = {
+	isNegotiated: true,
+	capabilities: {
+		protocol: 1,
+		provider: "nicobailon",
+		capabilities: ["spawn", "status", "stop", "events.asyncComplete"],
+	},
+};
+
+test("capability is absent without negotiated runtime state", () => {
+	assert.equal(resolveBackgroundSubagentsCapability(), "absent");
+	assert.equal(resolveBackgroundSubagentsCapability({ isNegotiated: false, capabilities: undefined }), "absent");
 });
 
-// Regression: the exact shape of a real install. pi-subagents-j0k3r v1.5.2
-// ships no agents/ directory, so the previous agents-dir probe reported
-// "absent" while subagent_run was in fact installed and callable.
-test("capability is ready when the subagents package is installed without an agents directory", () => {
-	const cwd = makeScratch("gp-bg-cap-real-");
-	installSubagentsPackage(cwd, "pi-subagents-j0k3r");
-	assert.equal(resolveBackgroundSubagentsCapability(cwd), "ready");
+test("capability is ready only after protocol-1 runtime negotiation", () => {
+	assert.equal(resolveBackgroundSubagentsCapability(negotiatedRuntime), "ready");
 });
 
-test("capability is ready for either supported package name", () => {
-	for (const packageName of ["pi-subagents-j0k3r", "pi-subagents"]) {
-		const cwd = makeScratch("gp-bg-cap-name-");
-		installSubagentsPackage(cwd, packageName);
-		assert.equal(
-			resolveBackgroundSubagentsCapability(cwd),
-			"ready",
-			`package name ${packageName} must be detected`,
-		);
-	}
-});
-
-test("capability stays ready for a layout that does ship an agents directory", () => {
-	const cwd = makeScratch("gp-bg-cap-legacy-");
-	installSubagentsPackage(cwd, "pi-subagents", { agentsDir: true });
-	assert.equal(resolveBackgroundSubagentsCapability(cwd), "ready");
-});
-
-test("a bare directory with no package.json is not an installed package", () => {
-	const cwd = makeScratch("gp-bg-cap-bare-");
-	mkdirSync(join(cwd, ".pi", "npm", "node_modules", "pi-subagents-j0k3r", "agents"), {
-		recursive: true,
-	});
-	assert.equal(resolveBackgroundSubagentsCapability(cwd), "absent");
-});
-
-// ---------------------------------------------------------------------------
-// Live tool registry outranks the filesystem fallback
-// ---------------------------------------------------------------------------
-
-test("a live tool registry listing subagent_run reports ready with no package on disk", () => {
-	const cwd = makeScratch("gp-bg-cap-tools-ready-");
+test("capability fails closed when a mandatory negotiated capability is missing", () => {
 	assert.equal(
-		resolveBackgroundSubagentsCapability(cwd, ["read", "bash", "subagent_run"]),
-		"ready",
-	);
-	assert.equal(
-		resolveBackgroundSubagentsCapability(cwd, ["pi-subagents-j0k3r.subagent_run"]),
-		"ready",
-		"a namespaced tool name must still count",
-	);
-});
-
-test("a live tool registry without subagent_run outranks an installed package", () => {
-	const cwd = makeScratch("gp-bg-cap-tools-absent-");
-	installSubagentsPackage(cwd, "pi-subagents-j0k3r");
-	assert.equal(resolveBackgroundSubagentsCapability(cwd, ["read", "bash"]), "absent");
-});
-
-test("an empty tool list carries no signal and falls back to the package probe", () => {
-	const cwd = makeScratch("gp-bg-cap-tools-empty-");
-	installSubagentsPackage(cwd, "pi-subagents-j0k3r");
-	assert.equal(resolveBackgroundSubagentsCapability(cwd, []), "ready");
-});
-
-test("readActiveToolNames reads the pi registry and degrades to undefined", () => {
-	assert.deepEqual(
-		readActiveToolNames({ getActiveTools: () => ["read", "subagent_run"] }),
-		["read", "subagent_run"],
-	);
-	assert.deepEqual(
-		readActiveToolNames({ getActiveTools: () => [{ name: "subagent_run" }, 7, ""] }),
-		["subagent_run"],
-		"non-string entries are normalized and blanks dropped",
-	);
-	assert.equal(readActiveToolNames({}), undefined, "no handle means no signal");
-	assert.equal(
-		readActiveToolNames({ getActiveTools: () => "nope" }),
-		undefined,
-		"a non-array result means no signal",
-	);
-	assert.equal(
-		readActiveToolNames({
-			getActiveTools: () => {
-				throw new Error("registry unavailable");
-			},
+		resolveBackgroundSubagentsCapability({
+			isNegotiated: true,
+			capabilities: { ...negotiatedRuntime.capabilities, capabilities: ["spawn", "status", "stop"] },
 		}),
-		undefined,
-		"a throwing registry means no signal",
+		"absent",
 	);
 });
 
@@ -338,27 +241,25 @@ test("renderOrchestratorPrompt defaults to the fail-closed off/absent rendering"
 
 // The project policy file pins the policy half of the status line so these
 // assertions never depend on the developer's ambient global config.
-test("the rendered status line flips to ready when the subagents package is installed", () => {
+test("the rendered status line stays absent until runtime negotiation", () => {
 	const cwd = makeScratch("gp-bg-cap-render-");
 	writePolicyFile(join(cwd, ".pi", "gentle-ai"), "on");
 	assert.match(
 		getOrchestratorPrompt(cwd),
 		/Background subagent policy: on \(capability: absent\)/,
-		"no package installed yet",
 	);
-	installSubagentsPackage(cwd, "pi-subagents-j0k3r");
 	assert.match(
-		getOrchestratorPrompt(cwd),
+		getOrchestratorPrompt(cwd, negotiatedRuntime),
 		/Background subagent policy: on \(capability: ready\)/,
 	);
 });
 
-test("the rendered status line reports ready from a live registry alone", () => {
+test("the rendered status line ignores active tool names and package files", () => {
 	const cwd = makeScratch("gp-bg-cap-render-tools-");
 	writePolicyFile(join(cwd, ".pi", "gentle-ai"), "on");
 	assert.match(
-		getOrchestratorPrompt(cwd, ["read", "subagent_run"]),
-		/Background subagent policy: on \(capability: ready\)/,
+		getOrchestratorPrompt(cwd),
+		/Background subagent policy: on \(capability: absent\)/,
 	);
 });
 
@@ -502,15 +403,14 @@ interface CommandFixture {
 	handler: (args: string, ctx: ExtensionContext) => Promise<void>;
 }
 
-function registeredCommands(activeTools?: readonly string[]): Map<string, CommandFixture> {
+function registeredCommands(): Map<string, CommandFixture> {
 	const commands = new Map<string, CommandFixture>();
-	createGentleAiExtension({ nativeReviewCli: null })({
+	createGentleAiExtension({ nativeReviewCli: null, subagentRuntime: null })({
 		on() {},
 		registerTool() {},
 		registerCommand(name: string, definition: CommandFixture) {
 			commands.set(name, definition);
 		},
-		...(activeTools === undefined ? {} : { getActiveTools: () => activeTools }),
 	} as unknown as ExtensionAPI);
 	return commands;
 }
@@ -595,13 +495,12 @@ test("status names the project file that decided and the global file it shadows"
 	const configHome = join(makeScratch("gp-bg-home-"), "gentle-ai");
 	writePolicyFile(join(cwd, ".pi", "gentle-ai"), "on");
 	writePolicyFile(configHome, "off");
-	installSubagentsPackage(cwd, "pi-subagents-j0k3r");
 	const notice = await runBackgroundSubagents(t, "status", cwd, configHome);
 	assert.equal(notice.type, "info");
 	assert.equal(
 		notice.message,
 		[
-			`background subagents: on (decided by project file ${join(cwd, ".pi", "gentle-ai", "background-subagents.json")}; capability: ready)`,
+			`background subagents: on (decided by project file ${join(cwd, ".pi", "gentle-ai", "background-subagents.json")}; capability: absent)`,
 			`The global file ${join(configHome, "background-subagents.json")} exists but is outranked by that project file.`,
 			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default off.",
 		].join("\n"),
