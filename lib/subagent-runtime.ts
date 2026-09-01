@@ -287,12 +287,64 @@ function resultFromStatus(status: SubagentRuntimeStatusV1): SubagentResultV1 {
 function wait(ms: number, signal?: AbortSignal): Promise<void> {
 	if (signal?.aborted) return Promise.reject(new SubagentRuntimeError("cancelled", "Subagent runtime operation was cancelled."));
 	return new Promise((resolve, reject) => {
-		const timer = setTimeout(resolve, ms);
-		const onAbort = () => {
-			clearTimeout(timer);
-			reject(new SubagentRuntimeError("cancelled", "Subagent runtime operation was cancelled."));
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const finish = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			if (timer !== undefined) clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+			callback();
 		};
+		const onAbort = () => {
+			finish(() => reject(new SubagentRuntimeError("cancelled", "Subagent runtime operation was cancelled.")));
+		};
+		timer = setTimeout(() => finish(resolve), ms);
 		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+}
+
+function waitForCompletionWithin(
+	adapter: SubagentRuntimeAdapterV1,
+	handle: SubagentRuntimeHandleV1,
+	timeoutMs: number,
+	signal?: AbortSignal,
+): Promise<SubagentResultV1> {
+	if (signal?.aborted) return Promise.reject(new SubagentRuntimeError("cancelled", "Subagent result operation was cancelled.", "result"));
+	const completionSignal = new AbortController();
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (timer !== undefined) clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+		};
+		const finish = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			callback();
+		};
+		const onAbort = () => {
+			completionSignal.abort();
+			finish(() => reject(new SubagentRuntimeError("cancelled", "Subagent result operation was cancelled.", "result")));
+		};
+		timer = setTimeout(() => {
+			completionSignal.abort();
+			finish(() => reject(new SubagentRuntimeError("result_timeout", "Timed out waiting for subagent completion event.", "result")));
+		}, timeoutMs);
+		signal?.addEventListener("abort", onAbort, { once: true });
+		let pending: Promise<SubagentResultV1>;
+		try {
+			pending = adapter.waitForCompletion!(handle, completionSignal.signal);
+		} catch (error) {
+			finish(() => reject(error));
+			return;
+		}
+		pending.then(
+			(result) => finish(() => resolve(result)),
+			(error) => finish(() => reject(error)),
+		);
 	});
 }
 
@@ -392,7 +444,12 @@ export class SubagentRuntimeV1 {
 			if (Date.now() >= deadline) throw new SubagentRuntimeError("result_timeout", `Timed out waiting for subagent '${portableHandle.id}' completion.`, "result");
 			if (this.adapter.waitForCompletion !== undefined) {
 				try {
-					const completed = await this.adapter.waitForCompletion(portableHandle, options.signal);
+					const completed = await waitForCompletionWithin(
+						this.adapter,
+						portableHandle,
+						Math.max(1, deadline - Date.now()),
+						options.signal,
+					);
 					return assertSubagentResultV1(completed);
 				} catch (error) {
 					if (error instanceof SubagentRuntimeError && error.code === "result_timeout") {
