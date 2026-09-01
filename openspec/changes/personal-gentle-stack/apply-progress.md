@@ -510,3 +510,13 @@ Rollback boundary: revert the two commits above together to restore the clean st
 ### Remaining uncertainties
 
 No functional blockers remain for PR3. Context7 has no package-owned implementation in this checkout and was intentionally not invented or altered. Provider-contract/release changes remain Phase 4 and were only checked unchanged. The parent agent owns the pre-acquired native attempt settlement and any later delivery decision.
+
+### Native attempt settlement
+
+After the independent audit passed, the pre-acquired PR3 attempt token was settled exactly once with request ID `pr3-surface-retirement-settle-20260901`.
+
+- State: `complete`
+- Outcome: `passed`
+- Evidence revision: `sha256:60138b95f291b603b67bd45d9228dd9aaad9ce84844b282874d80df0ee52baf7`
+- Evidence: focused 152/152; `pnpm test` 1167 total, 1157 passed, 10 skipped, 0 failed; forbidden findings 0; provider contract, runtime modules, package verifier, runtime harness, packed-package E2E, diff check, and independent audit passed.
+- Cleanup: worktree clean before this evidence-only append; tasks 3.1–3.6 checked; Phase 4 unchecked; no push, PR, merge, or release.
