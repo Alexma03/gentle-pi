@@ -422,3 +422,91 @@ The pre-acquired native attempt remains untouched: no acquire, reset, or settle 
 ### Remediation rollback boundary
 
 Revert the remediation commit to restore the preceding targeted-validation state; this removes only the work-unit scheduler identity/evidence corrections and their regression tests plus the task/progress bookkeeping. Phase 3/4 files and all prior PR1/PR2 evidence remain unaffected.
+
+## PR3 Phase 3 Apply — surface retirement (2026-09-01)
+
+### Scope and starting state
+
+PR3 work was executed only in `/home/alex/Projects/forks/gentle-pi-worktrees/pr3-surface-retirement` on branch `codex/personal-gentle-stack-pr3-surface-retirement`, starting from clean HEAD `e8a9200dbb21eee4a583319453523aedb0eb6f72`. The preceding PR1/PR2 ledger above remains byte-for-byte unchanged (424 lines); this section is append-only. Phase 4 tasks 4.1–4.6 remain unchecked.
+
+Tasks 3.1–3.6 are complete. The implementation removes the retired GGA inventory, Tintinweb/j0k3r adapters and fallback documentation, mutable legacy `subagent_run` candidate injection, cosmetic themes/banner/logo surfaces, and listed community/plugin surfaces. It preserves package-owned `ask_user_choice`, Engram integration, provider-neutral Context7 behavior (no package-owned Context7 implementation was invented), CodeGraph, basic UI/quiet rendering, SDD preflight and behavioral assets, Nicobailon RPC v1, and global/package-managed agent discovery.
+
+### TDD Cycle Evidence
+
+#### RED
+
+Before production edits, the new surface-retirement safety net was run exactly as:
+
+```text
+node --experimental-strip-types --test tests/surface-retirement.test.ts
+```
+
+It failed before the verifier exports existed:
+
+```text
+SyntaxError: The requested module '../scripts/verify-package-files.mjs' does not provide an export named 'FORBIDDEN_PACKAGE_SURFACES'
+tests 1, pass 0, fail 1
+exit=1
+```
+
+The first complete `pnpm test` after the surface migration also exposed one stale assertion in `tests/orchestrator-rdd-ownership.test.ts` (`delegation lost #### Background Subagent Policy`), proving the deleted policy was not being silently accepted. The assertion was removed and the focused test rerun passed 7/7.
+
+#### GREEN
+
+The verifier inventory, package manifest/lockfile, runtime/docs cleanup, provider-neutral candidate decoration, and corresponding tests were implemented. The focused PR3 surface/package/runtime suite passed 152/152 with 0 failures and 0 skips. The package-focused surface suite passed 39/39 with 0 failures and 0 skips.
+
+Required checks passed:
+
+- `pnpm run check:provider-contract` — exit 0; contract `1.1.0`, 8 bundle entries, 2 generated baselines, acquisition `field-test-local`.
+- `pnpm run check:runtime-modules` — exit 0; `runtime matches TypeScript sources (4 modules)`.
+- `node scripts/verify-package-files.mjs` — exit 0; `175 files; 69 exact byte-pinned contract artifacts for the v2.5.0-rc.3 runtime`.
+- Explicit retired-surface scan via `scanRetiredSurfaceReferences(process.cwd())` — exit 0; `forbidden-surface findings: 0`. The scanner uses the explicit retired inventory and excludes only `.git`, `.codegraph`, `openspec`, and `tests/fixtures/orchestrator.pre-diet.md`.
+- `pnpm run test:harness` — exit 0.
+- `pnpm run test:packed-package` — exit 0; packed package E2E passed for `gentle-pi 2.3.0-rc.1` and Gentle AI `2.5.0-rc.3`.
+
+#### TRIANGULATE
+
+The retained-surface triangulation suite covered package-owned Engram/ask-user-choice behavior, CodeGraph initialization/query guards, SDD preflight persistence and canonical-domain parity, basic UI/quiet rendering, Nicobailon RPC v1 negotiation/completion/cancellation, provider-neutral subagent runtime validation, package inventory, and the retired-surface scanner. It passed 152/152. The runtime harness passed independently, and packed-package E2E proved the published file inventory remains installable.
+
+The exact aggregate command `pnpm test` passed after the stale static assertion was corrected:
+
+```text
+ℹ tests 1167
+ℹ pass 1157
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 10
+$ node scripts/check-provider-contract.mjs
+... provider contract mirror check passed ...
+$ node --experimental-strip-types tests/runtime-harness.mjs
+FULL_TEST_EXIT=0
+```
+
+#### REFACTOR
+
+- Centralized retired operational tokens and forbidden/required package paths in `scripts/verify-package-files.mjs`; retained migration manifests and added the Nicobailon RPC v1 lock to exact contract hashing.
+- Replaced provider-specific delegation prose with the package-owned `gentle_subagent`/native `Agent` contract and removed obsolete background-policy/banner/plugin documentation.
+- Removed mutable legacy candidate input mutation while preserving immutable provider-neutral candidate decoration and frozen candidate-view checks.
+- Deleted cosmetic extension/theme/logo assets and their tests; removed community/plugin test harness branches while retaining behavioral SDD assets and package-owned UI/preflight paths.
+
+### Work Unit Evidence
+
+| Work unit | Result | Evidence |
+| --- | --- | --- |
+| 3.1 | Complete | Explicit retired inventory/scan and docs/installer cleanup; zero findings. |
+| 3.2 | Complete | Tintinweb/j0k3r, old fallback/interception, RPIV integration, and legacy candidate injection removed; retained provider-neutral runtime suite passed 152/152. |
+| 3.3 | Complete | `extensions/pi-pretty.ts`, `extensions/startup-banner.ts`, three Gentle themes, logo, and related tests removed; package manifest no longer exposes image/themes. |
+| 3.4 | Complete | Community/plugin package references and RPIV event integration removed; package-owned `ask_user_choice` retained and tested. |
+| 3.5 | Complete | Engram, CodeGraph, preflight, basic UI/quiet rendering, behavioral assets, Nicobailon RPC v1, and package/global agent discovery triangulated successfully. |
+| 3.6 | Complete | `package.json`, `pnpm-lock.yaml`, verifier, exact required/forbidden inventory, packed package, and full test command all pass. |
+
+Local commits:
+
+- `47bbae39` — `refactor(surface): retire legacy adapters and presentation`
+- `fa61dfd1` — `chore(package): align PR3 package inventory`
+
+Rollback boundary: revert the two commits above together to restore the clean starting tree and remove only the PR3 surface-retirement implementation; prior PR1/PR2 changes and evidence remain in the parent history, and Phase 4 files were not changed.
+
+### Remaining uncertainties
+
+No functional blockers remain for PR3. Context7 has no package-owned implementation in this checkout and was intentionally not invented or altered. Provider-contract/release changes remain Phase 4 and were only checked unchanged. The parent agent owns the pre-acquired native attempt settlement and any later delivery decision.
