@@ -21,6 +21,27 @@ Use this skill when preparing, publishing, or verifying a `gentle-pi` release.
 - Never infer the release tag target from local `HEAD`; use the freshly fetched `origin/main` commit and the repository's normal release safeguards.
 - Never skip package verification. The publish workflow runs verification again, but local validation should still pass before tagging.
 
+## Coordinated Gentle AI release
+
+- `docs/release/release-evidence.json` is the repository-owned evidence record
+  for the paired Gentle Pi/Gentle AI release boundary.
+- Do not invent an unavailable `npm:pi-subagents` version or digest. Keep the
+  record `pending` until the immutable provider release is published, then
+  record its exact semver and SHA-256 digest plus a matching
+  `gentle-pi.external-provider-attestation/v1` repository attestation whose
+  exact bytes are hashed in `providerContract.externalVerification`; only then
+  change the record to `ready`. A syntactically valid version/digest alone is
+  repository-record completeness, not verified provenance.
+- The Node 24 CI matrix must pass on Linux, macOS, and Windows before the npm
+  publish workflow is dispatched. Windows uses the pinned Go SumDB source-build
+  path for the Gentle AI runtime.
+- Run `node scripts/check-release-evidence.mjs --release` from the protected
+  release workflow. It fails closed when either side of the coordinated release
+  evidence is incomplete.
+- Rollback restores both the prior Gentle Pi package manifest/lockfile and the
+  prior Gentle AI runtime pin. Rerun package verification afterward and never
+  restore a legacy adapter.
+
 ## Release Procedure
 
 1. **Inspect state**

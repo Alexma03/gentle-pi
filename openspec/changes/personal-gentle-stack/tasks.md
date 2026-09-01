@@ -50,9 +50,22 @@ Chain strategy: feature-branch-chain
 - [x] 3.6 **RED/GREEN/REFACTOR** `package.json`, `pnpm-lock.yaml`, package verifier. D:3.5; P: install inventory.
 
 ## Phase 4: Release
-- [ ] 4.1 **RED/GREEN/REFACTOR** provider contract script/lock. D:3.6; P: `pnpm run check:provider-contract`.
-- [ ] 4.2 **RED/GREEN/REFACTOR** generated `runtime/*`. D:4.1; P: `pnpm run check:runtime-modules`.
-- [ ] 4.3 **RED/GREEN/REFACTOR** `scripts/verify-package-files.mjs`. D:4.2; P: package verification.
-- [ ] 4.4 **RED/GREEN/REFACTOR** `tests/runtime-harness.mjs` binding/snapshot/RDD. D:4.3; P: `pnpm run test:harness`.
-- [ ] 4.5 **RED/GREEN/REFACTOR** aggregate tests. D:4.4; P: `pnpm test`.
-- [ ] 4.6 **RED/GREEN/REFACTOR** Node 24 OS matrix + Gentle AI release/rollback. D:4.5; P: final matrix.
+- [x] 4.1 **RED/GREEN/REFACTOR** provider contract script/lock. D:3.6; P: `pnpm run check:provider-contract`.
+- [x] 4.2 **RED/GREEN/REFACTOR** generated `runtime/*`. D:4.1; P: `pnpm run check:runtime-modules`.
+- [x] 4.3 **RED/GREEN/REFACTOR** `scripts/verify-package-files.mjs`. D:4.2; P: package verification.
+- [x] 4.4 **RED/GREEN/REFACTOR** `tests/runtime-harness.mjs` binding/snapshot/RDD. D:4.3; P: `pnpm run test:harness`.
+- [x] 4.5 **RED/GREEN/REFACTOR** aggregate tests. D:4.4; P: `pnpm test`.
+- [x] 4.6 **RED/GREEN/REFACTOR** Node 24 OS matrix + Gentle AI release/rollback. D:4.5; P: final matrix.
+
+### Phase 4 closure acceptance
+
+Tasks 4.1–4.6 are functionally accepted and complete based on the recorded
+provider-contract, generated-runtime, exact-package-inventory,
+runtime-harness, aggregate, packed-package, workflow/YAML, and fail-closed
+release checks. A human-owned bounded exception accepts that historical
+task-specific RED evidence is unavailable for 4.2 and 4.4; that missing
+history is not fabricated, reconstructed, or presented as a historical
+failure. Hosted macOS/Windows execution and the external `pi-subagents`
+publication/attestation remain release prerequisites, not implementation
+blockers. The parent agent will append native SDD closure attempt settlement
+after final checks; this executor does not mutate the attempt ledger.

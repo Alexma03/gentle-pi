@@ -11,7 +11,14 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -27,6 +34,16 @@ jobs:
           node-version: "24"
           cache: "pnpm"
 
+      # Windows uses Gentle AI's verified Go SumDB source-build path because
+      # the pinned provider release intentionally ships no unsigned Windows
+      # binary. Keep the compiler floor explicit in the cross-OS evidence.
+      - name: Setup Go for the Windows source-build path
+        if: runner.os == 'Windows'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.25.10"
+          check-latest: false
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -37,6 +54,9 @@ jobs:
 
       - name: Verify generated runtime modules
         run: pnpm run check:runtime-modules
+
+      - name: Verify coordinated release evidence
+        run: pnpm run check:release-evidence
 
       - name: Verify package contents
         run: node scripts/verify-package-files.mjs

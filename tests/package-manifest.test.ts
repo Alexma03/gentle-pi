@@ -216,6 +216,17 @@ test("generated runtime modules and packed-package checks are deterministic", ()
 	assert.doesNotMatch(packedRunner, /git-commit-transaction|transaction runner/i);
 });
 
+test("package publication runs the release evidence gate before package operations", () => {
+	const packageJson = readPackageJson();
+	const prepublishOnly = packageJson.scripts?.prepublishOnly ?? "";
+	const releaseGate = "node scripts/check-release-evidence.mjs --release";
+	const verifier = "node scripts/verify-package-files.mjs";
+	assert.match(prepublishOnly, new RegExp(releaseGate.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")));
+	assert.ok(prepublishOnly.indexOf(releaseGate) < prepublishOnly.indexOf("pnpm test"), "release evidence must run before aggregate publication checks");
+	assert.ok(prepublishOnly.indexOf(releaseGate) < prepublishOnly.indexOf(verifier), "release evidence must fail closed before package verification/packaging");
+	assert.doesNotMatch(prepublishOnly, /pnpm run (?:publish|pack|test:packed-package).*check-release-evidence|check-release-evidence.*pnpm run (?:publish|pack)/s);
+});
+
 test("package manifest ships and runs the checked-in package-local Gentle AI installer", () => {
 	const packageJson = readPackageJson();
 	const verifier = readFileSync(join(PACKAGE_ROOT, "scripts", "verify-package-files.mjs"), "utf8");
@@ -1178,7 +1189,7 @@ test("v2.3.0-rc.1 release package and runtime stop before publication", () => {
 	assert.equal(packageJson.version, "2.3.0-rc.1", "the release manifest must remain explicitly pinned to v2.3.0-rc.1");
 	assert.equal(
 		packageJson.scripts?.test,
-		"node --experimental-strip-types --test tests/*.test.ts && pnpm run check:provider-contract && pnpm run test:harness",
+		"node --experimental-strip-types --test tests/*.test.ts && pnpm run check:provider-contract && pnpm run check:runtime-modules && node scripts/verify-package-files.mjs && pnpm run check:release-evidence && pnpm run test:harness",
 	);
 	assert.ok(packageJson.files?.includes("assets/"));
 	assert.ok(packageJson.files?.includes("contracts/"));

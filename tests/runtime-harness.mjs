@@ -640,6 +640,181 @@ async function run() {
 		await rm(candidateDriftCwd, { recursive: true, force: true });
 	}
 
+	// The runtime seam carries only the provider-neutral task DTO. The bound
+	// snapshot is readable through the controller-owned view while the live
+	// contributor tree remains out of scope, and RDD evidence stays a separate
+	// reducer concern rather than a provider payload or delivery gate.
+	{
+		const {
+			CandidateViewRegistry,
+			decorateReviewCandidateTask,
+		} = await import(pathToFileURL(join(ROOT, "lib/review-candidate-view.ts")).href + "?runtime-harness-bound-snapshot");
+		const { MANDATORY_SUBAGENT_CAPABILITIES, SubagentRuntimeV1 } = await import(
+			pathToFileURL(join(ROOT, "lib/subagent-runtime.ts")).href + "?runtime-harness-provider-start",
+		);
+		const boundCwd = await tempWorkspace();
+		try {
+			gitSync(boundCwd, "init", "-b", "main");
+			await writeFile(join(boundCwd, "tracked.txt"), "bound snapshot\n");
+			gitSync(boundCwd, "add", "tracked.txt");
+			gitSync(
+				boundCwd,
+				"-c", "user.name=Runtime Harness",
+				"-c", "user.email=runtime-harness@example.invalid",
+				"commit", "-m", "bound snapshot",
+			);
+			const registry = new CandidateViewRegistry();
+			const view = registry.create({ contributorRoot: boundCwd });
+			registry.bindCurrent({
+				token: view.token,
+				lineageId: "harness-bound-snapshot",
+				selectedLenses: ["review-risk", "review-resilience"],
+			});
+			const task = {
+				task: "Review the bound candidate.",
+				context: "Use only the controller-owned snapshot.",
+				dependencies: [],
+				expectedOutcome: "Provider-neutral review evidence.",
+			};
+			const actorStarts = [];
+			const runtime = new SubagentRuntimeV1({
+				negotiate: async () => ({
+					protocol: 1,
+					provider: "nicobailon",
+					capabilities: [...MANDATORY_SUBAGENT_CAPABILITIES],
+				}),
+				start: async (startedTask, options = {}) => {
+					actorStarts.push({ task: startedTask, role: options.role, cwd: options.cwd });
+					return { id: `harness-actor-${actorStarts.length}` };
+				},
+				status: async (handle) => ({ id: handle.id, status: "completed", result: { status: "completed", summary: "done", evidence: [], blockers: [] } }),
+				cancel: async () => {},
+			});
+			for (const role of ["review-risk", "review-resilience"]) {
+				const decorated = decorateReviewCandidateTask({ role, task, candidateViews: registry });
+				assert.deepEqual(Object.keys(decorated).sort(), ["context", "dependencies", "expectedOutcome", "task"]);
+				assert.match(decorated.task, /Controller-owned candidate view/);
+				assert.doesNotMatch(JSON.stringify(decorated), /nicobailon|pi-subagents|provider-specific/i);
+				await runtime.start(decorated, { role, cwd: boundCwd });
+			}
+			assert.deepEqual(actorStarts.map(({ role, cwd }) => ({ role, cwd })), [
+				{ role: "review-risk", cwd: boundCwd },
+				{ role: "review-resilience", cwd: boundCwd },
+			], "a successful frozen binding starts the expected provider-neutral actors");
+			assert.equal(actorStarts.every(({ task: startedTask }) => Object.keys(startedTask).sort().join(",") === "context,dependencies,expectedOutcome,task"), true);
+			assert.equal(await readFile(join(view.root, "tracked.txt"), "utf8"), "bound snapshot\n");
+			actorStarts.length = 0;
+			await writeFile(join(boundCwd, "tracked.txt"), "live contributor mutation\n");
+			assert.throws(
+				() => decorateReviewCandidateTask({ role: "review-risk", task, candidateViews: registry }),
+				/live candidate|drift|candidate view/i,
+			);
+			assert.equal(actorStarts.length, 0, "live drift must deny before any actor starts");
+			await chmod(view.root, 0o700);
+			registry.cleanup(view.token);
+		} finally {
+			restoreWorkspaceWritePermissions(boundCwd);
+			await rm(boundCwd, { recursive: true, force: true });
+		}
+	}
+
+	// Exercise both ordinary RDD branches through the same provider-neutral
+	// evidence reducers used by the unit suite: a no-fix path has zero
+	// validators, while a bounded fix exposes only frozen finding IDs and
+	// acceptance/regression evidence to the validator.
+	{
+		const {
+			EVIDENCE_CLASS,
+			REVIEW_MODE,
+			REVIEW_PHASE,
+			RESOLUTION_OUTCOME,
+			TERMINAL_STATE,
+			createReviewState,
+		} = await import(pathToFileURL(join(ROOT, "lib/review-transaction.ts")).href + "?runtime-harness-rdd-transaction");
+		const {
+			applyOrdinaryFix,
+			recordOrdinaryDiscovery,
+			recordOrdinaryFinalVerification,
+			recordOrdinaryValidation,
+			ordinaryValidatorRequest,
+			resolveOrdinaryEvidence,
+		} = await import(pathToFileURL(join(ROOT, "lib/review-policy-ordinary.ts")).href + "?runtime-harness-rdd-policy");
+		const { REVIEW_LENS, REVIEW_ROUTE } = await import(pathToFileURL(join(ROOT, "lib/review-triggers.ts")).href + "?runtime-harness-rdd-triggers");
+		const { testSnapshot } = await import(pathToFileURL(join(ROOT, "tests/review-test-fixtures.ts")).href + "?runtime-harness-rdd-fixture");
+		const budget = {
+			review_batches: 1,
+			review_actors: 1,
+			refuter_batches: 1,
+			fix_batches: 1,
+			validator_runs: 1,
+			final_verifications: 1,
+			judgment_rounds: 0,
+			judge_runs: 0,
+		};
+		const baseState = (lineageId) => createReviewState({
+			lineageId,
+			mode: REVIEW_MODE.ORDINARY,
+			snapshot: testSnapshot({
+				baseTree: "1".repeat(40),
+				completeTree: "2".repeat(40),
+				route: REVIEW_ROUTE.STANDARD,
+				lenses: [REVIEW_LENS.READABILITY],
+			}),
+			evidenceHash: "b".repeat(64),
+			budget,
+		});
+		const noFixDiscovery = recordOrdinaryDiscovery(baseState("harness-rdd-no-fix"), { rows: [] });
+		const noFixReady = resolveOrdinaryEvidence(noFixDiscovery, { deterministicResults: [] });
+		assert.equal(noFixReady.phase, REVIEW_PHASE.FINAL_VERIFICATION);
+		assert.equal(noFixReady.counters.validator_runs, 0);
+		assert.equal(recordOrdinaryFinalVerification(noFixReady, { passed: true }).terminal_state, TERMINAL_STATE.APPROVED);
+
+		const finding = {
+			id: "HARNESS-001",
+			lens: REVIEW_LENS.READABILITY,
+			location: "app.ts:1",
+			severity: "BLOCKER",
+			status_at_freeze: "open",
+			evidence_class: EVIDENCE_CLASS.DETERMINISTIC,
+			evidence_claim: "The bound candidate misses its acceptance guard.",
+		};
+		const discovered = recordOrdinaryDiscovery(baseState("harness-rdd-fix"), { rows: [finding] });
+		const resolved = resolveOrdinaryEvidence(discovered, {
+			deterministicResults: [{ id: finding.id, outcome: RESOLUTION_OUTCOME.CORROBORATED }],
+			refuterResults: [],
+		});
+		const fixed = applyOrdinaryFix(resolved, {
+			candidateTree: "3".repeat(40),
+			fixedIds: [finding.id],
+			fixDiff: "bounded review fix",
+			changedPaths: ["app.ts"],
+		});
+		const request = ordinaryValidatorRequest(fixed, {
+			originalAcceptanceTests: { passed: true, evidenceHash: "a".repeat(64) },
+			correctionRegressions: [{ findingId: finding.id, evidenceHash: "c".repeat(64), passed: true }],
+			originalCriterionRegressions: [],
+			followUps: [],
+		});
+		assert.deepEqual(Object.keys(request).sort(), [
+			"correction_regressions",
+			"follow_ups",
+			"frozen_ledger_hash",
+			"frozen_rows",
+			"original_acceptance_tests",
+			"original_criterion_regressions",
+			"requested_ids",
+		]);
+		assert.equal("provider" in request, false);
+		const validated = recordOrdinaryValidation(fixed, {
+			request,
+			results: [{ id: finding.id, outcome: RESOLUTION_OUTCOME.VERIFIED }],
+		});
+		const final = recordOrdinaryFinalVerification(validated, { passed: true });
+		assert.equal(final.terminal_state, TERMINAL_STATE.APPROVED);
+		assert.equal(final.counters.validator_runs, 1);
+		assert.equal(final.counters.final_verifications, 1);
+	}
+
 	const noUiCwd = await tempWorkspace();
 	try {
 		for (const handler of hooks.get("session_start")) {

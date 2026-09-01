@@ -23,6 +23,25 @@ import {
 	PROVIDER_CONTRACT_MIRROR_ROOT,
 } from "./mirror-provider-contract.mjs";
 
+export const PI_SUBAGENTS_RPC_LOCK_PATH = "contracts/pi-subagents-rpc-v1.lock.json";
+
+const EXPECTED_PI_SUBAGENTS_RPC_LOCK = Object.freeze({
+	version: 1,
+	provider: "nicobailon",
+	package: "pi-subagents",
+	protocol: 1,
+	requiredCapabilities: ["spawn", "status", "stop", "events.asyncComplete"],
+	methods: { ping: "ping", spawn: "spawn", status: "status", stop: "stop" },
+	events: {
+		ready: "subagents:rpc:v1:ready",
+		request: "subagents:rpc:v1:request",
+		replyPrefix: "subagents:rpc:v1:reply:",
+		asyncComplete: "subagent:async-complete",
+	},
+	spawn: { async: true },
+	completion: "status-or-events.asyncComplete",
+});
+
 function sha256Hex(bytes) {
 	return createHash("sha256").update(bytes).digest("hex");
 }
@@ -37,6 +56,44 @@ function recordEquals(problems, label, expected, actual) {
 	for (const key of actualKeys) {
 		if (!(key in expected)) problems.push(`${label}: ${key} exists in the mirror but is not recorded in the lock`);
 	}
+}
+
+function exactJson(expected, actual) {
+	return JSON.stringify(expected) === JSON.stringify(actual);
+}
+
+/**
+ * Validate the checked-in Nicobailon RPC lock as a closed contract.
+ *
+ * The provider mirror lock proves the review-role bundle, while this separate
+ * lock proves the runtime adapter's protocol surface. Keeping both checks in
+ * the same offline command prevents package inventory verification from
+ * accepting a role bundle paired with an unreviewed RPC shape.
+ */
+export function validatePiSubagentsRpcLock(lock) {
+	const problems = [];
+	if (lock === null || typeof lock !== "object" || Array.isArray(lock)) return ["pi-subagents RPC lock is not a JSON object"];
+	const expectedKeys = Object.keys(EXPECTED_PI_SUBAGENTS_RPC_LOCK).sort();
+	const actualKeys = Object.keys(lock).sort();
+	if (!exactJson(expectedKeys, actualKeys)) problems.push(`pi-subagents RPC lock keys ${JSON.stringify(actualKeys)} do not match the closed contract keys ${JSON.stringify(expectedKeys)}`);
+	for (const key of expectedKeys) {
+		if (!exactJson(lock[key], EXPECTED_PI_SUBAGENTS_RPC_LOCK[key])) {
+			problems.push(`pi-subagents RPC lock field ${key} does not match the Nicobailon RPC v1 contract`);
+		}
+	}
+	return problems;
+}
+
+export function checkPiSubagentsRpcLock(packageRoot) {
+	const lockPath = join(packageRoot, ...PI_SUBAGENTS_RPC_LOCK_PATH.split("/"));
+	if (!existsSync(lockPath)) return [`${PI_SUBAGENTS_RPC_LOCK_PATH} is missing`];
+	let lock;
+	try {
+		lock = JSON.parse(readFileSync(lockPath, "utf8"));
+	} catch (error) {
+		return [`${PI_SUBAGENTS_RPC_LOCK_PATH} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`];
+	}
+	return validatePiSubagentsRpcLock(lock);
 }
 
 // Returns a list of drift problems; an empty list means the mirror, lock,
@@ -121,6 +178,13 @@ export function checkProviderContractMirror(packageRoot) {
 
 async function main() {
 	const packageRoot = join(fileURLToPath(new URL("..", import.meta.url)));
+	const rpcProblems = checkPiSubagentsRpcLock(packageRoot);
+	if (rpcProblems.length > 0) {
+		console.error("gentle-pi Nicobailon RPC lock has drifted:");
+		for (const problem of rpcProblems) console.error(`- ${problem}`);
+		console.error("\nRefusing to consume a provider contract with an unverified runtime RPC shape.");
+		process.exit(1);
+	}
 	const problems = checkProviderContractMirror(packageRoot);
 	if (problems.length > 0) {
 		console.error("gentle-pi provider contract mirror has drifted:");

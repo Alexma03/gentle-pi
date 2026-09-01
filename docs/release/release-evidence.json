@@ -1,0 +1,42 @@
+{
+  "schema": "gentle-pi.release-evidence/v1",
+  "status": "pending",
+  "gentlePiVersion": "2.3.0-rc.1",
+  "gentleAiVersion": "2.5.0-rc.3",
+  "providerContract": {
+    "provider": "nicobailon",
+    "package": "pi-subagents",
+    "protocol": 1,
+    "lockPath": "contracts/pi-subagents-rpc-v1.lock.json",
+    "publishedVersion": null,
+    "publishedDigestSha256": null,
+    "pendingReason": "published-provider-contract-required",
+    "externalVerification": {
+      "status": "absent",
+      "reason": "published-provider-contract-required",
+      "attestationPath": null,
+      "attestationSha256": null
+    }
+  },
+  "matrix": {
+    "node": "24",
+    "runners": [
+      "ubuntu-latest",
+      "macos-latest",
+      "windows-latest"
+    ],
+    "requiredCommands": [
+      "pnpm test",
+      "pnpm run check:provider-contract",
+      "pnpm run check:runtime-modules",
+      "node scripts/verify-package-files.mjs",
+      "pnpm run test:packed-package"
+    ]
+  },
+  "rollback": {
+    "boundary": "paired-release",
+    "gentlePi": "restore-prior-package-manifest-and-lockfile",
+    "gentleAi": "restore-prior-published-runtime-pin",
+    "legacyAdapter": "never-restore"
+  }
+}

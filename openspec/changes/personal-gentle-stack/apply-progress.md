@@ -520,3 +520,414 @@ After the independent audit passed, the pre-acquired PR3 attempt token was settl
 - Evidence revision: `sha256:60138b95f291b603b67bd45d9228dd9aaad9ce84844b282874d80df0ee52baf7`
 - Evidence: focused 152/152; `pnpm test` 1167 total, 1157 passed, 10 skipped, 0 failed; forbidden findings 0; provider contract, runtime modules, package verifier, runtime harness, packed-package E2E, diff check, and independent audit passed.
 - Cleanup: worktree clean before this evidence-only append; tasks 3.1–3.6 checked; Phase 4 unchecked; no push, PR, merge, or release.
+
+## PR4 Phase 4 Apply — release evidence and cross-platform gates (2026-09-01)
+
+### Scope and starting state
+
+PR4 work was executed only in `/home/alex/Projects/forks/gentle-pi-worktrees/pr4-release` on branch `codex/personal-gentle-stack-pr4-release`, starting from clean HEAD `32f765881bca2e33894e57e01719d467d746ba7d`. Tasks 4.1–4.6 are the only task checkboxes changed in this apply batch. The implementation does not publish, push, open a PR, merge, tag, release, run SDD archive, or mutate the native attempt ledger.
+
+The checked-in provider release record intentionally remains parameterized. The current checkout has no published `npm:pi-subagents` version/digest to claim, so `docs/release/release-evidence.json` remains `status: pending`; repository evidence passes, while release mode fails closed until a maintainer records the immutable provider release.
+
+### TDD Cycle Evidence
+
+#### RED
+
+Before adding the release evidence implementation, the new focused safety net was run exactly as:
+
+```text
+node --experimental-strip-types --test tests/release-evidence.test.ts
+```
+
+It failed because the planned checker did not yet exist:
+
+```text
+ERR_MODULE_NOT_FOUND: scripts/check-release-evidence.mjs
+exit=1
+```
+
+This was the required failing-first signal for the provider-lock/release-evidence, CI matrix, and rollback contract. The runtime-harness assertions were added before the production release gate was integrated; the pre-existing bound-view implementation already satisfied those assertions once dependencies were installed.
+
+#### GREEN
+
+The focused release evidence suite passed after implementation:
+
+```text
+node --experimental-strip-types --test tests/release-evidence.test.ts
+```
+
+```text
+ℹ tests 5
+ℹ pass 5
+ℹ fail 0
+ℹ skipped 0
+```
+
+The suite proves pending provider publication is explicit and fail-closed, rejects a fabricated version without a digest, accepts a complete parameterized provider record, validates the closed Nicobailon RPC v1 lock, and requires the Node 24 Linux/macOS/Windows workflow plus paired rollback documentation.
+
+Focused package/provider/verifier suites also passed:
+
+```text
+node --experimental-strip-types --test tests/release-evidence.test.ts tests/package-manifest.test.ts tests/provider-contract-bundle.test.ts tests/provider-contract-mirror.test.ts tests/verify-package-files.test.ts
+```
+
+```text
+ℹ tests 83
+ℹ pass 83
+ℹ fail 0
+ℹ skipped 0
+```
+
+Required release checks passed:
+
+- `pnpm run check:provider-contract` — exit 0; contract `1.1.0`, 8 bundle entries, 2 generated baselines, acquisition `field-test-local`; the same command now validates the closed `contracts/pi-subagents-rpc-v1.lock.json` surface.
+- `pnpm run check:runtime-modules` — exit 0; generated runtime matches TypeScript sources (4 modules).
+- `node scripts/verify-package-files.mjs` — exit 0; `178 files; 69 exact byte-pinned contract artifacts for the v2.5.0-rc.3 runtime`.
+- `pnpm run check:release-evidence` — exit 0; repository evidence status `pending`, releaseReady `false`, provider publication absent, fail-closed message; repository evidence digest `b3f8dec1c88269a65dd772b333545bd964113a09743d1ea14749fb56e86c2c00`.
+- `node scripts/check-release-evidence.mjs --release` — exit 1 as designed; `release evidence is pending; publish is fail-closed until a maintainer records the published pi-subagents version and digest`.
+- `pnpm run test:harness` — exit 0 (`HARNESS_EXIT=0`).
+- `pnpm run test:packed-package` — exit 0; packed package E2E passed for `gentle-pi 2.3.0-rc.1` and Gentle AI `2.5.0-rc.3`.
+- GitHub workflow YAML parse through the installed `yaml` parser — exit 0 for `.github/workflows/ci.yml` and `.github/workflows/publish.yml`.
+- `git diff --check` — exit 0.
+
+#### TRIANGULATE
+
+The exact aggregate command required by `openspec/config.yaml` and strict TDD was run after the focused checks:
+
+```text
+pnpm test
+```
+
+```text
+ℹ tests 1172
+ℹ pass 1171
+ℹ fail 0
+ℹ skipped 1
+```
+
+The aggregate then passed the provider-contract check (including RPC lock), generated-runtime check, exact package verifier, repository release-evidence check, and provider-neutral runtime harness. The packed-package E2E was rerun independently after the aggregate. No test was allowed to treat the pending provider record as release-ready.
+
+The runtime harness now triangulates:
+
+- one controller-owned bound candidate snapshot for two provider-neutral review roles;
+- frozen snapshot bytes remain readable while live contributor mutation causes dispatch to fail closed before an actor starts;
+- decorated tasks contain exactly `task`, `context`, `dependencies`, and `expectedOutcome`, with no provider fields;
+- ordinary no-fix RDD uses zero validators and reaches final verification independently of delivery;
+- bounded ordinary correction exposes only frozen finding IDs, original acceptance evidence, correction regressions, and inert follow-ups to the validator, then performs one final verification.
+
+#### REFACTOR
+
+- Added `validatePiSubagentsRpcLock` and `checkPiSubagentsRpcLock` to `scripts/check-provider-contract.mjs`; the provider bundle mirror and the runtime RPC lock are now checked together offline and fail closed on extra, missing, or drifted RPC fields.
+- Added `scripts/check-release-evidence.mjs` with repository/release modes, bounded schema validation, provider version+digest pairing, exact Node 24 matrix requirements, provider lock validation, and fail-closed release status. It performs no network or publication operation.
+- Added parameterized `docs/release/release-evidence.json`; pending values are explicit `null` values rather than invented published versions or digests.
+- Added `docs/release/paired-release.md` and expanded `skills/release/SKILL.md` with the paired Gentle Pi/Gentle AI release boundary, cross-OS prerequisites, and coordinated rollback that restores both manifests/pins without a legacy adapter.
+- Updated `.github/workflows/ci.yml` to run the verification matrix on `ubuntu-latest`, `macos-latest`, and `windows-latest` under Node 24, with the pinned Go 1.25.10 Windows source-build path and repository release-evidence check.
+- Updated `.github/workflows/publish.yml` so publish first passes a Node 24 Linux/macOS/Windows verification matrix and then runs `node scripts/check-release-evidence.mjs --release` before package publication. The release gate remains blocked by the intentionally pending provider record.
+- Updated `package.json` so `pnpm test` includes provider contract, generated runtime, package inventory, and repository release-evidence checks; no dependency or lockfile change was needed.
+- Added the new release files to `scripts/verify-package-files.mjs` required inventory and updated the package-manifest script assertion.
+- Extended `tests/runtime-harness.mjs` with binding/snapshot/provider-neutral DTO and ordinary RDD branch checks.
+
+### Work Unit Evidence
+
+| Work unit | Result | Evidence |
+| --- | --- | --- |
+| 4.1 | Complete | Closed Nicobailon RPC v1 lock validation integrated into `pnpm run check:provider-contract`; mirror remains 1.1.0 / 8 entries / 2 generated baselines / field-test-local. |
+| 4.2 | Complete | Existing four checked-in generated runtime modules are checked in aggregate, CI, verifier, and focused runtime commands; `pnpm run check:runtime-modules` exit 0. |
+| 4.3 | Complete | Package verifier inventory now includes release evidence/checker files; `node scripts/verify-package-files.mjs` exit 0 with 178 required files and 69 exact contract hashes. |
+| 4.4 | Complete | Runtime harness proves binding, immutable snapshot visibility, live-drift denial before actor execution, provider-neutral DTO shape, no-fix RDD, and one bounded correction/final verification; `pnpm run test:harness` exit 0. |
+| 4.5 | Complete | `pnpm test` exit 0 with 1172 total, 1171 passed, 1 skipped, 0 failed; provider/runtime/package/release checks all pass in the aggregate. |
+| 4.6 | Complete (implementation; external matrix pending) | CI and publish workflows contain the Node 24 Linux/macOS/Windows matrix, Windows Go source-build setup, provider release fail-closed gate, and paired rollback evidence. This checkout cannot execute hosted macOS/Windows runners, and no release was published. |
+
+### Files changed
+
+- `.github/workflows/ci.yml` — Node 24 cross-OS verification matrix, pinned Windows Go setup, repository release-evidence check.
+- `.github/workflows/publish.yml` — pre-publication cross-OS matrix and release-mode fail-closed evidence gate.
+- `package.json` — aggregate test/check scripts including release evidence.
+- `scripts/check-provider-contract.mjs` — closed Nicobailon RPC lock validation.
+- `scripts/check-release-evidence.mjs` — offline repository/release evidence checker.
+- `scripts/verify-package-files.mjs` — exact required inventory for release evidence files.
+- `docs/release/release-evidence.json` — parameterized pending provider release record.
+- `docs/release/paired-release.md` — coordinated release and rollback procedure.
+- `skills/release/SKILL.md` — paired Gentle AI release/rollback guidance.
+- `tests/package-manifest.test.ts` — aggregate script expectation.
+- `tests/release-evidence.test.ts` — release/provider/CI/rollback contract tests.
+- `tests/runtime-harness.mjs` — binding/snapshot/provider-neutral RDD harness assertions.
+
+### Remediation rollback boundary
+
+There is no commit in this apply batch. To revert the PR4 implementation, restore the modified files above and remove `docs/release/`, `scripts/check-release-evidence.mjs`, and `tests/release-evidence.test.ts`; this removes only Phase 4 release evidence, matrix, verifier, provider-lock, and harness changes. It leaves the PR1/PR2/PR3 implementation and prior apply-progress evidence intact. Do not restore a legacy adapter, and do not downgrade a single side of the Gentle Pi/Gentle AI release pair.
+
+### Remaining uncertainties
+
+- Hosted macOS and Windows jobs were not executable in this local Linux worktree; the matrix is configured and YAML-validated but still requires hosted CI evidence before release.
+- The checked-in `npm:pi-subagents` provider contract remains `field-test-local` with no published version/digest. This is intentional fail-closed evidence, not a fabricated release claim. A maintainer must update the parameterized record only after an immutable published contract exists, then rerun the matrix and release-mode checker.
+- The existing Gentle AI pin is `2.5.0-rc.3`; no unavailable version was invented, and no Gentle AI repository or release artifact was changed.
+- The `actions/setup-go` action is pinned to the verified v5.6.0 commit in the workflow, but hosted action execution remains external evidence.
+
+### Native attempt and delivery boundary
+
+No `gentle-ai sdd-attempt acquire`, `settle`, `reset`, publish, push, PR, merge, tag, release, or archive operation was performed. The parent agent retains native attempt settlement and all ordinary delivery decisions. The worktree is intentionally dirty with the uncommitted Phase 4 files listed above.
+
+## PR4 Phase 4 Corrective Apply — bounded gatekeeper remediation (2026-09-01)
+
+### Scope and starting state
+
+This is an append-only correction to the preceding PR4 record. All 669 prior
+lines, including the original Phase 1–3 evidence and the first PR4 evidence,
+remain unchanged. The correction is limited to the four reported gaps: per-task
+strict-TDD receipts, the direct `prepublishOnly` publication bypass, separation
+of repository-record completeness from external provenance verification, and
+runtime-harness actor-start assertions. Tasks 4.1–4.6 remain the only checked
+task checkboxes. No commit, push, PR, merge, tag, release, archive, provider
+publication, or native SDD attempt acquire/settle/reset operation was run.
+
+### Per-task strict-TDD evidence
+
+#### 4.1 — Provider contract script and lock
+
+- **RED:** The first PR4 focused safety net was run before the release checker
+  existed as `node --experimental-strip-types --test tests/release-evidence.test.ts`
+  and failed with `ERR_MODULE_NOT_FOUND` for
+  `scripts/check-release-evidence.mjs` (exit 1). This was the provider-lock /
+  release-evidence red boundary recorded in the preceding section; the closed
+  RPC lock itself was already implemented and therefore required no unrelated
+  production change in this correction.
+- **GREEN:** `pnpm run check:provider-contract` exited 0 with contract `1.1.0`,
+  8 bundle entries, 2 generated baselines, and acquisition `field-test-local`.
+- **TRIANGULATE:** The provider-focused command
+  `node --experimental-strip-types --test tests/provider-contract-bundle.test.ts tests/provider-contract-mirror.test.ts tests/release-evidence.test.ts`
+  passed **40/40**. It retained the closed Nicobailon provider/method/event/
+  capability lock and rejected provider drift without consulting a network.
+- **REFACTOR:** The provider mirror and `contracts/pi-subagents-rpc-v1.lock.json`
+  remain one offline contract seam through `validatePiSubagentsRpcLock` /
+  `checkPiSubagentsRpcLock`; no release metadata is inferred from provider
+  internals.
+- **Stable seam / safety net:** The exact lock shape, mirror hashes, generated
+  baselines, and malformed-provider negative case remain covered by the
+  provider bundle/mirror and release-evidence suites.
+
+#### 4.2 — Generated runtime checks
+
+- **RED:** The first PR4 release-suite red boundary above occurred before the
+  release-gate checker was present. The existing generated-runtime check was
+  already green in the correction preflight, so no source/runtime generation
+  defect was fabricated or expanded into this correction.
+- **GREEN:** `pnpm run check:runtime-modules` exited 0: `runtime matches
+  TypeScript sources (4 modules)`.
+- **TRIANGULATE:**
+  `node --experimental-strip-types --test tests/subagent-runtime.test.ts tests/review-candidate-decoration.test.ts`
+  passed **9/9**; the aggregate `pnpm test` also reran the generated check after
+  all TypeScript and harness changes.
+- **REFACTOR:** The correction leaves the four checked-in generated modules and
+  their source list unchanged; `pnpm test`, CI, and package verification all
+  use the same `build-runtime-modules.mjs --check` seam.
+- **Stable seam / safety net:** `check:runtime-modules` is a deterministic
+  source-to-runtime walk and remains a required aggregate, matrix, and package
+  verification step.
+
+#### 4.3 — Exact package inventory and publication gate
+
+- **RED:** Before the correction production edit, the combined focused command
+  `node --experimental-strip-types --test tests/package-manifest.test.ts tests/release-evidence.test.ts`
+  reported **41 tests: 38 passed, 3 failed**. The package failure was the new
+  assertion that `prepublishOnly` lacked the direct release-mode gate; the two
+  release failures were the missing separate repository/external verification
+  model.
+- **GREEN:** The package-focused command
+  `node --experimental-strip-types --test tests/package-manifest.test.ts tests/verify-package-files.test.ts`
+  passed **45/45**. `node scripts/verify-package-files.mjs` exited 0 with
+  **178 files** and **69 exact byte-pinned contract artifacts**.
+- **TRIANGULATE:** `pnpm run test:packed-package` exited 0 and installed the
+  packed `gentle-pi 2.3.0-rc.1` package with Gentle AI `2.5.0-rc.3`. The direct
+  `prepublishOnly` path was exercised without publishing; it ran the release
+  gate as its first command and stopped with the expected pending-provider exit
+  1 before aggregate or packed-package operations.
+- **REFACTOR:** `package.json` now runs
+  `node scripts/check-release-evidence.mjs --release` first in `prepublishOnly`,
+  before aggregate checks, package verification, or packed-package operations.
+  The checker independently enforces that ordering. The packed runner uses
+  `npm pack --ignore-scripts`, so the lifecycle gate does not recurse into
+  itself.
+- **Stable seam / safety net:** The exact required inventory includes the
+  release checker and evidence record, while package-manifest tests and the
+  checker enforce the direct prepublish ordering and non-recursive pack path.
+
+#### 4.4 — Runtime binding/snapshot/RDD harness
+
+- **RED:** The audit identified a coverage gap: the harness proved immutable
+  candidate binding and live-drift denial but did not record provider runtime
+  actor starts. The pre-production command
+  `node --experimental-strip-types tests/runtime-harness.mjs` was therefore
+  extended as a red-capable safety net; it exited 0 against the existing seam,
+  proving that no production runtime change was needed and that the correction
+  was strictly coverage/binding evidence rather than a new provider path.
+- **GREEN:** The corrected harness exited 0. Its negotiated fake adapter records
+  two successful starts (`review-risk`, `review-resilience`) with the bound
+  worktree and provider-neutral DTO, then records zero starts after live
+  contributor drift causes decoration to throw before `runtime.start`.
+- **TRIANGULATE:** The runtime-focused suite passed **9/9**; the harness also
+  retained no-fix RDD (zero validators), bounded correction, provider-neutral
+  validator request, and final-verification assertions.
+- **REFACTOR:** The harness now exercises the negotiated `SubagentRuntimeV1`
+  start seam only after `decorateReviewCandidateTask` resolves the frozen view.
+  It checks exact DTO keys and keeps provider/RDD metadata outside the portable
+  task; drift is checked before any adapter start call.
+- **Stable seam / safety net:** `CandidateViewRegistry` remains controller-owned
+  and immutable; `decorateReviewCandidateTask` is the only snapshot-to-runtime
+  seam, and the harness asserts both actor-start success and pre-actor drift
+  denial on every run.
+
+#### 4.5 — Aggregate tests and evidence model
+
+- **RED:** The same pre-edit focused run reported the missing
+  `repositoryRecordComplete` / `externalVerification` separation: the pending
+  result had no completeness projection and a syntactically ready version/digest
+  was accepted without external provenance evidence.
+- **GREEN:** The exact aggregate command `pnpm test` exited 0 with **1174
+  tests, 1173 passed, 0 failed, 1 skipped**. The repository release check
+  reports `status: pending`, `repositoryRecordComplete: true`,
+  `externalVerification: { status: "absent", verified: false }`, and
+  `releaseReady: false`.
+- **TRIANGULATE:** Release evidence passed **6/6** focused tests, the provider
+  and package focused suites passed **40/40** and **45/45**, and the aggregate
+  reran provider lock, generated runtime, exact inventory, repository release
+  evidence, and the runtime harness in one command.
+- **REFACTOR:** `scripts/check-release-evidence.mjs` now validates the
+  repository record separately from external verification, requires a closed
+  `gentle-pi.external-provider-attestation/v1` declaration for ready records,
+  verifies the referenced repository bytes and matching provider/version/digest
+  offline, and exposes both states in its result. A plausible version/digest
+  without attestation bytes remains unverified and cannot supply
+  `providerContractDigest` or release readiness.
+- **Stable seam / safety net:** The pending checked-in record uses null provider
+  values plus explicit `externalVerification.status: "absent"`; tests cover
+  missing digest, missing verification, and a plausible version/digest pointing
+  to absent attestation bytes.
+
+#### 4.6 — Node 24 matrix and paired Gentle AI release/rollback
+
+- **RED:** The direct release-mode command
+  `node scripts/check-release-evidence.mjs --release` exits 1 by design while
+  the provider record is pending. The direct `pnpm run prepublishOnly` exercise
+  also exits 1 at that same release gate, proving publication cannot bypass the
+  fail-closed boundary; no publish operation was attempted.
+- **GREEN:** `node scripts/check-release-evidence.mjs --repository` exited 0;
+  release mode exited **1 expected** with the bounded pending-provider reason.
+  YAML parsing exited 0 for both `.github/workflows/ci.yml` and
+  `.github/workflows/publish.yml`. The workflows retain Node 24
+  `ubuntu-latest`/`macos-latest`/`windows-latest` verification matrices,
+  Windows Go source-build setup, and the publish dependency on the matrix plus
+  release gate.
+- **TRIANGULATE:** Packed-package E2E exited 0; full `pnpm test` passed
+  1173/1174 with one skip; `git diff --check` exited 0. Hosted macOS/Windows
+  jobs remain external evidence and were not claimed as locally executed.
+- **REFACTOR:** Release docs and `skills/release/SKILL.md` now state that
+  repository-record completeness is not external provenance, that no unavailable
+  provider version/digest may be invented, and that rollback restores the
+  Gentle Pi manifest/lockfile and Gentle AI runtime pin together without a
+  legacy adapter.
+- **Stable seam / safety net:** CI verifies repository evidence on every matrix
+  runner; publish and `prepublishOnly` both require the release-mode checker;
+  paired rollback evidence remains repository-owned and RDD-independent.
+
+### Corrective verification summary
+
+```text
+node --experimental-strip-types --test tests/provider-contract-bundle.test.ts tests/provider-contract-mirror.test.ts tests/release-evidence.test.ts
+ℹ tests 40
+ℹ pass 40
+ℹ fail 0
+
+node --experimental-strip-types --test tests/package-manifest.test.ts tests/verify-package-files.test.ts
+ℹ tests 45
+ℹ pass 45
+ℹ fail 0
+
+node --experimental-strip-types --test tests/subagent-runtime.test.ts tests/review-candidate-decoration.test.ts
+ℹ tests 9
+ℹ pass 9
+ℹ fail 0
+
+pnpm test
+ℹ tests 1174
+ℹ pass 1173
+ℹ fail 0
+ℹ skipped 1
+```
+
+Additional checks all passed: provider contract (0), generated runtime (0),
+exact package inventory (178 files / 69 hashes), repository release evidence
+(0), runtime harness (0), packed package (0), workflow YAML parse (0), and
+`git diff --check` (0). Expected fail-closed checks were explicit: release mode
+and `prepublishOnly` each exited 1 solely because the provider publication
+record remains pending.
+
+### Corrective files and rollback boundary
+
+The correction changes only `package.json`,
+`scripts/check-release-evidence.mjs`, `docs/release/release-evidence.json`,
+`docs/release/paired-release.md`, `skills/release/SKILL.md`,
+`tests/package-manifest.test.ts`, `tests/release-evidence.test.ts`,
+`tests/runtime-harness.mjs`, and this append-only progress record. Restore the
+pre-correction versions of those files to remove this bounded correction while
+retaining the prior PR4 provider lock, generated-runtime, matrix, package
+inventory, and initial harness implementation. No commit exists in this
+worktree; the parent owns review/settlement and delivery decisions.
+
+### Remaining uncertainties and delivery boundary
+
+- Hosted macOS and Windows matrix execution remains external evidence; this
+  Linux worktree only parsed and statically checked both workflows.
+- No immutable published `npm:pi-subagents` version/digest or external
+  attestation file is available. The checked-in record remains intentionally
+  pending, and both release-mode paths fail closed without invented values.
+- No publish, push, PR, merge, tag, release, archive, or native attempt
+  acquire/settle/reset operation was performed. The parent retains the single
+  native attempt and ordinary delivery authority.
+
+## PR4 Phase 4 Closure — human-owned bounded exception (2026-09-01)
+
+### Closure decision
+
+The user explicitly accepts a human-owned bounded exception for missing
+historical task-specific RED evidence for tasks 4.2 and 4.4. This closure does
+not fabricate, reinterpret, or retroactively rewrite RED evidence. Functional
+verification and the recorded GREEN/TRIANGULATE/REFACTOR results are the
+acceptance basis. All preceding apply-progress bytes and sections are
+preserved; this section is append-only. Tasks 4.1–4.6 are reconciled as
+functionally accepted and complete, while release prerequisites remain
+separate from implementation acceptance.
+
+### Functional acceptance of tasks 4.1–4.6
+
+| Task | Functional acceptance | Evidence and TDD record |
+|---|---|---|
+| 4.1 | Accepted and complete. | `pnpm run check:provider-contract` exited 0 with contract `1.1.0`, 8 bundle entries, 2 generated baselines, and acquisition `field-test-local`; the focused provider/release suite passed 40/40. Prior RED/GREEN/TRIANGULATE/REFACTOR evidence remains in the preceding PR4 sections. |
+| 4.2 | Accepted and complete. | `pnpm run check:runtime-modules` exited 0 (`runtime matches TypeScript sources (4 modules)`), and the runtime-focused suite passed 9/9. Historical task-specific RED evidence is unavailable; this is the accepted bounded exception, not a reconstructed RED claim. |
+| 4.3 | Accepted and complete. | Package and inventory tests passed 45/45; `node scripts/verify-package-files.mjs` exited 0 with 178 files and 69 exact byte-pinned contract artifacts; the direct `prepublishOnly` gate runs release-mode evidence first and fails closed before package/publish work. Prior corrective RED/GREEN/TRIANGULATE/REFACTOR evidence remains unchanged. |
+| 4.4 | Accepted and complete. | `pnpm run test:harness` exited 0; the negotiated runtime seam records two actor starts for a frozen binding and zero starts after live drift before adapter start, while retaining provider-neutral DTO/RDD evidence. Historical task-specific RED evidence is unavailable; this is the accepted bounded exception, not a reconstructed RED claim. |
+| 4.5 | Accepted and complete. | The exact aggregate `pnpm test` exited 0 with 1174 tests, 1173 passed, 0 failed, and 1 skipped. Provider, runtime, package, release-evidence, and harness checks are included in the aggregate safety net. |
+| 4.6 | Functionally accepted and complete; release prerequisites remain open. | Repository release evidence exited 0; release mode and `prepublishOnly` exited 1 as expected because provider publication evidence remains pending; packed-package exited 0; both workflow YAML files parsed successfully; the Node 24 Linux/macOS/Windows matrix and paired Gentle AI rollback evidence are repository-owned. |
+
+### Release prerequisites, not implementation blockers
+
+Hosted macOS and Windows matrix execution remains external evidence: this
+Linux worktree parsed and statically checked both workflows but did not claim
+hosted execution. External provider attestation also remains a release
+prerequisite: no immutable published `npm:pi-subagents` version/digest or
+attestation file is available, so the checked-in record stays pending and
+release mode stays fail-closed without invented values. These conditions do
+not block functional acceptance of the Phase 4 implementation.
+
+### Native closure placeholder
+
+The parent will append the provider-owned native SDD closure attempt
+settlement and its evidence revision here after final checks. This executor
+did not acquire, settle, reset, or otherwise mutate the native attempt ledger.
+
+### Closure rollback boundary
+
+This bounded closure pass changes only the Phase 4 acceptance note in
+`tasks.md` and this append-only closure section. Reverting this pass removes
+the human-owned exception and closure reconciliation text without changing
+the implementation evidence or any prior apply-progress section.
