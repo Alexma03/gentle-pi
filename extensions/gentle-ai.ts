@@ -151,7 +151,13 @@ import {
 import { reconcileUnknownReviewLastEventCapture } from "../lib/review-last-event-controller.ts";
 import { recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
 import {
+	createNicobailonSubagentAdapter,
+	type NicobailonEventBusV1,
+} from "../lib/nicobailon-subagent-adapter.ts";
+import {
 	assertSubagentTaskV1,
+	createSubagentRuntime,
+	MANDATORY_SUBAGENT_CAPABILITIES,
 	type SubagentResultV1,
 	type SubagentRuntimeV1,
 	type SubagentTaskV1,
@@ -470,214 +476,15 @@ function renderBackgroundSubagentsReport(
 	};
 }
 
-const SUBAGENTS_PACKAGE_NAMES = ["pi-subagents-j0k3r", "pi-subagents"] as const;
-const SUBAGENT_RUN_TOOL = "subagent_run";
-const BOUNDED_WRITER_AGENT_NAMES = ["gentle-ai-worker", "worker"] as const;
-const ALLOWED_EDIT_SURFACES_HEADING = /^## Allowed edit surfaces[ \t]*$/gim;
-const MARKDOWN_HEADING_LINE = /^#{1,6}\s/;
-const MARKDOWN_LIST_MARKER = /^(?:[-*+]|\d+[.)])\s+/;
-const WRITER_EDIT_SURFACE_REJECTION =
-	"Parent must derive or map narrow repository-relative allowed edit surfaces from the delegated task and relaunch the writer. Do not ask the human to author paths or globs.";
-
-function isTaskScopedRepositoryRelativePath(value: string): boolean {
-	const normalized = value.replace(/\\/g, "/");
-	if (
-		normalized.length === 0 ||
-		isAbsolute(value) ||
-		/^(?:[A-Za-z]:|\/|~)/.test(normalized)
-	) {
-		return false;
-	}
-
-	const withoutCurrentDirectory = normalized.replace(/^(?:\.\/)+/, "");
-	if (
-		withoutCurrentDirectory.length === 0 ||
-		withoutCurrentDirectory === "." ||
-		withoutCurrentDirectory.startsWith("/") ||
-		/\s/.test(withoutCurrentDirectory) ||
-		withoutCurrentDirectory.split("/").some((segment) => segment === "..")
-	) {
-		return false;
-	}
-
-	return !/[?*\[\]{}]/.test(withoutCurrentDirectory.split("/")[0]);
-}
-
-/** Strips a list marker and surrounding backticks off one surface line. */
-function readSurfaceEntry(line: string): string {
-	const entry = line.replace(MARKDOWN_LIST_MARKER, "");
-	return entry.match(/^`(.+)`$/)?.[1] ?? entry;
-}
-
-/** A line still reads as a surface entry when nothing but a bare path is left. */
-function looksLikeSurfaceEntry(line: string): boolean {
-	return line.length > 0 && !MARKDOWN_HEADING_LINE.test(line) && !/\s/.test(readSurfaceEntry(line));
-}
-
-/**
- * Reads the surface list that follows an `## Allowed edit surfaces` heading.
- *
- * A delegated `task` is a whole prompt: the list is normally followed by deeper
- * headings (`### Validation commands`, `#### Return`) and by ordinary prose.
- * Ending the section only at `#`/`##` swallowed all of that, turned prose into
- * surface entries, and rejected valid authorizations (issue #484). A `context`
- * value carrying just the heading and its lines had nothing following it, which
- * is why the identical surfaces were accepted there.
- *
- * So the section ends at the next heading of ANY level, and prose closes the
- * list inside it. Blank lines never close it: an entry is only ever dropped
- * when nothing below it still reads as a surface entry. A line that a caller
- * could pass off as a path stays under validation instead of being discarded,
- * because discarding is what would let `/etc/passwd` sit under a blank line or
- * a paragraph and reach an accepted dispatch.
- */
-function readAllowedEditSurfaceEntries(following: string): string[] {
-	const lines = following.split(/\r?\n/).map((line) => line.trim());
-	const headingIndex = lines.findIndex((line) => MARKDOWN_HEADING_LINE.test(line));
-	const section = headingIndex === -1 ? lines : lines.slice(0, headingIndex);
-	const entries: string[] = [];
-
-	for (const [index, line] of section.entries()) {
-		if (line.length === 0) continue;
-		const entry = readSurfaceEntry(line);
-		if (/\s/.test(entry)) {
-			// Prose closes the list only when it is genuinely trailing. Anything
-			// below it that still reads as a path makes the section ambiguous, so
-			// every non-empty line is validated and the ambiguity is rejected.
-			if (section.slice(index + 1).some(looksLikeSurfaceEntry)) {
-				return section.filter((candidate) => candidate.length > 0).map(readSurfaceEntry);
-			}
-			break;
-		}
-		entries.push(entry);
-	}
-
-	return entries;
-}
-
-function hasTaskScopedAllowedEditSurfaces(...values: unknown[]): boolean {
-	let expectedEntries: string[] | undefined;
-	let hasSection = false;
-
-	for (const value of values) {
-		if (typeof value !== "string") continue;
-
-		const headings = value.matchAll(ALLOWED_EDIT_SURFACES_HEADING);
-		for (const heading of headings) {
-			const bodyStart = (heading.index ?? 0) + heading[0].length;
-			const entries = readAllowedEditSurfaceEntries(value.slice(bodyStart));
-			if (entries.length === 0 || !entries.every(isTaskScopedRepositoryRelativePath)) return false;
-
-			const uniqueEntries = [...new Set(entries)].sort();
-			if (
-				expectedEntries &&
-				(expectedEntries.length !== uniqueEntries.length ||
-					expectedEntries.some((entry, index) => entry !== uniqueEntries[index]))
-			) {
-				return false;
-			}
-			expectedEntries = uniqueEntries;
-			hasSection = true;
-		}
-	}
-
-	return hasSection;
-}
-
-function rejectUnscopedBoundedWriterDispatch(input: unknown): { block: true; reason: string } | undefined {
-	if (
-		!isRecord(input) ||
-		typeof input.agent !== "string" ||
-		!(BOUNDED_WRITER_AGENT_NAMES as readonly string[]).includes(input.agent)
-	) {
-		return undefined;
-	}
-	if (hasTaskScopedAllowedEditSurfaces(input.task, input.context)) {
-		return undefined;
-	}
-	return { block: true, reason: WRITER_EDIT_SURFACE_REJECTION };
-}
-
-/**
- * Roots where an installed subagents package may live. These are the same
- * roots builtinAgentDirs() walks, minus its `/agents` suffix.
- *
- * builtinAgentDirs() looks for markdown agent definitions, which the package
- * legitimately may not ship. Capability is a different question, so it must
- * not reuse that path: pi-subagents-j0k3r v1.5.2 ships index.ts, src/, skills/
- * and scripts/ and no agents/ directory at all, so an agents-dir probe reports
- * "absent" on every real install and leaves the background policy inert.
- */
-function subagentsPackageRoots(cwd: string): string[] {
-	return SUBAGENTS_PACKAGE_NAMES.flatMap((packageName) => [
-		join(PACKAGE_ROOT, "..", packageName),
-		join(cwd, ".pi", "npm", "node_modules", packageName),
-		join(homedir(), ".local", "lib", "node_modules", packageName),
-	]);
-}
-
-/** A package root counts as installed only when it carries its own manifest. */
-function hasInstalledSubagentsPackage(cwd: string): boolean {
-	return subagentsPackageRoots(cwd).some((root) =>
-		existsSync(join(root, "package.json")),
-	);
-}
-
-function hasSubagentRunTool(activeTools: readonly string[]): boolean {
-	return activeTools.some(
-		(name) => name === SUBAGENT_RUN_TOOL || name.endsWith(`.${SUBAGENT_RUN_TOOL}`),
-	);
-}
-
-/**
- * Read the live pi tool registry, or undefined when it carries no signal.
- *
- * An absent handle, a non-array result, a throwing registry, and an empty list
- * are all "no signal" rather than "no subagents": reporting absent from an
- * uninformative registry would reproduce the very defect this probe fixes.
- */
-function readActiveToolNames(pi: unknown): readonly string[] | undefined {
-	try {
-		const getActiveTools = (pi as { getActiveTools?: () => unknown })
-			?.getActiveTools;
-		if (typeof getActiveTools !== "function") return undefined;
-		const tools = getActiveTools.call(pi);
-		if (!Array.isArray(tools)) return undefined;
-		const names = tools
-			.map((tool) =>
-				typeof tool === "string"
-					? tool
-					: isRecord(tool) && typeof tool.name === "string"
-						? tool.name
-						: "",
-			)
-			.filter((name) => name.length > 0);
-		return names.length > 0 ? names : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-/**
- * `subagent_run` availability probe.
- *
- * The live tool registry answers the question directly and wins whenever it
- * carries any signal. Without it -- prompt rendering outside a session, or a
- * runtime with no getActiveTools -- capability falls back to the presence of
- * an installed subagents package.
- */
 function resolveBackgroundSubagentsCapability(
-	cwd: string,
-	activeTools?: readonly string[],
+	runtime?: Pick<SubagentRuntimeV1, "isNegotiated" | "capabilities"> | null,
 ): BackgroundSubagentsCapability {
-	try {
-		if (activeTools !== undefined && activeTools.length > 0) {
-			return hasSubagentRunTool(activeTools) ? "ready" : "absent";
-		}
-		return hasInstalledSubagentsPackage(cwd) ? "ready" : "absent";
-	} catch {
-		return "absent";
-	}
+	if (!runtime?.isNegotiated || runtime.capabilities === undefined) return "absent";
+	return MANDATORY_SUBAGENT_CAPABILITIES.every((capability) =>
+		runtime.capabilities!.capabilities.includes(capability),
+	)
+		? "ready"
+		: "absent";
 }
 
 function renderBackgroundSubagentsStatusLine(
@@ -691,11 +498,11 @@ function renderBackgroundSubagentsStatusLine(
 const orchestratorPromptCache = new Map<string, string>();
 function getOrchestratorPrompt(
 	cwd: string = process.cwd(),
-	activeTools?: readonly string[],
+	runtime?: Pick<SubagentRuntimeV1, "isNegotiated" | "capabilities"> | null,
 ): string {
 	const background: BackgroundSubagentsRendering = {
 		policy: loadBackgroundSubagentsPolicy(cwd),
-		capability: resolveBackgroundSubagentsCapability(cwd, activeTools),
+		capability: resolveBackgroundSubagentsCapability(runtime),
 	};
 	const cacheKey = `${background.policy}:${background.capability}`;
 	let prompt = orchestratorPromptCache.get(cacheKey);
@@ -754,7 +561,7 @@ const NEUTRAL_PERSONA_PROMPT = `Persona:
 function buildGentlePrompt(
 	persona: PersonaMode,
 	cwd: string = process.cwd(),
-	activeTools?: readonly string[],
+	runtime?: Pick<SubagentRuntimeV1, "isNegotiated" | "capabilities"> | null,
 ): string {
 	const personaPrompt =
 		persona === "neutral" ? NEUTRAL_PERSONA_PROMPT : GENTLEMAN_PERSONA_PROMPT;
@@ -789,7 +596,7 @@ Harness principles:
 - Protect the human reviewer: avoid oversized changes, surface review workload risk, and ask before turning one task into a large multi-area change.
 - Never claim persistent memory is available because of this package. Memory is provided by separate packages or MCP tools when installed and callable.
 
-${getOrchestratorPrompt(cwd, activeTools)}`;
+${getOrchestratorPrompt(cwd, runtime)}`;
 }
 
 // Matches `git [global-flags] push` — tolerates flags like -C /repo or --work-tree=/tmp
@@ -5210,7 +5017,6 @@ export const __testing = {
 	writeGlobalBackgroundSubagentsPolicy,
 	parseBackgroundSubagentsPolicyFile,
 	resolveBackgroundSubagentsCapability,
-	readActiveToolNames,
 	renderBackgroundSubagentsStatusLine,
 	resolveControllerSddStatus,
 	resolveStartupControllerSddStatus,
@@ -5294,24 +5100,51 @@ function parseSubagentDelegationParameters(value: unknown): SubagentDelegationPa
 	return { role: value.role.trim(), ...task };
 }
 
-function runtimeForExtension(dependencies: GentleAiRuntimeDependencies): SubagentRuntimeV1 | null {
-	return dependencies.subagentRuntime ?? null;
+function runtimeForExtension(
+	dependencies: GentleAiRuntimeDependencies,
+	events: NicobailonEventBusV1,
+): SubagentRuntimeV1 | null {
+	if (dependencies.subagentRuntime !== undefined) return dependencies.subagentRuntime;
+	if (!events || typeof events.on !== "function" || typeof events.emit !== "function") return null;
+	return createSubagentRuntime(createNicobailonSubagentAdapter({ events }));
 }
 
-function workspaceGuardForExtension(
+type WorkspaceGuardResolver = (ctx: ExtensionContext) => WorkspaceGuardV1;
+
+function createWorkspaceGuardResolver(
 	dependencies: GentleAiRuntimeDependencies,
-	ctx: ExtensionContext,
-): WorkspaceGuardV1 {
-	const injected = dependencies.workspaceGuard;
-	if (typeof injected === "function") return injected(ctx.cwd);
-	if (injected !== undefined && injected !== null) return injected;
-	return createWorkspaceGuard(bindWorkspace(ctx.cwd));
+): WorkspaceGuardResolver {
+	const sessionGuards = new WeakMap<object, WorkspaceGuardV1>();
+	const cwdGuards = new Map<string, WorkspaceGuardV1>();
+	return (ctx) => {
+		const sessionManager = (ctx as ExtensionContext & { sessionManager?: unknown }).sessionManager;
+		const sessionKey = typeof sessionManager === "object" && sessionManager !== null
+			? sessionManager
+			: undefined;
+		if (sessionKey !== undefined) {
+			const cached = sessionGuards.get(sessionKey);
+			if (cached !== undefined) return cached;
+		} else {
+			const cached = cwdGuards.get(ctx.cwd);
+			if (cached !== undefined) return cached;
+		}
+
+		const injected = dependencies.workspaceGuard;
+		const guard = typeof injected === "function"
+			? injected(ctx.cwd)
+			: injected !== undefined && injected !== null
+				? injected
+				: createWorkspaceGuard(bindWorkspace(ctx.cwd));
+		if (sessionKey !== undefined) sessionGuards.set(sessionKey, guard);
+		else cwdGuards.set(ctx.cwd, guard);
+		return guard;
+	};
 }
 
 function registerSubagentDelegationTool(
 	pi: ExtensionAPI,
 	runtime: SubagentRuntimeV1,
-	dependencies: GentleAiRuntimeDependencies,
+	workspaceGuardFor: WorkspaceGuardResolver,
 ): void {
 	pi.registerTool({
 		name: "gentle_subagent",
@@ -5322,7 +5155,7 @@ function registerSubagentDelegationTool(
 		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
 			if (signal?.aborted) throw new Error("Subagent delegation was cancelled");
 			const input = parseSubagentDelegationParameters(parameters);
-			const guard = workspaceGuardForExtension(dependencies, ctx);
+			const guard = workspaceGuardFor(ctx);
 			guard.assertPath(ctx.cwd);
 			const { role, ...task } = input;
 			await runtime.negotiate();
@@ -5364,17 +5197,21 @@ function createGentleAiExtensionForTesting(
 	const reviewConsentScheduleTimer = dependencies.scheduleTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs));
 	const pendingReviewConsentRegistry = dependencies.pendingReviewConsentRegistry ?? processPendingReviewConsentRegistry;
 	return function gentleAi(pi: ExtensionAPI): void {
-	const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
-	const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
-	const herdrLifecycle = createHerdrConfirmationLifecycle(pi.events);
-	const subagentRuntime = runtimeForExtension(dependencies);
-	if (subagentRuntime !== null) registerSubagentDelegationTool(pi, subagentRuntime, dependencies);
+		const pendingReviewConsentFallbackKey = Symbol("pending-review-consent-fallback");
+		const candidateViews = dependencies.candidateViews === undefined ? new CandidateViewRegistry() : dependencies.candidateViews;
+		const herdrLifecycle = createHerdrConfirmationLifecycle(pi.events);
+		const subagentRuntime = runtimeForExtension(dependencies, pi.events as unknown as NicobailonEventBusV1);
+		const workspaceGuardFor = subagentRuntime === null ? undefined : createWorkspaceGuardResolver(dependencies);
+		if (subagentRuntime !== null && workspaceGuardFor !== undefined) {
+			registerSubagentDelegationTool(pi, subagentRuntime, workspaceGuardFor);
+		}
 
-	pi.on("session_shutdown", (_event, context) => {
-		const sessionKey = pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey);
-		cleanupAllPendingReviewConsents(pendingReviewConsentRegistry, sessionKey);
-		processRetainedNativeStatusSelections.delete(sessionKey);
-	});
+		pi.on("session_shutdown", (_event, context) => {
+			const sessionKey = pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey);
+			cleanupAllPendingReviewConsents(pendingReviewConsentRegistry, sessionKey);
+			processRetainedNativeStatusSelections.delete(sessionKey);
+			if (dependencies.subagentRuntime === undefined) subagentRuntime?.dispose();
+		});
 
 	pi.registerTool({
 		name: "gentle_review_scope",
@@ -5563,7 +5400,7 @@ function createGentleAiExtensionForTesting(
 			: "";
 		const gentlePrompt = isNamedAgent || isSddAgent
 			? ""
-			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd), ctx.cwd, readActiveToolNames(pi))}`;
+			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd), ctx.cwd, subagentRuntime)}`;
 		return {
 			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}${nativeStatusPrompt}`,
 		};
@@ -5576,9 +5413,10 @@ function createGentleAiExtensionForTesting(
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
 		if (event.toolName === "subagent_run") {
-			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input);
-			if (writerScopeDenied) return writerScopeDenied;
 			try {
+				// Review dispatch remains owned by the native candidate-view registry.
+				// Ordinary delegation now uses gentle_subagent and never intercepts
+				// provider-specific subagent_run payloads.
 				injectReviewCandidateView(event.input, candidateViews);
 				return undefined;
 			} catch (error) {
@@ -5882,7 +5720,7 @@ function createGentleAiExtensionForTesting(
 				const wrote: BackgroundSubagentsPolicy | undefined = subAction === "enable" ? "on" : subAction === "disable" ? "off" : undefined;
 				if (wrote !== undefined) writeGlobalBackgroundSubagentsPolicy(wrote);
 				const resolution = resolveBackgroundSubagentsPolicy(ctx.cwd);
-				const capability = resolveBackgroundSubagentsCapability(ctx.cwd, readActiveToolNames(pi));
+				const capability = resolveBackgroundSubagentsCapability(subagentRuntime);
 				const report = renderBackgroundSubagentsReport(resolution, capability, wrote);
 				ctx.ui.notify(report.message, report.type);
 			} catch (error) {
