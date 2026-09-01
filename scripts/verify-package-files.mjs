@@ -152,6 +152,7 @@ const requiredPaths = [
 	"runtime/review-relay-contract.mjs",
   "scripts/check-provider-contract.mjs",
   "scripts/check-release-evidence.mjs",
+	"scripts/canonical-test-temp.mjs",
   "scripts/gentle-ai-installer.mjs",
   "scripts/install-gentle-ai.mjs",
   "scripts/mirror-provider-contract.mjs",

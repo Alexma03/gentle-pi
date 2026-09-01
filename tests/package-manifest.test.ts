@@ -202,7 +202,7 @@ test("generated runtime modules and packed-package checks are deterministic", ()
 	const ci = readFileSync(join(PACKAGE_ROOT, ".github", "workflows", "ci.yml"), "utf8");
 	assert.equal(packageJson.scripts?.["build:runtime-modules"], "node scripts/build-runtime-modules.mjs --write");
 	assert.equal(packageJson.scripts?.["check:runtime-modules"], "node scripts/build-runtime-modules.mjs --check");
-	assert.equal(packageJson.scripts?.["test:packed-package"], "node scripts/test-packed-runner.mjs");
+	assert.equal(packageJson.scripts?.["test:packed-package"], "node --import ./scripts/canonical-test-temp.mjs scripts/test-packed-runner.mjs");
 	assert.match(packageJson.scripts?.prepublishOnly ?? "", /pnpm run test:packed-package/);
 	assert.match(ci, /pnpm run check:runtime-modules/);
 	assert.match(ci, /pnpm run test:packed-package/);
@@ -1189,7 +1189,20 @@ test("v2.3.0-rc.1 release package and runtime stop before publication", () => {
 	assert.equal(packageJson.version, "2.3.0-rc.1", "the release manifest must remain explicitly pinned to v2.3.0-rc.1");
 	assert.equal(
 		packageJson.scripts?.test,
-		"node --experimental-strip-types --test tests/*.test.ts && pnpm run check:provider-contract && pnpm run check:runtime-modules && node scripts/verify-package-files.mjs && pnpm run check:release-evidence && pnpm run test:harness",
+		"node --import ./scripts/canonical-test-temp.mjs --experimental-strip-types --test tests/*.test.ts && pnpm run check:provider-contract && pnpm run check:runtime-modules && node scripts/verify-package-files.mjs && pnpm run check:release-evidence && pnpm run test:harness",
+	);
+	assert.equal(
+		packageJson.scripts?.["test:harness"],
+		"node --import ./scripts/canonical-test-temp.mjs --experimental-strip-types tests/runtime-harness.mjs",
+	);
+	assert.equal(
+		packageJson.scripts?.["test:packed-package"],
+		"node --import ./scripts/canonical-test-temp.mjs scripts/test-packed-runner.mjs",
+	);
+	assert.match(
+		readFileSync(join(PACKAGE_ROOT, "scripts", "verify-package-files.mjs"), "utf8"),
+		/"scripts\/canonical-test-temp\.mjs"/,
+		"package verification must require the cross-platform canonical temp bootstrap",
 	);
 	assert.ok(packageJson.files?.includes("assets/"));
 	assert.ok(packageJson.files?.includes("contracts/"));
