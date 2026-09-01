@@ -337,3 +337,16 @@ pnpm test
 ### Correction rollback boundary
 
 Revert `aee4885e` to remove the bounded audit correction while retaining the original PR2 slice. The correction is isolated to `lib/work-unit-scheduler.ts`, `lib/review-correction-lifecycle.ts`, `lib/sdd-status.ts`, `extensions/gentle-ai.ts`, and their focused/regression tests. The apply-progress append is a separate documentation-only commit and can be reverted independently. No Phase 3/4 file or task was changed.
+
+## PR2 targeted validation failure — terminal bookkeeping
+
+This section is appended after targeted validation. No source or test files were changed in this bookkeeping turn.
+
+- **Task state:** 2.1 remains complete; 2.2 is unchecked because its full lease-identity and final-verification evidence proof failed; 2.3–2.7 remain complete. Phase 3 tasks 3.1–3.6 and Phase 4 tasks 4.1–4.6 remain unchecked.
+- **Targeted validation outcome:** failed.
+- **Candidate-caused defects observed:**
+  - A forged cross-unit lease was accepted because `workUnitId` was omitted from the lease identity comparison.
+  - Sparse successful evidence created as `new Array(1)` bypassed the non-empty evidence proof because array holes were not rejected.
+- **Existing passing evidence retained:** targeted suites passed 85/85, 127/127, and 110/110; full `pnpm test` passed 1210 of 1211 tests with 0 failures, 0 cancellations, and 1 skipped test; provider-contract, runtime-modules, harness, and `git diff --check` were green.
+- **Native settlement:** request ID `codex-pr2-settle-20260901t150537z-11201`; evidence revision `sha256:4bc50e6549654f81511cb4ddd3d27a71f248b72bca2fb0b4201e8a951100da84`; outcome `failed`; result state `proceed`.
+- **Continuation:** No replacement acquire was performed per user instruction. Parent retains native continuation/settlement authority. No source/test correction was attempted in this terminal bookkeeping turn.
