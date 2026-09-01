@@ -108,6 +108,7 @@ const requiredPaths = [
 ];
 
 const contractHashes = {
+  "contracts/pi-subagents-rpc-v1.lock.json": "a5aee6e5ae7481af83876cb8dbd575e381cf599ef689cf16981d6509004bc963",
   "contracts/review-integration/v1/fixtures/binding-revision-conflict.fixture.json": "c2e294843cee5185324cb7a41702574ef94852517239d99e7493a1414a60b363",
   "contracts/review-integration/v1/fixtures/capabilities-v1.1.fixture.json": "1b3dc40dce7bfb5d3ecc7e92af68d66e71b733ba0b0f71ba94d3c633adc48bcf",
   "contracts/review-integration/v1/fixtures/capabilities-v1.2.fixture.json": "2970d21cd95a7fcaea6547c47a591a5151046e7ede658b3e8c5b9a9c5d106b65",
