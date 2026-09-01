@@ -51,15 +51,13 @@ The canonical per-action table is the mirrored gentle-ai canon Delegation Rules 
 
 Before launching bounded writer (`gentle-ai-worker` or `worker`), task/context needs nonempty `## Allowed edit surfaces`: narrow repository-relative paths/globs; never `.`, bare repo root, or absolute. Parent derives surfaces, maps unknown targets read-only, shows derived candidates only for genuine scope choices. Do not ask the human to author paths or globs.
 
-Mandatory Delegation Triggers — stop rules; once fired, delegate through the best available subagent runtime (prefer `subagent_run`, else Pi's native `Agent`):
+Mandatory Delegation Triggers — stop rules; once fired, delegate through the best available provider-neutral runtime (`gentle_subagent`, then Pi's native `Agent`):
 
 1. **4-file rule** — 4+ files to understand → delegate a scout/mapping task.
 2. **Multi-file write rule** — 2+ non-trivial files touched → delegate one writer.
 3. **Incident rule** — diagnose wrong cwd/worktree/git/tooling incidents separately before resuming work.
 4. **Verification rule** — executing/delegating verification commands → `gentle-ai-verify`; only the 1-3-file read-only check stays inline.
 5. **Long-session rule** — ~20 tool calls, 5 exploratory reads, or 2 non-mechanical edits without delegation → pause and delegate.
-
-{{GENTLE_PI_BACKGROUND_POLICY}}; rules: the background-subagents block in the delegation contract.
 
 Full table, Work Routing Ladder examples/model-routing detail, Cost and Context Balance, Canonical Workflows, and the mirrored gentle-ai canon (blocking-prompt relays, language, and delegation): `orchestrator-delegation.md`.
 

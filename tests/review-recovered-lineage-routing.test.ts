@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { __testing } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
-import { CandidateViewRegistry, injectReviewCandidateView } from "../lib/review-candidate-view.ts";
+import { CandidateViewRegistry, decorateReviewCandidateTask } from "../lib/review-candidate-view.ts";
 import type { ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 
 // Live-confirmed adapter defects (2026-08-16, gentle-ai 2.4.0-main, Engram
@@ -163,7 +163,11 @@ test("STATUS discovery hydrates the dispatch binding for an externally recovered
 
 	// The controller does not know this lineage: dispatch refuses.
 	assert.throws(
-		() => injectReviewCandidateView({ agent: "review-reliability", task: "review", mode: "task" }, registry),
+		() => decorateReviewCandidateTask({
+			role: "review-reliability",
+			task: { task: "review", context: "", dependencies: [], expectedOutcome: "review complete" },
+			candidateViews: registry,
+		}),
 		/no current controller-owned candidate view lineage binding/,
 	);
 
@@ -174,9 +178,12 @@ test("STATUS discovery hydrates the dispatch binding for an externally recovered
 	// STATUS, the dispatch binding must be hydrated from that status.
 	assert.equal(registry.hasCurrentBinding(), true, "STATUS discovery must hydrate the controller-owned dispatch binding");
 	try {
-		const dispatch: Record<string, unknown> = { agent: "review-reliability", task: "review the recovered successor", mode: "task" };
-		assert.doesNotThrow(() => injectReviewCandidateView(dispatch, registry));
-		assert.match(String(dispatch.task), new RegExp(successor));
+		const dispatch = decorateReviewCandidateTask({
+			role: "review-reliability",
+			task: { task: "review the recovered successor", context: "", dependencies: [], expectedOutcome: "review complete" },
+			candidateViews: registry,
+		});
+		assert.match(dispatch.task, new RegExp(successor));
 		assert.equal(registry.resolveCurrentForLens("review-reliability").candidateTree, frozen.currentCandidateTree);
 	} finally {
 		registry.cleanup(registry.resolveCurrentForLens("review-reliability").token);

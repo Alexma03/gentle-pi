@@ -69,7 +69,6 @@ test("static prompts retain normal SDD and delegated-work guidance", () => {
 	}
 	for (const heading of [
 		"### Delegation Rules",
-		"#### Background Subagent Policy",
 		"#### Allowed edit surfaces (MANDATORY)",
 		"### 3. SDD (optional)",
 	]) {

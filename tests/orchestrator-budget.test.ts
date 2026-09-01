@@ -255,8 +255,8 @@ const CURRENT_SDD_WORKFLOW_PATH = "`sdd-orchestrator-workflow.md`";
 const CURRENT_HARD_PREFLIGHT_INVARIANT = "Hard preflight invariant: `openspec/config.yaml`, existing SDD changes, installed `.pi`/global SDD assets, or a todo named \"preflight\" are not session preflight. Do not mark SDD preflight complete, start `sdd-init`, launch SDD subagents/chains, or move to explore/proposal/spec/design/tasks until this session has an injected `## SDD Session Preflight` block or a canonical-authority resolution. Defaults and capability constraints may resolve fields without confirmation prompts; preserve unresolved-choice and safety gates.";
 const SUPERSEDED_LIFECYCLE_REVIEW_LINES = new Set([
 	70,
-	// 74/77: the loose mode-choice background lines were replaced by the
-	// marked gentle-pi:background-subagents policy block (issue #256).
+	// 74/77: the loose mode-choice lines were replaced by the canonical
+	// delegation contract (issue #256).
 	74,
 	76,
 	77,

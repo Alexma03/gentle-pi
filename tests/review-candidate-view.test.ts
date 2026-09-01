@@ -14,14 +14,34 @@ import {
 	type CandidateGitExecutor,
 	createCandidateView,
 	decodeCandidateContextManifest,
+	decorateReviewCandidateTask,
 	deriveChangedPathManifest,
 	digestChangedPathManifest,
-	injectReviewCandidateView,
 	readCandidateContextManifestPage,
 } from "../lib/review-candidate-view.ts";
 
 function git(cwd: string, ...arguments_: string[]): string {
 	return execFileSync("git", arguments_, { cwd, encoding: "utf8" }).trim();
+}
+
+function decorateDispatch(
+	input: { agent?: string; agents?: string[]; task: string; context?: string; mode?: string },
+	registry: CandidateViewRegistry,
+): { task: string; context: string; dependencies: string[]; expectedOutcome: string } {
+	const role = input.agent ?? input.agents?.[0];
+	assert.ok(role, "provider-neutral review dispatch requires one role");
+	const decorated = decorateReviewCandidateTask({
+		role,
+		task: {
+			task: input.task,
+			context: input.context ?? "",
+			dependencies: [],
+			expectedOutcome: "review complete",
+		},
+		candidateViews: registry,
+	});
+	input.task = decorated.task;
+	return decorated;
 }
 
 function repository(t: test.TestContext): string {
@@ -510,7 +530,7 @@ test("candidate registry rejects a lineage target whose authorized symlink was r
 test("review subagent dispatch rejects missing candidate views and uses the explicitly current overlapping lens", (t) => {
 	const missing = new CandidateViewRegistry();
 	assert.throws(
-		() => injectReviewCandidateView({ agent: "review-risk", task: "review", mode: "task" }, missing),
+		() => decorateDispatch({ agent: "review-risk", task: "review", mode: "task" }, missing),
 		CandidateViewError,
 	);
 	const contributorRoot = repository(t);
@@ -522,7 +542,7 @@ test("review subagent dispatch rejects missing candidate views and uses the expl
 	const second = registry.create({ contributorRoot });
 	registry.bindCurrent({ token: second.token, lineageId: "second", selectedLenses: ["review-risk"] });
 	const dispatch = { agent: "review-risk", task: "review", mode: "task" };
-	assert.doesNotThrow(() => injectReviewCandidateView(dispatch, registry));
+	assert.doesNotThrow(() => decorateDispatch(dispatch, registry));
 	assert.match(dispatch.task, new RegExp(`Frozen candidate tree: \`${second.candidateTree}\``));
 	registry.cleanup(first.token);
 	registry.cleanup(second.token);
@@ -617,7 +637,7 @@ test("candidate view exposes a compact 45-path changed scope for a 293-entry can
 	assert.equal(Object.keys(view.modes).length, 45);
 	assert.equal(view.paths.includes("unchanged-000.txt"), false);
 	const dispatch = { agent: "review-risk", task: "review", mode: "task" };
-	assert.doesNotThrow(() => injectReviewCandidateView(dispatch, registry));
+	assert.doesNotThrow(() => decorateDispatch(dispatch, registry));
 	assert.ok(dispatch.task.length <= 4_096);
 	registry.cleanup(view.token);
 });
@@ -645,7 +665,7 @@ test("candidate view derives deletion, rename, executable, and symlink scope fro
 		assert.deepEqual(view.modes, { "linked.sh": "120000", "renamed.txt": "100644", "script.sh": "100755" });
 		registry.bind({ token: view.token, lineageId: "scope-kinds", selectedLenses: ["review-risk"] });
 		const dispatch = { agent: "review-risk", task: "review", mode: "task" };
-		injectReviewCandidateView(dispatch, registry);
+		decorateDispatch(dispatch, registry);
 		assert.match(dispatch.task, /Frozen changed scope by mode: .*"deleted":\["deleted\.txt"\]/);
 		assert.doesNotMatch(dispatch.task, /Frozen paths:|Frozen modes:/);
 		view.verify();
@@ -695,8 +715,8 @@ test("candidate view compacts an oversized non-ASCII scope losslessly and determ
 		registry.bind({ token: view.token, lineageId: "oversized-scope", selectedLenses: ["review-risk"] });
 		const first = { agent: "review-risk", task: "review", mode: "task" };
 		const second = { agent: "review-risk", task: "review", mode: "task" };
-		injectReviewCandidateView(first, registry);
-		injectReviewCandidateView(second, registry);
+		decorateDispatch(first, registry);
+		decorateDispatch(second, registry);
 		const compact = compactCandidateContextManifest(first.task);
 		assert.deepEqual(compact, compactCandidateContextManifest(second.task));
 		const decoded = decodeCandidateContextManifest(compact.encoded, compact.sha256);
@@ -790,7 +810,7 @@ test("candidate view fails closed when an incompressible compact scope exceeds 4
 	try {
 		registry.bind({ token: view.token, lineageId: "incompressible-scope", selectedLenses: ["review-risk"] });
 		assert.throws(
-			() => injectReviewCandidateView({ agent: "review-risk", task: "review", mode: "task" }, registry),
+			() => decorateDispatch({ agent: "review-risk", task: "review", mode: "task" }, registry),
 			/candidate view context exceeds the bounded dispatch contract/,
 		);
 	} finally {
@@ -926,8 +946,8 @@ test("current lineage binding selects its exact frozen tree despite overlapping 
 		}
 		const single = { agent: "review-risk", task: "review", mode: "task" };
 		const parallel = { agents: [...lenses], task: "review", mode: "task" };
-		injectReviewCandidateView(single, registry);
-		injectReviewCandidateView(parallel, registry);
+		decorateDispatch(single, registry);
+		decorateDispatch(parallel, registry);
 		assert.match(single.task, /Controller-owned review lineage: `current`/);
 		assert.match(parallel.task, new RegExp(`Frozen candidate tree: \`${current.candidateTree}\``));
 		assert.throws(() => registry.resolveCurrentForLens("review-unknown"), CandidateViewError);
@@ -1085,7 +1105,7 @@ test("fresh registries restore only one exact authoritative reviewing candidate 
 	try {
 		restored.restoreCurrentFromAuthoritativeReviewingStates(contributorRoot, [state]);
 		const dispatch = { agent: "review-reliability", task: "review", mode: "task" };
-		injectReviewCandidateView(dispatch, restored);
+		decorateDispatch(dispatch, restored);
 		assert.match(dispatch.task, /Controller-owned review lineage: `reloaded-current`/);
 		assert.throws(() => restored.resolveCurrentForLens("review-risk"), (error: unknown) => error instanceof CandidateViewError && error.reason === "current-binding-lens-unselected");
 		for (const candidates of [[], [state, { ...state, lineageId: "duplicate" }]]) {
@@ -1340,7 +1360,7 @@ test("live candidate drift blocks dispatch before candidate text can be injected
 		const input = { agent: "review-reliability", task: "review", mode: "task" };
 		let error: unknown;
 		try {
-			injectReviewCandidateView(input, registry);
+			decorateDispatch(input, registry);
 		} catch (value) {
 			error = value;
 		}

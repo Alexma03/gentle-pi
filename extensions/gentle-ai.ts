@@ -99,7 +99,7 @@ import {
 } from "../lib/review-snapshot.ts";
 import { renderGentleAiLifecycleCall, renderGentleAiResult, type GentleAiRenderContext } from "../lib/gentle-ai-renderer.ts";
 import { sanitizeTerminalText, stripAnsi } from "../lib/terminal-theme.ts";
-import { CandidateViewError, CandidateViewRegistry, decorateReviewCandidateTask, injectReviewCandidateView, isReviewLens, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
+import { CandidateViewError, CandidateViewRegistry, decorateReviewCandidateTask, isReviewLens, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
 import {
 	GentleAiDevBinaryOverrideError,
 	GentleAiPinnedMainBinaryError,
@@ -159,7 +159,6 @@ import {
 import {
 	assertSubagentTaskV1,
 	createSubagentRuntime,
-	MANDATORY_SUBAGENT_CAPABILITIES,
 	type SubagentResultV1,
 	type SubagentRuntimeV1,
 	type SubagentTaskV1,
@@ -246,285 +245,22 @@ function sddLocalAgentOverrideCount(cwd: string): number {
 	return count;
 }
 
-// ---------------------------------------------------------------------------
-// Background subagents policy — project > global > env > default off
-// ---------------------------------------------------------------------------
-
-type BackgroundSubagentsPolicy = "on" | "off";
-type BackgroundSubagentsCapability = "ready" | "absent";
-
-interface BackgroundSubagentsRendering {
-	policy: BackgroundSubagentsPolicy;
-	capability: BackgroundSubagentsCapability;
-}
-
-/** Which of the four sources decided the effective policy. */
-type BackgroundSubagentsSource =
-	| "project_file"
-	| "global_file"
-	| "environment"
-	| "default";
-
-interface BackgroundSubagentsResolution {
-	policy: BackgroundSubagentsPolicy;
-	source: BackgroundSubagentsSource;
-	/** The deciding file was present but failed the strict decode. */
-	malformed: boolean;
-	projectFile: string;
-	globalFile: string;
-	projectFileExists: boolean;
-	globalFileExists: boolean;
-	/** The raw env value, reported even when it is unrecognized and inert. */
-	envValue: string | undefined;
-}
-
-interface LoadBackgroundSubagentsOptions {
-	/** Override the config home directory (used in tests to avoid touching ~/.pi). */
-	gentlePiConfigHome?: string;
-	/** Override the environment lookup (used in tests). */
-	env?: Record<string, string | undefined>;
-}
-
-const BACKGROUND_SUBAGENTS_SCHEMA = "gentle-pi.background-subagents/v1";
-const BACKGROUND_SUBAGENTS_FILE = "background-subagents.json";
-
-const DEFAULT_BACKGROUND_SUBAGENTS_RENDERING: BackgroundSubagentsRendering = {
-	policy: "off",
-	capability: "absent",
-};
-
-/**
- * Strict decode of {"schema":"gentle-pi.background-subagents/v1","policy":"on"|"off"}.
- * Any malformed shape (bad JSON, wrong schema, unknown keys, invalid policy)
- * returns undefined so the caller fails closed to "off".
- */
-function parseBackgroundSubagentsPolicyFile(
-	raw: string,
-): BackgroundSubagentsPolicy | undefined {
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(raw);
-	} catch {
-		return undefined;
-	}
-	if (!isRecord(parsed)) return undefined;
-	if (parsed.schema !== BACKGROUND_SUBAGENTS_SCHEMA) return undefined;
-	if (parsed.policy !== "on" && parsed.policy !== "off") return undefined;
-	if (Object.keys(parsed).length !== 2) return undefined;
-	return parsed.policy;
-}
-
-/**
- * Resolve the background-subagents policy AND the source that decided it.
- *
- * Resolution order (first hit wins, mirroring loadRuntimeGuardrailsConfig):
- *   1. Project file `${cwd}/.pi/gentle-ai/background-subagents.json`
- *   2. Global file `${configHome}/background-subagents.json`
- *      (configHome honors GENTLE_PI_CONFIG_HOME, default ~/.pi/gentle-ai)
- *   3. Env var GENTLE_PI_BACKGROUND_SUBAGENTS ("on" | "off")
- *   4. Default "off"
- *
- * A present-but-malformed file fails closed to "off" instead of falling
- * through to a lower-priority source, and it stays attributed to that file:
- * "off decided by a broken project file" and "off by default" are different
- * situations, and only the first one is a mistake to fix.
- *
- * Four sources with first-hit-wins is exactly the shape that makes an edit
- * look like it did nothing, so the deciding source is part of the result
- * rather than something a caller has to re-derive.
- */
-function resolveBackgroundSubagentsPolicy(
-	cwd: string,
-	options: LoadBackgroundSubagentsOptions = {},
-): BackgroundSubagentsResolution {
-	const env = options.env ?? process.env;
-	const envValue = env.GENTLE_PI_BACKGROUND_SUBAGENTS;
-	let projectFile = "";
-	let globalFile = "";
-	try {
-		const configHome = options.gentlePiConfigHome ?? gentleAiConfigHome();
-		projectFile = join(cwd, ".pi", "gentle-ai", BACKGROUND_SUBAGENTS_FILE);
-		globalFile = join(configHome, BACKGROUND_SUBAGENTS_FILE);
-		const projectFileExists = existsSync(projectFile);
-		const globalFileExists = existsSync(globalFile);
-		const locations = { projectFile, globalFile, projectFileExists, globalFileExists, envValue };
-		for (const [source, path, present] of [
-			["project_file", projectFile, projectFileExists],
-			["global_file", globalFile, globalFileExists],
-		] as const) {
-			if (!present) continue;
-			let decoded: BackgroundSubagentsPolicy | undefined;
-			try {
-				decoded = parseBackgroundSubagentsPolicyFile(readFileSync(path, "utf8"));
-			} catch {
-				// Unreadable is indistinguishable from unusable at this layer, and
-				// both must fail closed on the file that claimed the decision.
-				decoded = undefined;
-			}
-			return decoded === undefined
-				? { policy: "off", source, malformed: true, ...locations }
-				: { policy: decoded, source, malformed: false, ...locations };
-		}
-		if (envValue === "on" || envValue === "off") {
-			return { policy: envValue, source: "environment", malformed: false, ...locations };
-		}
-		return { policy: "off", source: "default", malformed: false, ...locations };
-	} catch {
-		return {
-			policy: "off",
-			source: "default",
-			malformed: false,
-			projectFile,
-			globalFile,
-			projectFileExists: false,
-			globalFileExists: false,
-			envValue,
-		};
-	}
-}
-
-/**
- * The effective policy alone, for callers that do not report a source.
- * It delegates so the loader and the resolver can never disagree.
- */
-function loadBackgroundSubagentsPolicy(
-	cwd: string,
-	options: LoadBackgroundSubagentsOptions = {},
-): BackgroundSubagentsPolicy {
-	return resolveBackgroundSubagentsPolicy(cwd, options).policy;
-}
-
-/** Write the global policy file, creating the config home when needed. */
-function writeGlobalBackgroundSubagentsPolicy(
-	policy: BackgroundSubagentsPolicy,
-	configHome: string = gentleAiConfigHome(),
-): string {
-	const path = join(configHome, BACKGROUND_SUBAGENTS_FILE);
-	mkdirSync(configHome, { recursive: true });
-	writeFileSync(
-		path,
-		`${JSON.stringify({ schema: BACKGROUND_SUBAGENTS_SCHEMA, policy }, null, 2)}\n`,
-	);
-	return path;
-}
-
-function describeBackgroundSubagentsSource(
-	resolution: BackgroundSubagentsResolution,
-): string {
-	switch (resolution.source) {
-		case "project_file":
-			return `project file ${resolution.projectFile}`;
-		case "global_file":
-			return `global file ${resolution.globalFile}`;
-		case "environment":
-			return "GENTLE_PI_BACKGROUND_SUBAGENTS";
-		default:
-			return "built-in default";
-	}
-}
-
-/**
- * Report the effective policy, the source that decided it, and the resolved
- * capability, plus whatever the user needs to know about the sources that did
- * NOT decide. `wrote` names a policy this invocation just wrote to the global
- * file; a write that a higher-priority file outranks must never be reported as
- * if it had taken effect.
- */
-function renderBackgroundSubagentsReport(
-	resolution: BackgroundSubagentsResolution,
-	capability: BackgroundSubagentsCapability,
-	wrote?: BackgroundSubagentsPolicy,
-): { message: string; type: "info" | "warning" } {
-	const lines = [
-		`background subagents: ${resolution.policy} (decided by ${describeBackgroundSubagentsSource(resolution)}; capability: ${capability})`,
-	];
-	if (wrote !== undefined) {
-		lines.push(`Wrote ${wrote} to the global file ${resolution.globalFile}.`);
-	}
-	if (resolution.malformed) {
-		const path =
-			resolution.source === "project_file" ? resolution.projectFile : resolution.globalFile;
-		lines.push(
-			`${path} is present but malformed, so the policy fails closed to off and no lower-priority source is consulted.`,
-		);
-	}
-	const outranksTheWrite = wrote !== undefined && resolution.source === "project_file";
-	if (outranksTheWrite) {
-		lines.push(
-			`That global write does not take effect here: the project file ${resolution.projectFile} outranks it. Edit or remove that project file to let the global setting decide.`,
-		);
-	} else if (
-		wrote === undefined &&
-		resolution.source === "project_file" &&
-		resolution.globalFileExists
-	) {
-		lines.push(
-			`The global file ${resolution.globalFile} exists but is outranked by that project file.`,
-		);
-	}
-	if (resolution.envValue !== undefined && resolution.source !== "environment") {
-		lines.push(
-			resolution.envValue === "on" || resolution.envValue === "off"
-				? `GENTLE_PI_BACKGROUND_SUBAGENTS=${resolution.envValue} is set, but both files outrank it and it outranks the built-in default; it decides only when neither file exists.`
-				: `GENTLE_PI_BACKGROUND_SUBAGENTS="${resolution.envValue}" is not a recognized value ("on" or "off"), so it is ignored.`,
-		);
-	}
-	lines.push(
-		"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default off.",
-	);
-	return {
-		message: lines.join("\n"),
-		type: resolution.malformed || outranksTheWrite ? "warning" : "info",
-	};
-}
-
-function resolveBackgroundSubagentsCapability(
-	runtime?: Pick<SubagentRuntimeV1, "isNegotiated" | "capabilities"> | null,
-): BackgroundSubagentsCapability {
-	if (!runtime?.isNegotiated || runtime.capabilities === undefined) return "absent";
-	return MANDATORY_SUBAGENT_CAPABILITIES.every((capability) =>
-		runtime.capabilities!.capabilities.includes(capability),
-	)
-		? "ready"
-		: "absent";
-}
-
-function renderBackgroundSubagentsStatusLine(
-	background: BackgroundSubagentsRendering,
-): string {
-	return `Background subagent policy: ${background.policy} (capability: ${background.capability})`;
-}
-
-// Rendered prompts are memoized per background policy/capability key for the
-// process lifetime; the assets bytes themselves are read once per key.
+// Rendered prompts are memoized for the process lifetime; asset bytes are read
+// once per package root and never augmented with provider-specific policy.
 const orchestratorPromptCache = new Map<string, string>();
-function getOrchestratorPrompt(
-	cwd: string = process.cwd(),
-	runtime?: Pick<SubagentRuntimeV1, "isNegotiated" | "capabilities"> | null,
-): string {
-	const background: BackgroundSubagentsRendering = {
-		policy: loadBackgroundSubagentsPolicy(cwd),
-		capability: resolveBackgroundSubagentsCapability(runtime),
-	};
-	const cacheKey = `${background.policy}:${background.capability}`;
+function getOrchestratorPrompt(cwd: string = process.cwd()): string {
+	const cacheKey = resolve(ASSETS_DIR);
 	let prompt = orchestratorPromptCache.get(cacheKey);
 	if (prompt === undefined) {
-		prompt = renderOrchestratorPrompt(ASSETS_DIR, background);
+		prompt = renderOrchestratorPrompt(ASSETS_DIR);
 		orchestratorPromptCache.set(cacheKey, prompt);
 	}
 	return prompt;
 }
 
-function renderOrchestratorPrompt(
-	assetsDir: string,
-	background: BackgroundSubagentsRendering = DEFAULT_BACKGROUND_SUBAGENTS_RENDERING,
-): string {
+function renderOrchestratorPrompt(assetsDir: string): string {
 	return readFileSync(join(assetsDir, "orchestrator.md"), "utf8")
 		.replaceAll("{{GENTLE_PI_ASSETS_ROOT}}", assetsDir)
-		.replaceAll(
-			"{{GENTLE_PI_BACKGROUND_POLICY}}",
-			renderBackgroundSubagentsStatusLine(background),
-		)
 		.trim();
 }
 
@@ -563,7 +299,6 @@ const NEUTRAL_PERSONA_PROMPT = `Persona:
 function buildGentlePrompt(
 	persona: PersonaMode,
 	cwd: string = process.cwd(),
-	runtime?: Pick<SubagentRuntimeV1, "isNegotiated" | "capabilities"> | null,
 ): string {
 	const personaPrompt =
 		persona === "neutral" ? NEUTRAL_PERSONA_PROMPT : GENTLEMAN_PERSONA_PROMPT;
@@ -598,7 +333,7 @@ Harness principles:
 - Protect the human reviewer: avoid oversized changes, surface review workload risk, and ask before turning one task into a large multi-area change.
 - Never claim persistent memory is available because of this package. Memory is provided by separate packages or MCP tools when installed and callable.
 
-${getOrchestratorPrompt(cwd, runtime)}`;
+${getOrchestratorPrompt(cwd)}`;
 }
 
 // Matches `git [global-flags] push` — tolerates flags like -C /repo or --work-tree=/tmp
@@ -979,7 +714,6 @@ const ASK_USER_CHOICE_BLOCKED_EVENT = "gentle-pi:ask-user-choice:blocked";
 const HERDR_BLOCKER_LABEL = {
 	CHOICE: "Choice awaiting input",
 	GUARDED_CONFIRMATION: "Guarded command confirmation",
-	QUESTIONNAIRE: "Questionnaire awaiting input",
 } as const;
 
 type HerdrBlockerLabel = (typeof HERDR_BLOCKER_LABEL)[keyof typeof HERDR_BLOCKER_LABEL];
@@ -992,16 +726,13 @@ type HerdrConfirmationLifecycle = {
 function createHerdrConfirmationLifecycle(events: ExtensionAPI["events"]): HerdrConfirmationLifecycle {
 	let pending = 0;
 	let choiceActive = false;
-	let questionnaireActive = false;
 	let emittedLabel: HerdrBlockerLabel | undefined;
 	const emitEffectiveBlocker = (): void => {
 		const nextLabel = choiceActive
 			? HERDR_BLOCKER_LABEL.CHOICE
-			: questionnaireActive
-				? HERDR_BLOCKER_LABEL.QUESTIONNAIRE
-				: pending > 0
-					? HERDR_BLOCKER_LABEL.GUARDED_CONFIRMATION
-					: undefined;
+			: pending > 0
+				? HERDR_BLOCKER_LABEL.GUARDED_CONFIRMATION
+				: undefined;
 		if (nextLabel === emittedLabel) return;
 		emittedLabel = nextLabel;
 		if (nextLabel === undefined) events.emit("herdr:blocked", { active: false });
@@ -1011,12 +742,6 @@ function createHerdrConfirmationLifecycle(events: ExtensionAPI["events"]): Herdr
 	events?.on?.(ASK_USER_CHOICE_BLOCKED_EVENT, (event) => {
 		if (!isRecord(event) || typeof event.active !== "boolean" || event.active === choiceActive) return;
 		choiceActive = event.active;
-		emitEffectiveBlocker();
-	});
-
-	events?.on?.("rpiv:ask-user:blocked", (event) => {
-		if (!isRecord(event) || typeof event.active !== "boolean" || event.active === questionnaireActive) return;
-		questionnaireActive = event.active;
 		emitEffectiveBlocker();
 	});
 
@@ -1371,9 +1096,6 @@ async function listAgentsFromDirAsync(
 
 function builtinAgentDirs(cwd: string): string[] {
 	return [
-		join(PACKAGE_ROOT, "..", "pi-subagents-j0k3r", "agents"),
-		join(cwd, ".pi", "npm", "node_modules", "pi-subagents-j0k3r", "agents"),
-		join(homedir(), ".local", "lib", "node_modules", "pi-subagents-j0k3r", "agents"),
 		join(PACKAGE_ROOT, "..", "pi-subagents", "agents"),
 		join(cwd, ".pi", "npm", "node_modules", "pi-subagents", "agents"),
 		join(homedir(), ".local", "lib", "node_modules", "pi-subagents", "agents"),
@@ -5013,13 +4735,6 @@ export const __testing = {
 	renderSddModelPanel: renderSddModelPanelForTesting,
 	getOrchestratorPrompt,
 	renderOrchestratorPrompt,
-	loadBackgroundSubagentsPolicy,
-	resolveBackgroundSubagentsPolicy,
-	renderBackgroundSubagentsReport,
-	writeGlobalBackgroundSubagentsPolicy,
-	parseBackgroundSubagentsPolicyFile,
-	resolveBackgroundSubagentsCapability,
-	renderBackgroundSubagentsStatusLine,
 	resolveControllerSddStatus,
 	resolveControllerSddStatusRouting,
 	resolveStartupControllerSddStatus,
@@ -5424,7 +5139,7 @@ function createGentleAiExtensionForTesting(
 			: "";
 		const gentlePrompt = isNamedAgent || isSddAgent
 			? ""
-			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd), ctx.cwd, subagentRuntime)}`;
+			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd), ctx.cwd)}`;
 		return {
 			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}${nativeStatusPrompt}`,
 		};
@@ -5436,20 +5151,6 @@ function createGentleAiExtensionForTesting(
 			event.input,
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
-		if (event.toolName === "subagent_run") {
-			try {
-				// Review dispatch remains owned by the native candidate-view registry.
-				// Ordinary delegation now uses gentle_subagent and never intercepts
-				// provider-specific subagent_run payloads.
-				injectReviewCandidateView(event.input, candidateViews);
-				return undefined;
-			} catch (error) {
-				return {
-					block: true,
-					reason: error instanceof Error ? error.message : "review subagent dispatch is invalid",
-				};
-			}
-		}
 		if (event.toolName !== "bash") return undefined;
 		if (!isRecord(event.input) || typeof event.input.command !== "string") {
 			return undefined;
@@ -5725,31 +5426,6 @@ function createGentleAiExtensionForTesting(
 					ctx.ui.notify("Gentle AI review mode is not available with the currently negotiated native version.", "info");
 					return;
 				}
-				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
-			}
-		},
-	});
-
-	// Mirrors gentle:review-mode: a user-owned switch, never an automated one.
-	// It matters more here than there, because this policy governs whether
-	// background subagents may be launched at all, so nothing in Pi may write
-	// it. The only writer is this handler, reached only by explicit invocation.
-	pi.registerCommand("gentle:background-subagents", {
-		description: "Show or set the managed background-subagents policy (status|enable|disable). Every sub-action is user-initiated only; Pi automation never toggles it.",
-		handler: async (args, ctx) => {
-			const subAction = args.trim().length === 0 ? "status" : args.trim();
-			if (subAction !== "status" && subAction !== "enable" && subAction !== "disable") {
-				ctx.ui.notify(`Unknown /gentle:background-subagents sub-action "${subAction}". Use status, enable, or disable.`, "warning");
-				return;
-			}
-			try {
-				const wrote: BackgroundSubagentsPolicy | undefined = subAction === "enable" ? "on" : subAction === "disable" ? "off" : undefined;
-				if (wrote !== undefined) writeGlobalBackgroundSubagentsPolicy(wrote);
-				const resolution = resolveBackgroundSubagentsPolicy(ctx.cwd);
-				const capability = resolveBackgroundSubagentsCapability(subagentRuntime);
-				const report = renderBackgroundSubagentsReport(resolution, capability, wrote);
-				ctx.ui.notify(report.message, report.type);
-			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
 		},

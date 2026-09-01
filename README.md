@@ -27,8 +27,6 @@ Follow the project and the community around it:
 - YouTube: [Gentleman Programming](https://www.youtube.com/c/GentlemanProgramming)
 - Community Discord: [Gentleman Programming](https://discord.com/invite/gentleman-programming-769863833996754944)
 
-Startup intro collaboration: thanks to [@aporcelli](https://github.com/aporcelli) for [`pi-gentle-startup`](https://github.com/aporcelli/pi-gentle-startup), which inspired the clean-screen startup animation, compact runtime panel, and pink visual treatment.
-
 ## The problem
 
 Most coding-agent sessions fail for operational reasons, not model reasons:
@@ -48,7 +46,6 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 | Capability                     | What it does                                                                                                                                  |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | **el Gentleman persona**       | Makes Pi behave like a senior architect and teacher, not a generic chatbot. Spanish responses use Rioplatense voseo by default; neutral mode is saved globally with project overrides. |
-| **Configurable startup intro** | Adds a rose/text-logo startup intro, compact runtime panel, color presets, and commands to hide or show the decorative parts.                  |
 | **Work routing discipline**    | Small tasks stay inline. Context-heavy exploration can be delegated. Large or risky changes go through SDD/OpenSpec.                          |
 | **SDD/OpenSpec assets**        | Installs phase agents and chains for `init`, `onboard`, `explore`, `proposal`, `spec`, `design`, `tasks`, `apply`, `verify`, `sync`, and `archive`. |
 | **Lazy SDD preflight**         | Resolves SDD mode, artifact store, and delivery strategy once per session; prompts only when a choice is genuinely unresolved.                            |
@@ -62,8 +59,6 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 | **Bounded native review**      | Freezes one candidate, dispatches only controller-selected lenses, and records native authority. Review outcomes are informational; delivery follows ordinary repository policy. |
 | **Verified native runtime**    | Provisions the exact package-local Gentle AI v2.5.0-rc.3 runtime: SHA-256-pinned prerelease binaries on Darwin/Linux and a Go SumDB-verified source build on Windows x64/arm64. It validates package-local integrity and rejects PATH, global, sibling, symlink, and mode fallbacks. |
 | **Runtime safety**             | Blocks destructive shell commands, asks for confirmation for sensitive operations, and blocks direct read/write/edit access to sensitive paths. |
-
-**Migration note:** Do not enable `pi-tool-cards` and `quiet-tools` together: Pi rejects duplicate `bash`, `read`, `edit`, and `write` registrations. Disable or remove the standalone package during migration; gentle-pi does not alter user configuration or delete that repository.
 
 ## Install
 
@@ -88,13 +83,8 @@ The latest RDD package installs Gentle AI only into its private `.gentle-ai/` di
 Recommended companion packages:
 
 ```bash
-pi install npm:pi-subagents-j0k3r
-pi install npm:pi-intercom
+pi install npm:pi-subagents
 pi install npm:gentle-engram
-pi install npm:pi-web-access
-pi install npm:pi-lens
-pi install npm:@juicesharp/rpiv-todo
-pi install npm:@juicesharp/rpiv-ask-user-question
 ```
 
 Then start Pi in a project:
@@ -114,8 +104,6 @@ pi
 /sdd-init                  Create or refresh openspec/config.yaml (openspec/both stores only).
 /gentle:models             Assign global model/effort routing to SDD/custom agents.
 /gentle:persona            Switch between gentleman and neutral persona modes.
-/gentle:background-subagents  Show or set the managed background-subagents policy, with its deciding source.
-/gentle:banner             Configure startup rose, text logo, and color preset.
 ```
 
 Typical flow:
@@ -150,7 +138,7 @@ The goal is not ceremony. The goal is to avoid accidental chaos. Once a task sto
 
 ### Delegation triggers
 
-`gentle-pi` keeps the parent session thin and delegates at the narrowest useful point. When the Pi Subagents extension is installed, the preferred runtime is the `subagent_*` tool family because it runs the user's configured project/global subagent definitions and preserves history/background behavior. Use waiting/task mode when the parent must consume the result and continue the workflow; use background mode only for independent work where parent continuation is not required. If those tools are unavailable, the parent should fall back to Pi's native `Agent` tool or another available delegation mechanism. The requirement is delegation; the runtime is capability-dependent.
+`gentle-pi` keeps the parent session thin and delegates at the narrowest useful point. Provider-neutral delegation goes through the package-owned `gentle_subagent` tool when a negotiated runtime is available; it resolves the user's configured project/global agent definitions and preserves the task contract. If that capability is unavailable, use Pi's native `Agent` tool or another available delegation mechanism under the same read-only and workspace rules. The requirement is delegation; the runtime is capability-dependent.
 
 | Trigger                                                                                                                     | Required behavior                                                             |
 | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -518,7 +506,7 @@ The modal discovers:
 
 - project agents in `.pi/subagents/`, `.pi/agents/`, and `.agents/`;
 - user agents in `~/.pi/agent/subagents/`, `~/.pi/agent/agents/`, and `~/.agents/`;
-- built-in agents from `pi-subagents-j0k3r` when present.
+- package-managed agents from `pi-subagents` and the package's global agent directories when present.
 
 When applying routing, project agents write runtime profiles to `.pi/subagents.json`; global and built-in agents write profiles to `~/.pi/agent/subagents.json`.
 
@@ -566,13 +554,8 @@ Legacy string entries are still accepted and treated as `model`-only config.
 | `/gentle:doctor`              | Runs read-only diagnostics for SDD assets, model/persona config, memory tools, and safety guards. |
 | `/gentle:models`                 | Opens global model + effort assignment UI. Press `x` to export and `r` to restore saved routing. |
 | `/gentle:persona`                | Switches global persona mode, with project override support.        |
-| `/gentle:background-subagents`   | Shows or sets the managed background-subagents policy (`status\|enable\|disable`), naming the source that decided it. |
 | `/gentle:pinned-main`            | Registers, inspects, or clears a digest- and provenance-bound local Gentle AI main snapshot (`status\|<path>\|off`). |
 | `/gentle:dev-binary`             | Registers, inspects, or clears the unpinned field-test binary override (`status\|<path>\|off`). |
-| `/gentle:banner`                 | Configures startup banner rose, text logo, and color preset.        |
-| `/gentle:toggle-rose`            | Toggles the startup rose.                                           |
-| `/gentle:toggle-text-logo`       | Toggles the startup text logo.                                      |
-| `/gentle:banner-color`           | Selects a startup banner color preset.                              |
 | `/sdd-init`                      | Initializes or refreshes `openspec/config.yaml` (openspec/both stores only). |
 | `/gentle:install-sdd`         | Repairs missing global SDD runtime assets without overwriting files. |
 | `/gentle:install-sdd --force` | Force-refreshes installed global SDD assets.                         |
@@ -588,31 +571,6 @@ Custom binary resolution is fail-closed and ordered: an explicit session `GENTLE
 `/gentle:pinned-main <absolute snapshot binary>` reads the adjacent `integrity.json`, requires `sourceBranch: main` or `custom/main` (any other branch fails closed), requires an HTTPS `sourceRepository` with a non-empty host and no embedded credentials, binds the source revision and source-tree digest, binds the exact `buildCommand`, computes the binary SHA-256, and writes `~/.pi/gentle-ai/pinned-main-binary.json` with mode `0600`. Every resolution recomputes the digest and rechecks the snapshot manifest. `/gentle:pinned-main off` removes only the registration, never the snapshot. A `GENTLE_PI_GENTLE_AI_DEV_BINARY` present as an empty string is a declared invalid channel and fails closed; it never falls through to another binary.
 
 The `/gentle:dev-binary` lane remains intentionally unpinned for short-lived field tests. Registering one channel clears the other persistent channel so status output always identifies the effective mode accurately.
-
-### Background subagents policy
-
-Background delegation is off unless you turn it on. The policy is user-owned: only an explicit `/gentle:background-subagents enable` or `disable` writes it, and Pi automation never toggles it.
-
-```text
-/gentle:background-subagents           Report the effective policy, the deciding source, and the resolved capability.
-/gentle:background-subagents enable    Write "on" to the global file.
-/gentle:background-subagents disable   Write "off" to the global file.
-```
-
-Four sources can decide the policy, and the first hit wins:
-
-| Priority | Source                                            | Notes                                                        |
-| -------- | ------------------------------------------------- | ------------------------------------------------------------ |
-| 1        | `<cwd>/.pi/gentle-ai/background-subagents.json`   | Project file. Outranks everything, including a global write.  |
-| 2        | `<configHome>/background-subagents.json`          | Global file, written by `enable`/`disable`. `configHome` honors `GENTLE_PI_CONFIG_HOME` and defaults to `~/.pi/gentle-ai`. |
-| 3        | `GENTLE_PI_BACKGROUND_SUBAGENTS`                  | Exactly `on` or `off`. Any other value is ignored.            |
-| 4        | Built-in default                                  | `off`.                                                        |
-
-Both files use the strict shape `{"schema":"gentle-pi.background-subagents/v1","policy":"on"}`. A file that is present but malformed fails closed to `off` and is **not** skipped in favor of a lower-priority source, so a typo in the project file disables background subagents rather than silently handing the decision to the global file. The command reports that case as a warning instead of an ordinary `off`.
-
-Because the project file outranks the global one, `enable` still writes the global file but reports plainly when a project file keeps the effective policy unchanged. The resolved capability (`ready` or `absent`) reports whether `subagent_run` is actually callable in this session; a policy of `on` with capability `absent` means the subagents package is not installed.
-
-Startup banner settings are global and default to the current pink rose + text logo. Supported color presets are `pink`, `cyan`, `yellow`, and `green`.
 
 Startup flag:
 
@@ -668,7 +626,6 @@ Memory contract for SDD delegation:
 | `scripts/gentle-ai-installer.mjs` | Installs signed Darwin/Linux archives or exact Go SumDB-verified Windows source builds into the package-local runtime. |
 | `contracts/review-integration/v1/` | Byte-identical provider schemas and conformance fixtures for contract `review-integration/v1`, hash-checked before packaging; retained on disk permanently because `/v2`'s schemas `$ref` into these fragments. |
 | `contracts/review-integration/v2/` | Byte-identical provider schemas and conformance fixtures for contract `review-integration/v2` (immutable `base_tree`/`candidate_tree`, ordered `changed_path_manifest`, no inline candidate diff), hash-checked before packaging. |
-| `extensions/startup-banner.ts` | Shows and configures the startup intro, color presets, compact runtime panel, and collaboration credit.     |
 | `extensions/sdd-init.ts`       | Registers `/sdd-init` for OpenSpec initialization.                                                         |
 | `extensions/skill-registry.ts` | Maintains `.atl/skill-registry.md` from project/user skills and closes file watchers on shutdown.          |
 | `assets/orchestrator.md`       | Parent-session orchestration contract (always-on core).                                                    |
@@ -700,7 +657,6 @@ pnpm test
 bun build extensions/skill-registry.ts --target=node --format=esm --outfile=/tmp/skill-registry.js
 node --experimental-strip-types --check extensions/gentle-ai.ts
 node --experimental-strip-types --check extensions/sdd-init.ts
-node --experimental-strip-types --check extensions/startup-banner.ts
 npm pack --dry-run
 ```
 

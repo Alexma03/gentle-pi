@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { __testing } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
-import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView } from "../lib/review-candidate-view.ts";
+import { CandidateViewError, CandidateViewRegistry, decorateReviewCandidateTask } from "../lib/review-candidate-view.ts";
 import type { ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 
 // Field report (2026-08-16, gentle-pi main 402f9f77 + gentle-ai
@@ -139,7 +139,11 @@ test("STATUS keeps hydrating and stays read-only when hydration fails", async (t
 	assert.equal(envelope.operation, "status");
 	assert.equal(registry.hasCurrentBinding(), false);
 	assert.throws(
-		() => injectReviewCandidateView({ agent: "review-reliability", task: "review", mode: "task" }, registry),
+		() => decorateReviewCandidateTask({
+			role: "review-reliability",
+			task: { task: "review", context: "", dependencies: [], expectedOutcome: "review complete" },
+			candidateViews: registry,
+		}),
 		(error: unknown) => error instanceof CandidateViewError && error.reason === "current-binding-hydration-failed",
 	);
 });

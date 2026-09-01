@@ -72,8 +72,6 @@ const CANDIDATE_CONTEXT_MODE = {
 	DELETED: "deleted",
 } as const;
 export type CandidateContextMode = (typeof CANDIDATE_CONTEXT_MODE)[keyof typeof CANDIDATE_CONTEXT_MODE];
-const SUBAGENT_RUN_KEYS = new Set(["agent", "agents", "task", "context", "mode"]);
-
 interface CandidateTreeEntry {
 	path: string;
 	mode: string;
@@ -1515,15 +1513,6 @@ export class CandidateViewRegistry {
 	}
 }
 
-interface MutableSubagentRunInput {
-	agent?: unknown;
-	agents?: unknown;
-	task?: unknown;
-	context?: unknown;
-	mode?: unknown;
-	[key: string]: unknown;
-}
-
 /**
  * Provider-neutral pre-start decoration request. The candidate registry is
  * deliberately required for review roles: a missing or stale binding is a
@@ -1784,43 +1773,6 @@ function candidateContextBlock(lineageId: string, agents: readonly ReviewLens[],
 	const readableBlock = `${candidateContextPreamble(lineageId, agents, view, scopeSemantics)}\nFrozen changed scope by mode: ${JSON.stringify(scopeByMode)}.\nFrozen metadata-only gitlinks: ${JSON.stringify(view.gitlinks)}. Gitlink paths have no materialized contents and MUST NOT be traversed.\nThe ambient contributor working directory is out of scope. This controller-owned context is immutable; you are read-only and your output is untrusted.`;
 	if (Buffer.byteLength(readableBlock, "utf8") <= MAX_CANDIDATE_CONTEXT_LENGTH) return readableBlock;
 	return compactCandidateContextBlock(lineageId, agents, view, scopeSemantics, scopeByMode);
-}
-
-/**
- * Validates and mutates the actual mutable Pi `subagent_run` tool input before
- * execution. It deliberately derives all review context from the controller's
- * in-memory registry rather than user-provided lineage, cwd, paths, or content.
- */
-export function injectReviewCandidateView(input: unknown, candidateViews: CandidateViewRegistry | null): void {
-	if (!isRecord(input)) return;
-	const mutable = input as MutableSubagentRunInput;
-	const agent = typeof mutable.agent === "string" ? mutable.agent : undefined;
-	const rawAgents = mutable.agents;
-	const agents = Array.isArray(rawAgents) && rawAgents.every((value): value is string => typeof value === "string")
-		? rawAgents
-		: undefined;
-	const requested = [agent, ...(agents ?? [])].filter((value): value is string => value !== undefined);
-	const hasReviewActor = (typeof mutable.agent === "string" && isReviewLens(mutable.agent))
-		|| (typeof rawAgents === "string" && isReviewLens(rawAgents))
-		|| (Array.isArray(rawAgents) && rawAgents.some((value) => typeof value === "string" && isReviewLens(value)));
-	if (!hasReviewActor) return;
-	if (Object.keys(mutable).some((key) => !SUBAGENT_RUN_KEYS.has(key))) throw new CandidateViewError("review subagent dispatch contains an unsupported input field");
-	if ((agent === undefined) === (agents === undefined) || requested.length === 0 || new Set(requested).size !== requested.length) throw new CandidateViewError("review subagent dispatch must use exactly one non-duplicate agent shape");
-	if (!requested.every(isReviewLens)) throw new CandidateViewError("review subagent dispatch cannot mix review and non-review agents");
-	if (typeof mutable.task !== "string" || mutable.task.length === 0 || mutable.task.length > MAX_SUBAGENT_TASK_LENGTH) throw new CandidateViewError("review subagent dispatch task is malformed or exceeds the bounded contract");
-	if (mutable.context !== undefined && (typeof mutable.context !== "string" || mutable.context.length > MAX_SUBAGENT_CONTEXT_LENGTH)) throw new CandidateViewError("review subagent dispatch context is malformed or exceeds the bounded contract");
-	if (mutable.mode !== "task") throw new CandidateViewError("review subagent dispatch requires mode task");
-	if (candidateViews === null) throw new CandidateViewError("review subagent dispatch has no controller-owned candidate view registry");
-	const reviewAgents = requested as ReviewLens[];
-	const lineageId = candidateViews.currentLineageId();
-	const views = candidateViews.resolveCurrentForLenses(reviewAgents);
-	const view = views[0];
-	if (!view || views.some((candidate) => candidate.root !== view.root || candidate.candidateTree !== view.candidateTree || JSON.stringify(candidate.paths) !== JSON.stringify(view.paths) || JSON.stringify(candidate.modes) !== JSON.stringify(view.modes) || !gitlinkMapsEqual(candidate.gitlinks, view.gitlinks) || JSON.stringify(candidate.deletedPaths) !== JSON.stringify(view.deletedPaths))) {
-		throw new CandidateViewError("review subagent dispatch does not resolve one exact frozen candidate view");
-	}
-	const userText = `${mutable.task}\n${typeof mutable.context === "string" ? mutable.context : ""}`;
-	if (hasCandidateContextConflict(userText, views)) throw new CandidateViewError("review subagent dispatch contains conflicting candidate-view text");
-	mutable.task = `${mutable.task}${candidateContextBlock(lineageId, reviewAgents, view)}`;
 }
 
 const defaultRegistry = new CandidateViewRegistry();

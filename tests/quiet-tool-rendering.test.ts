@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { initTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { imageFallback, visibleWidth } from "@earendil-works/pi-tui";
-import piPretty from "../extensions/pi-pretty.ts";
 import quietTools, {
 	countNonEmptyLines,
 	extractTextContent,
@@ -86,26 +85,6 @@ function createPi(options: { throwOnToolConflict?: boolean } = {}) {
 	};
 }
 
-function createSdkTool(name: string) {
-	return {
-		name,
-		label: name,
-		description: `${name} tool`,
-		parameters: { type: "object", properties: {} },
-		execute: async () => textResult(`${name} result`),
-	};
-}
-
-const fakePiPrettyDeps = {
-	sdk: {
-		createReadTool: () => createSdkTool("read"),
-		createBashTool: () => createSdkTool("bash"),
-		createLsTool: () => createSdkTool("ls"),
-		createFindTool: () => createSdkTool("find"),
-		createGrepTool: () => createSdkTool("grep"),
-	},
-};
-
 function withEnv<T>(updates: Record<string, string | undefined>, run: () => T): T {
 	const previous = Object.fromEntries(Object.keys(updates).map((key) => [key, process.env[key]]));
 	try {
@@ -114,22 +93,6 @@ function withEnv<T>(updates: Record<string, string | undefined>, run: () => T): 
 			else process.env[key] = value;
 		}
 		return run();
-	} finally {
-		for (const [key, value] of Object.entries(previous)) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-	}
-}
-
-async function withEnvAsync<T>(updates: Record<string, string | undefined>, run: () => Promise<T>): Promise<T> {
-	const previous = Object.fromEntries(Object.keys(updates).map((key) => [key, process.env[key]]));
-	try {
-		for (const [key, value] of Object.entries(updates)) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-		return await run();
 	} finally {
 		for (const [key, value] of Object.entries(previous)) {
 			if (value === undefined) delete process.env[key];
@@ -200,40 +163,6 @@ test("quiet tool rendering can be disabled by env", () => {
 
 		assert.equal(tools.size, 0);
 	});
-});
-
-test("pi-pretty suppresses overlapping tools before quiet tools register", async () => {
-	await withEnvAsync(
-		{ GENTLE_PI_QUIET_TOOLS: undefined, PRETTY_DISABLE_TOOLS: "multi_grep" },
-		async () => {
-			const { pi, tools } = createPi({ throwOnToolConflict: true });
-
-			await piPretty(pi as any, fakePiPrettyDeps as any);
-			quietTools(pi as any);
-
-			for (const toolName of ["read", "bash", "grep", "find", "ls", "edit", "write"]) {
-				assert.ok(tools.has(toolName), `missing quiet tool ${toolName}`);
-			}
-			assert.equal(process.env.PRETTY_DISABLE_TOOLS, "multi_grep,read,bash,ls,find,grep");
-		},
-	);
-});
-
-test("pi-pretty suppression is skipped when quiet tools are disabled", async () => {
-	await withEnvAsync(
-		{ GENTLE_PI_QUIET_TOOLS: "0", PRETTY_DISABLE_TOOLS: undefined },
-		async () => {
-			const { pi, tools } = createPi();
-
-			await piPretty(pi as any, fakePiPrettyDeps as any);
-			quietTools(pi as any);
-
-			for (const toolName of ["read", "bash", "grep", "find", "ls"]) {
-				assert.ok(tools.has(toolName), `pi-pretty should keep ${toolName} when quiet tools are disabled`);
-			}
-			assert.equal(process.env.PRETTY_DISABLE_TOOLS, undefined);
-		},
-	);
 });
 
 test("quiet tool rendering uses bounded previews while preserving search summaries", () => {

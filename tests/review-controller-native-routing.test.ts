@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension, PendingReviewConsentRegistry } from "../extensions/gentle-ai.ts";
-import { CandidateViewRegistry } from "../lib/review-candidate-view.ts";
+import { CandidateViewRegistry, decorateReviewCandidateTask } from "../lib/review-candidate-view.ts";
 import { NATIVE_REVIEW_ERROR_CODE, NativeReviewCliError, NativeReviewConsentRequiredError, type NativeReviewCli } from "../lib/native-review-cli.ts";
 import { decodeReviewConsentV3, type ReviewCollectInputV3, type ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 
@@ -995,23 +995,29 @@ test("controller-owned dispatch confines single and parallel graph actors to the
 	await controller.execute("start", { operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, undefined, undefined, reviewContext(cwd));
 	const current = candidateViews.resolveForLens("current-4r", "review-risk");
 	try {
-		const single = { agent: "review-risk", task: "Inspect", mode: "task" };
-		const parallel = { agents: [...lenses], task: "Inspect", mode: "task" };
-		assert.equal(await toolCall({ toolName: "subagent_run", input: single }, reviewContext(cwd)), undefined);
-		assert.equal(await toolCall({ toolName: "subagent_run", input: parallel }, reviewContext(cwd)), undefined);
+		const single = decorateReviewCandidateTask({
+			role: "review-risk",
+			task: { task: "Inspect", context: "", dependencies: [], expectedOutcome: "review complete" },
+			candidateViews,
+		});
+		const parallel = decorateReviewCandidateTask({
+			role: "review-resilience",
+			task: { task: "Inspect", context: "", dependencies: [], expectedOutcome: "review complete" },
+			candidateViews,
+		});
 		for (const task of [single.task, parallel.task]) {
 			assert.match(task, /Controller-owned review lineage: `current-4r`/);
 			assert.match(task, new RegExp(`Frozen candidate tree: \`${current.candidateTree}\``));
 			assert.match(task, /ambient contributor working directory is out of scope/);
 		}
-		for (const malformed of [
-			{ agent: "review-risk", agents: ["review-risk"], task: "Inspect", mode: "task" },
-			{ agents: ["review-risk", "worker"], task: "Inspect", mode: "task" },
-			{ agent: "review-risk", task: "Inspect", mode: "background" },
-		]) {
-			const rejected = await toolCall({ toolName: "subagent_run", input: malformed }, reviewContext(cwd)) as { block?: boolean };
-			assert.equal(rejected.block, true);
-		}
+		assert.throws(
+			() => decorateReviewCandidateTask({
+				role: "worker",
+				task: { task: "Inspect", context: "", dependencies: [], expectedOutcome: "review complete" },
+				candidateViews,
+			}),
+			/Candidate|review subagent role/i,
+		);
 	} finally {
 		candidateViews.cleanup(current.token);
 	}

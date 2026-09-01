@@ -18,14 +18,6 @@ const EXTENSIONS = [
 	"extensions/quiet-tools.ts",
 	"extensions/skill-registry.ts",
 	"extensions/sdd-init.ts",
-	"extensions/startup-banner.ts",
-];
-
-const EXPECTED_BANNER_COMMANDS = [
-	"gentle:banner",
-	"gentle:toggle-rose",
-	"gentle:toggle-text-logo",
-	"gentle:banner-color",
 ];
 
 const EXPECTED_COMMANDS = [
@@ -39,7 +31,6 @@ const EXPECTED_COMMANDS = [
 	"gentle:doctor",
 	"sdd-init",
 	"skill-registry:refresh",
-	...EXPECTED_BANNER_COMMANDS,
 ];
 
 const FORBIDDEN_COMPAT_COMMANDS = [
@@ -53,10 +44,6 @@ const FORBIDDEN_COMPAT_COMMANDS = [
 	"gentleman:persona",
 	"gentle-ai:status",
 	"gentle-ai:doctor",
-	"gentle-ai:banner",
-	"gentle-ai:toggle-rose",
-	"gentle-ai:toggle-text-logo",
-	"gentle-ai:banner-color",
 ];
 
 function createPi() {
@@ -540,112 +527,6 @@ async function run() {
 		const denied = await toolHook({ toolName: "bash", input: { command: "rm -rf /" } }, createCtx(toolCwd));
 		assert.equal(denied.block, true);
 		assert.match(denied.reason, /destructive/);
-		const reviewDispatch = { agent: "review-risk", task: "review", mode: "task" };
-		const missingReviewView = await toolHook({ toolName: "subagent_run", input: reviewDispatch }, createCtx(toolCwd));
-		assert.equal(missingReviewView.block, true);
-		assert.match(missingReviewView.reason, /candidate view/i);
-		assert.equal(reviewDispatch.task, "review", "blocked review dispatch must not mutate child input");
-
-		for (const [agent, label, task] of [
-			["gentle-ai-worker", "missing", "Implement the requested change."],
-			["gentle-ai-worker", "absolute", "## Allowed edit surfaces\n/tmp/outside.ts"],
-			["gentle-ai-worker", "Windows absolute", "## Allowed edit surfaces\nC:\\outside.ts"],
-			["gentle-ai-worker", "prose instead of paths", "## Allowed edit surfaces\nThe parent will determine the paths."],
-			["gentle-ai-worker", "repository root", "## Allowed edit surfaces\n."],
-			["gentle-ai-worker", "bare repository root", "## Allowed edit surfaces\n./"],
-			["gentle-ai-worker", "normalized bare repository root", "## Allowed edit surfaces\n.//"],
-			["gentle-ai-worker", "equivalent normalized bare repository root", "## Allowed edit surfaces\n././/"],
-			["worker", "generic writer missing", "Implement the requested change."],
-		]) {
-			const writerDispatch = { agent, task, mode: "task" };
-			const writerResult = await toolHook(
-				{ toolName: "subagent_run", input: writerDispatch },
-				createCtx(toolCwd),
-			);
-			assert.equal(writerResult, undefined, `${label} legacy writer dispatch must not be intercepted`);
-			assert.equal(writerDispatch.task, task, "legacy delegation hook must not mutate child input");
-		}
-
-		const scopedWriterDispatch = {
-			agent: "gentle-ai-worker",
-			task: "Implement the requested change.\n\n## Allowed edit surfaces\nextensions/gentle-ai.ts\ntests/runtime-harness.mjs",
-			mode: "task",
-		};
-		assert.equal(
-			await toolHook({ toolName: "subagent_run", input: scopedWriterDispatch }, createCtx(toolCwd)),
-			undefined,
-			"a writer may dispatch with narrow task-scoped repository-relative paths",
-		);
-		assert.equal(
-			await toolHook(
-				{
-					toolName: "subagent_run",
-					input: {
-						agent: "worker",
-						task: "Implement the requested change.",
-						context: "## Allowed edit surfaces\n- assets/orchestrator.md",
-						mode: "task",
-					},
-				},
-				createCtx(toolCwd),
-			),
-			undefined,
-			"a writer may dispatch when context carries narrow task-scoped repository-relative paths",
-		);
-		for (const [label, input] of [
-			[
-				"valid scope followed by a repository-root scope",
-				{
-					agent: "gentle-ai-worker",
-					task: "## Allowed edit surfaces\nextensions/gentle-ai.ts\n\n## Allowed edit surfaces\n.",
-					mode: "task",
-				},
-			],
-			[
-				"valid task scope plus invalid context scope",
-				{
-					agent: "gentle-ai-worker",
-					task: "## Allowed edit surfaces\nextensions/gentle-ai.ts",
-					context: "## Allowed edit surfaces\n.",
-					mode: "task",
-				},
-			],
-			[
-				"conflicting valid task and context scopes",
-				{
-					agent: "gentle-ai-worker",
-					task: "## Allowed edit surfaces\nextensions/gentle-ai.ts",
-					context: "## Allowed edit surfaces\ntests/runtime-harness.mjs",
-					mode: "task",
-				},
-			],
-		]) {
-			const writerResult = await toolHook({ toolName: "subagent_run", input }, createCtx(toolCwd));
-			assert.equal(writerResult, undefined, `${label} legacy writer dispatch must not be intercepted`);
-		}
-		assert.equal(
-			await toolHook(
-				{
-					toolName: "subagent_run",
-					input: {
-						agent: "gentle-ai-worker",
-						task: "## Allowed edit surfaces\nextensions/gentle-ai.ts\ntests/runtime-harness.mjs\n\n## Allowed edit surfaces\n- `tests/runtime-harness.mjs`\n- `extensions/gentle-ai.ts`",
-						mode: "task",
-					},
-				},
-				createCtx(toolCwd),
-			),
-			undefined,
-			"a writer may dispatch when multiple allowed edit surface sections are compatible",
-		);
-		assert.equal(
-			await toolHook(
-				{ toolName: "subagent_run", input: { agent: "scout", task: "Map the repository.", mode: "task" } },
-				createCtx(toolCwd),
-			),
-			undefined,
-			"non-writer subagents must remain unaffected",
-		);
 		const sensitiveRead = await toolHook({ toolName: "read", input: { path: join(toolCwd, ".env.local") } }, createCtx(toolCwd));
 		assert.equal(sensitiveRead.block, true);
 		assert.match(sensitiveRead.reason, /sensitive path/);
@@ -698,24 +579,6 @@ async function run() {
 		);
 		assert.equal(emittedEvents[0].data.requestId, emittedEvents[2].data.requestId);
 		emittedEvents.length = 0;
-		pi.events.emit("rpiv:ask-user:blocked", {
-			active: true,
-			question: "private runtime questionnaire",
-			answer: "private runtime answer",
-			path: "/private/runtime-path",
-			command: "private runtime command",
-		});
-		pi.events.emit("rpiv:ask-user:blocked", { active: true, duplicate: true });
-		pi.events.emit("rpiv:ask-user:blocked", { active: "true" });
-		pi.events.emit("rpiv:ask-user:other", { active: false });
-		pi.events.emit("rpiv:ask-user:blocked", { active: false });
-		const rpivHerdrEvents = emittedEvents.filter(({ channel }) => channel === "herdr:blocked");
-		assert.deepEqual(rpivHerdrEvents, [
-			{ channel: "herdr:blocked", data: { active: true, label: "Questionnaire awaiting input" } },
-			{ channel: "herdr:blocked", data: { active: false } },
-		]);
-		assert.doesNotMatch(JSON.stringify(rpivHerdrEvents), /private runtime/i);
-		emittedEvents.length = 0;
 		assert.equal(
 			dangerousReviewCtx.ui.notifications.length,
 			0,
@@ -736,20 +599,11 @@ async function run() {
 		await rm(toolCwd, { recursive: true, force: true });
 	}
 
-	// review-candidate-view Phase 3.6 settling test: a contributor edit landing
-	// strictly between the controller-owned candidate binding and reviewer
-	// dispatch must diverge the live candidate tree from the frozen one, and
-	// dispatch must fail closed rather than expose a substituted view to the
-	// lens sub-agent. This drives the real `createGentleAiExtension` tool_call
-	// wiring (not the bare library function tested in
-	// tests/review-candidate-view.test.ts) with an injected candidate-view
-	// registry, so the actual production dispatch path is exercised.
+	// Candidate-view triangulation: a contributor edit after the immutable
+	// binding must fail closed before a review lens receives context.
 	const candidateDriftCwd = await tempWorkspace();
 	try {
-		const { createGentleAiExtension } = await import(
-			pathToFileURL(join(ROOT, "extensions/gentle-ai.ts")).href
-		);
-		const { CandidateViewRegistry } = await import(
+		const { CandidateViewRegistry, decorateReviewCandidateTask } = await import(
 			pathToFileURL(join(ROOT, "lib/review-candidate-view.ts")).href
 		);
 
@@ -767,128 +621,23 @@ async function run() {
 		const view = registry.create({ contributorRoot: candidateDriftCwd });
 		registry.bindCurrent({ token: view.token, lineageId: "harness-candidate-drift", selectedLenses: ["review-risk"] });
 
-		const dispatchPi = createPi();
-		createGentleAiExtension({ candidateViews: registry })(dispatchPi.pi);
-		const dispatchToolHook = dispatchPi.hooks.get("tool_call")[0];
-
-		// The contributor edits the tracked file strictly after the candidate
-		// view was bound (START) and strictly before dispatch would run.
+		// The contributor edits the tracked file strictly after binding and before
+		// the provider-neutral decoration request.
 		await writeFile(join(candidateDriftCwd, "tracked.txt"), "drifted after bind, before dispatch\n");
 
-		const dispatchInput = { agent: "review-risk", task: "review", mode: "task" };
-		const dispatchResult = await dispatchToolHook(
-			{ toolName: "subagent_run", input: dispatchInput },
-			createCtx(candidateDriftCwd),
-		);
-		assert.equal(dispatchResult?.block, true, "dispatch must fail closed when the candidate tree diverges between bind and dispatch");
-		assert.match(dispatchResult.reason, /live candidate|drift/i);
-		assert.equal(
-			dispatchInput.task,
-			"review",
-			"a failed-closed dispatch must never mutate the child dispatch input",
-		);
-		assert.doesNotMatch(
-			dispatchInput.task,
-			/Controller-owned review lineage/,
-			"a failed-closed dispatch must never inject a substituted candidate view into the lens sub-agent's task",
+		assert.throws(
+			() => decorateReviewCandidateTask({
+				role: "review-risk",
+				task: { task: "review", context: "", dependencies: [], expectedOutcome: "review complete" },
+				candidateViews: registry,
+			}),
+			/live candidate|drift|candidate view/i,
 		);
 		await chmod(view.root, 0o700);
 		registry.cleanup(view.token);
 	} finally {
 		restoreWorkspaceWritePermissions(candidateDriftCwd);
 		await rm(candidateDriftCwd, { recursive: true, force: true });
-	}
-
-	const bannerCwd = await tempWorkspace();
-	try {
-		const ctx = createCtx(bannerCwd, true);
-		await commands.get("gentle:toggle-rose").handler("", ctx);
-		let bannerConfig = JSON.parse(await readFile(join(globalConfigHome, "banner.json"), "utf8"));
-		assert.equal(bannerConfig.showRose, false);
-		assert.equal(bannerConfig.showTextLogo, true);
-		assert.equal(bannerConfig.color, "pink");
-		await commands.get("gentle:toggle-text-logo").handler("", ctx);
-		bannerConfig = JSON.parse(await readFile(join(globalConfigHome, "banner.json"), "utf8"));
-		assert.equal(bannerConfig.showTextLogo, false);
-		await commands.get("gentle:banner-color").handler("cyan", ctx);
-		bannerConfig = JSON.parse(await readFile(join(globalConfigHome, "banner.json"), "utf8"));
-		assert.equal(bannerConfig.color, "cyan");
-		await commands.get("gentle:banner").handler("", ctx);
-		bannerConfig = JSON.parse(await readFile(join(globalConfigHome, "banner.json"), "utf8"));
-		assert.equal(bannerConfig.showRose, true);
-	} finally {
-		await rm(bannerCwd, { recursive: true, force: true });
-		await rm(join(globalConfigHome, "banner.json"), { force: true });
-	}
-
-	// issue-301: cancelling the color picker must be a no-op — no write,
-	// no notify, and the previously saved color must survive byte/semantically
-	// unchanged. Covers both entry points: /gentle:banner-color picker
-	// (cancelled), and /gentle:banner -> Color row -> nested picker (cancelled).
-	// Also covers an invalid non-empty argument, which must still open the
-	// picker and treat its cancellation as a no-op.
-	const cancelPickerCwd = await tempWorkspace();
-	try {
-		const bannerConfigPath = join(globalConfigHome, "banner.json");
-		const seeded = {
-			showRose: false,
-			showTextLogo: false,
-			color: "green",
-		};
-		const seededJson = `${JSON.stringify(seeded, null, 2)}\n`;
-		await writeFile(bannerConfigPath, seededJson, "utf8");
-
-		const cancelCtx = createCtx(cancelPickerCwd, true);
-
-		// (a) /gentle:banner-color picker cancelled: seeded color unchanged, no notify.
-		cancelCtx.ui.notifications.length = 0;
-		cancelCtx.ui.selections.length = 0;
-		cancelCtx.ui.select = async (label, options) => {
-			cancelCtx.ui.selections.push({ label, options });
-			return undefined;
-		};
-		await commands.get("gentle:banner-color").handler("", cancelCtx);
-		let afterCancel = await readFile(bannerConfigPath, "utf8");
-		assert.equal(afterCancel, seededJson, "banner-color cancel must not rewrite banner.json");
-		assert.equal(cancelCtx.ui.selections.length, 1, "banner-color cancel must open the picker once");
-		assert.equal(cancelCtx.ui.notifications.length, 0, "banner-color cancel must not notify");
-
-		// (d) invalid non-empty /gentle:banner-color input still opens picker;
-		//     cancelling it is a no-op.
-		cancelCtx.ui.notifications.length = 0;
-		cancelCtx.ui.selections.length = 0;
-		await commands.get("gentle:banner-color").handler("purple", cancelCtx);
-		afterCancel = await readFile(bannerConfigPath, "utf8");
-		assert.equal(afterCancel, seededJson, "banner-color invalid+cancel must not rewrite banner.json");
-		assert.equal(cancelCtx.ui.selections.length, 1, "invalid banner-color arg must still open the picker");
-		assert.equal(cancelCtx.ui.notifications.length, 0, "banner-color invalid+cancel must not notify");
-
-		// (b) /gentle:banner selects the Color row, then the nested picker is
-		//     cancelled: seeded color unchanged, no notify. The outer select
-		//     returns the Color row; the nested select returns undefined.
-		cancelCtx.ui.notifications.length = 0;
-		cancelCtx.ui.selections.length = 0;
-		let selectCall = 0;
-		cancelCtx.ui.select = async (label, options) => {
-			cancelCtx.ui.selections.push({ label, options });
-			selectCall += 1;
-			// First call: outer "Startup banner" menu -> pick the Color row.
-			// Second call: nested color picker -> cancel (undefined).
-			return selectCall === 1 ? options[options.length - 1] : undefined;
-		};
-		await commands.get("gentle:banner").handler("", cancelCtx);
-		afterCancel = await readFile(bannerConfigPath, "utf8");
-		assert.equal(afterCancel, seededJson, "banner Color-row cancel must not rewrite banner.json");
-		assert.equal(cancelCtx.ui.selections.length, 2, "banner Color-row flow must open outer then nested picker");
-		assert.equal(cancelCtx.ui.notifications.length, 0, "banner Color-row cancel must not notify");
-
-		// Sanity: the seeded config round-trips through normalization unchanged,
-		// proving the byte equality above is semantic, not a test artifact.
-		const reparsed = JSON.parse(await readFile(bannerConfigPath, "utf8"));
-		assert.deepEqual(reparsed, seeded, "seeded non-default color must round-trip semantically");
-	} finally {
-		await rm(cancelPickerCwd, { recursive: true, force: true });
-		await rm(join(globalConfigHome, "banner.json"), { force: true });
 	}
 
 	const noUiCwd = await tempWorkspace();
@@ -1726,24 +1475,8 @@ async function run() {
 		await mkdir(join(modelsCwd, ".pi", "subagents"), { recursive: true });
 		await mkdir(join(globalAgentHome, "subagents"), { recursive: true });
 		await mkdir(
-			join(modelsCwd, ".pi", "npm", "node_modules", "pi-subagents-j0k3r", "agents"),
-			{ recursive: true },
-		);
-		await mkdir(
 			join(modelsCwd, ".pi", "npm", "node_modules", "pi-subagents", "agents"),
 			{ recursive: true },
-		);
-		await writeFile(
-			join(
-				modelsCwd,
-				".pi",
-				"npm",
-				"node_modules",
-				"pi-subagents-j0k3r",
-				"agents",
-				"worker.md",
-			),
-			`---\nname: worker\ndescription: Builtin worker\n---\n`,
 		);
 		await writeFile(
 			join(modelsCwd, ".pi", "agents", "worker.md"),
@@ -1763,7 +1496,7 @@ async function run() {
 				"agents",
 				"researcher.md",
 			),
-			`---\nname: researcher\ndescription: Legacy builtin researcher\n---\n`,
+				`---\nname: researcher\ndescription: Package-managed researcher\n---\n`,
 		);
 		await writeFile(
 			join(modelsCwd, ".pi", "agents", "sdd-apply.md"),

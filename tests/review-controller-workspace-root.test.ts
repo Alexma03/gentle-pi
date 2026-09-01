@@ -7,7 +7,7 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
-import { CandidateViewRegistry } from "../lib/review-candidate-view.ts";
+import { CandidateViewRegistry, decorateReviewCandidateTask } from "../lib/review-candidate-view.ts";
 import type { AuthorityRepairAssessmentV1, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 
 interface RegisteredTool {
@@ -269,8 +269,12 @@ test("START freezes the candidate from the explicit workspace root and returns t
 	assert.notEqual(startRequests[0]?.cwd, view.root);
 	assert.equal(readFileSync(join(view.root, "app.ts"), "utf8"), "export const value = 2; // worktree candidate\n");
 	assert.equal(view.paths.includes("unrelated.ts"), false);
-	const dispatch = { agent: "review-reliability", task: "review the change", mode: "task" };
-	assert.equal(await toolCall({ toolName: "subagent_run", input: dispatch }, context(sessionCwd)), undefined);
+	const dispatch = decorateReviewCandidateTask({
+		role: "review-reliability",
+		task: { task: "review the change", context: "", dependencies: [], expectedOutcome: "review complete" },
+		candidateViews,
+		workspaceRoot: root,
+	});
 	assert.match(dispatch.task, /Controller-owned review lineage: `worktree-lineage`/);
 	assert.ok(dispatch.task.includes(view.root));
 	assert.ok(dispatch.task.includes(view.candidateTree));
