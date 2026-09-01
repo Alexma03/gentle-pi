@@ -26,7 +26,7 @@ Chain strategy: feature-branch-chain
 | 4 | Release evidence | PR4/PR3 | `pnpm test`/checks | packed install | revert release changes |
 
 ## Phase 1: Runtime/Guard
-- [ ] 1.1 **RED** `tests/subagent-runtime.test.ts` DTO/capability; **GREEN** `lib/subagent-runtime.ts`; **REFACTOR** validation. D:—; P: fail-closed.
+- [x] 1.1 **RED** `tests/subagent-runtime.test.ts` DTO/capability; **GREEN** `lib/subagent-runtime.ts`; **REFACTOR** validation. D:—; P: fail-closed.
 - [ ] 1.2 **RED** adapter lifecycle tests; **GREEN** `lib/nicobailon-subagent-adapter.ts`, RPC lock; **REFACTOR** gate. D:1.1; P: start/status/result/cancel.
 - [ ] 1.3 **RED** mismatch tests; **GREEN** runtime/adapter correlation/errors; **REFACTOR** evidence. D:1.2; P: correlated RPC.
 - [ ] 1.4 **RED** `tests/workspace-guard.test.ts` selectors/symlink/push variants; **GREEN** `lib/workspace-guard.ts`; **REFACTOR** denial API. D:1.3; P: protected denial.
