@@ -351,6 +351,18 @@ This section is appended after targeted validation. No source or test files were
 - **Native settlement:** request ID `codex-pr2-settle-20260901t150537z-11201`; evidence revision `sha256:4bc50e6549654f81511cb4ddd3d27a71f248b72bca2fb0b4201e8a951100da84`; outcome `failed`; result state `proceed`.
 - **Continuation:** No replacement acquire was performed per user instruction. Parent retains native continuation/settlement authority. No source/test correction was attempted in this terminal bookkeeping turn.
 
+## PR2 task 2.2 remediation — independently verified
+
+- **Scope:** Fixed only the two confirmed task 2.2 blockers in `lib/work-unit-scheduler.ts`; Phase 3/4 remained untouched.
+- **Lease identity:** Lease keys now bind the canonical `[workUnitId, callerKey]` tuple, and full lease comparison includes `workUnitId`. Independent probes rejected forged cross-unit settlement for same-key and different-key variants while legitimate settlements succeeded.
+- **Final-verification evidence:** Successful evidence validation now checks every own indexed slot. Sparse arrays, interior/trailing holes, and explicit `undefined` were rejected, and `integrationReady()` remained false until dense evidence was recorded.
+- **Strict TDD:** Scheduler RED was **17 tests: 15 passed, 2 failed**; GREEN was **17/17 passed**.
+- **Independent verification:** PR2 scheduler/correction/status **87/87**; candidate/policy **127/127**; static contracts **110/110**; full `pnpm test` **1213 total, 1212 passed, 0 failed, 1 skipped**. Provider contract, runtime modules, harness, and `git diff --check` passed.
+- **Task state:** Tasks 2.1–2.7 are checked. Phase 3 tasks 3.1–3.6 and Phase 4 tasks 4.1–4.6 remain unchecked.
+- **Implementation commit:** `da2d30d7 fix(scheduler): bind lease and evidence identity`.
+- **Native settlement:** request ID `codex-pr2-task22-settle-20260901t153134z-5108`; fresh evidence revision `sha256:45696b850593831e70f16e89e6b447fa4376aa696cd35dc53d9d6ec42e75c588`; remediated evidence revision `sha256:4bc50e6549654f81511cb4ddd3d27a71f248b72bca2fb0b4201e8a951100da84`; outcome `passed`; result state `complete`.
+- **Delivery:** No push, PR, merge, or release operation was performed.
+
 ## PR2 task 2.2 bounded remediation — lease identity and sparse evidence
 
 This section appends the focused remediation evidence after the targeted validation failure above. It preserves all prior PR1, PR2, audit, and failure evidence; Phase 3 and Phase 4 remain outside this slice.
