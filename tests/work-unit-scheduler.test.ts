@@ -228,6 +228,24 @@ test("successful final verification requires bounded non-empty evidence", () => 
 	assert.equal(plan.integrationReady(), false);
 });
 
+test("successful final verification rejects sparse evidence and keeps integration blocked", () => {
+	const plan = scheduler([unit("read")]);
+	const lease = plan.acquireLease("read", { idempotencyKey: "sparse-evidence" });
+	plan.settle(lease, {
+		outcome: "passed",
+		focusedChecks: ["read check"],
+		runtimeHarness: "N/A",
+		finalVerification: "pending",
+		rollbackBoundary: "read",
+	});
+	const sparseEvidence = new Array<string>(1);
+	assert.throws(
+		() => plan.recordFinalVerification({ passed: true, evidence: sparseEvidence }),
+		(error: unknown) => error instanceof WorkUnitSchedulerError && error.code === "invalid_settlement",
+	);
+	assert.equal(plan.integrationReady(), false);
+});
+
 test("null write surfaces fail with a typed graph validation error", () => {
 	assert.throws(
 		() => scheduler([unit("invalid", { mode: undefined, writeSurface: null as unknown as readonly string[] })]),
@@ -263,4 +281,26 @@ test("settlement requires the complete bound lease identity", () => {
 			(error: unknown) => error instanceof WorkUnitSchedulerError && error.code === "lease_missing",
 		);
 	}
+});
+
+test("settlement rejects forged cross-unit identities even with a copied lease key", () => {
+	const plan = scheduler([unit("read-one"), unit("read-two")]);
+	const first = plan.acquireLease("read-one", { idempotencyKey: "shared-lease" });
+	const second = plan.acquireLease("read-two", { idempotencyKey: "shared-lease" });
+	const evidence = {
+		outcome: "passed" as const,
+		focusedChecks: ["check"],
+		runtimeHarness: "N/A",
+		finalVerification: "pending" as const,
+		rollbackBoundary: "read",
+	};
+
+	assert.throws(
+		() => plan.settle({ ...first, workUnitId: "read-two", leaseKey: first.leaseKey }, evidence),
+		(error: unknown) => error instanceof WorkUnitSchedulerError && error.code === "lease_missing",
+	);
+	assert.equal(plan.status("read-one").status, "leased");
+	assert.equal(plan.status("read-two").status, "leased");
+	assert.doesNotThrow(() => plan.settle(first, evidence));
+	assert.doesNotThrow(() => plan.settle(second, evidence));
 });

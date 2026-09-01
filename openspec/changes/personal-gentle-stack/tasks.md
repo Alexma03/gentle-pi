@@ -34,7 +34,7 @@ Chain strategy: feature-branch-chain
 
 ## Phase 2: DAG/Review
 - [x] 2.1 **RED** readiness tests; **GREEN** `lib/work-unit-scheduler.ts`; **REFACTOR** DAG status. D:1.5; P: incomplete deps never acquire.
-- [ ] 2.2 **RED** lease conflict/parallel tests; **GREEN** leases/settle; **REFACTOR** serialization. D:2.1; P: safe concurrency.
+- [x] 2.2 **RED** lease conflict/parallel tests; **GREEN** leases/settle; **REFACTOR** serialization. D:2.1; P: safe concurrency.
 - [x] 2.3 **RED** immutable identity/no-fallback tests; **GREEN** `lib/review-candidate-view.ts`, `lib/sdd-status.ts`; **REFACTOR** resolver errors. D:2.2; P: pre-actor denial.
 - [x] 2.4 **RED** finding/path/RDD tests; **GREEN** `lib/review-correction-lifecycle.ts`; **REFACTOR** Judgment Day. D:2.3; P: no rerun/discovery.
 - [x] 2.5 **RED/GREEN/REFACTOR** `assets/orchestrator-delegation.md`, `assets/sdd-orchestrator-workflow.md`. D:2.4; P: provider-neutral contracts.

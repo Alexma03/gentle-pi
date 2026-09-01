@@ -350,3 +350,63 @@ This section is appended after targeted validation. No source or test files were
 - **Existing passing evidence retained:** targeted suites passed 85/85, 127/127, and 110/110; full `pnpm test` passed 1210 of 1211 tests with 0 failures, 0 cancellations, and 1 skipped test; provider-contract, runtime-modules, harness, and `git diff --check` were green.
 - **Native settlement:** request ID `codex-pr2-settle-20260901t150537z-11201`; evidence revision `sha256:4bc50e6549654f81511cb4ddd3d27a71f248b72bca2fb0b4201e8a951100da84`; outcome `failed`; result state `proceed`.
 - **Continuation:** No replacement acquire was performed per user instruction. Parent retains native continuation/settlement authority. No source/test correction was attempted in this terminal bookkeeping turn.
+
+## PR2 task 2.2 bounded remediation — lease identity and sparse evidence
+
+This section appends the focused remediation evidence after the targeted validation failure above. It preserves all prior PR1, PR2, audit, and failure evidence; Phase 3 and Phase 4 remain outside this slice.
+
+- **Worktree:** `/home/alex/Projects/forks/gentle-pi-worktrees/pr2-dag-review`
+- **Branch:** `codex/personal-gentle-stack-pr2-dag-review`
+- **Task state:** 2.1–2.7 are checked; Phase 3 tasks 3.1–3.6 and Phase 4 tasks 4.1–4.6 remain unchecked.
+- **Scope:** exactly the two confirmed task 2.2 blockers were remediated. No other source/test behavior, Phase 3/4 asset, or native attempt state was changed.
+
+### Strict TDD remediation evidence
+
+| Behavior | RED | GREEN | TRIANGULATE | REFACTOR |
+| --- | --- | --- | --- | --- |
+| Cross-unit lease identity | Added a forged `workUnitId` with the copied lease key while two same-worktree read leases shared a caller key; scheduler suite reported **17 tests, 15 passed, 2 failed**, including the missing `lease_missing` rejection. | `node --experimental-strip-types --test tests/work-unit-scheduler.test.ts` → **17 tests, 17 passed, 0 failed**. | Independent probe rejected the forged cross-unit lease with typed `lease_missing`; legitimate leases for both units still settled successfully. | Lease keys now encode the originating work-unit ID and caller key as a canonical tuple, and full lease comparison includes `workUnitId`; no provider attempt authority was added. |
+| Sparse final-verification evidence | Added `new Array(1)` successful evidence after a passed unit settlement; the same RED run reported the missing `invalid_settlement` rejection. | Scheduler suite passed **17/17**. | Independent probe rejected sparse evidence and confirmed `integrationReady=false`; dense evidence behavior remained unchanged. | Extracted hole-aware `hasInvalidEvidence` validation so every indexed slot must be present and non-empty before recording evidence. |
+
+### Remediation verification
+
+```text
+node --experimental-strip-types --test tests/work-unit-scheduler.test.ts
+ℹ tests 17
+ℹ pass 17
+ℹ fail 0
+
+node --experimental-strip-types --test tests/work-unit-scheduler.test.ts tests/review-correction-scope.test.ts tests/review-correction-lifecycle.test.ts tests/sdd-status.test.ts tests/sdd-status-routing.test.ts
+ℹ tests 87
+ℹ pass 87
+ℹ fail 0
+
+node --experimental-strip-types --test tests/review-candidate-view.test.ts tests/review-controller-native-routing.test.ts tests/review-policy-ordinary.test.ts tests/review-policy-judgment-day.test.ts
+ℹ tests 127
+ℹ pass 127
+ℹ fail 0
+
+node --experimental-strip-types --test tests/sdd-agent-tools.test.ts tests/artifact-language.test.ts tests/delegated-key-learnings-contract.test.ts tests/native-sdd-attempt-authority.test.ts tests/review-ledger-contract.test.ts tests/orchestrator-rdd-ownership.test.ts tests/package-manifest.test.ts
+ℹ tests 110
+ℹ pass 110
+ℹ fail 0
+
+pnpm test
+ℹ tests 1213
+ℹ pass 1212
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+```
+
+The provider contract check exited **0** with contract `1.1.0`, 8 bundle entries, and 2 generated baselines. The runtime-module check exited **0** (`runtime matches TypeScript sources (4 modules)`). The runtime harness exited **0**. `git diff --check` exited **0**.
+
+Independent adversarial probes exited **0**:
+
+- `forged cross-unit lease: rejected`
+- `sparse final-verification evidence: rejected; integrationReady=false`
+
+The pre-acquired native attempt remains untouched: no acquire, reset, or settle operation was performed. The parent retains the single native settlement authority and will settle exactly once after independent validation.
+
+### Remediation rollback boundary
+
+Revert the remediation commit to restore the preceding targeted-validation state; this removes only the work-unit scheduler identity/evidence corrections and their regression tests plus the task/progress bookkeeping. Phase 3/4 files and all prior PR1/PR2 evidence remain unaffected.

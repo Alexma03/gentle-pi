@@ -278,7 +278,8 @@ function leaseKeyFor(request: WorkUnitLeaseRequestV1 | undefined, workUnitId: st
 	if (!isNonEmptyText(key) || key.length > MAX_ID_LENGTH) {
 		throw new WorkUnitSchedulerError("invalid_unit", "Lease idempotency key must be a bounded non-empty string.", workUnitId);
 	}
-	return key.trim();
+	// Bind caller idempotency to the work unit so a copied key cannot cross units.
+	return JSON.stringify([workUnitId, key.trim()]);
 }
 
 function detachedLease(lease: WorkUnitLeaseV1): WorkUnitLeaseV1 {
@@ -290,6 +291,13 @@ function detachedEvidence(evidence: WorkUnitEvidenceV1): WorkUnitEvidenceV1 {
 		...evidence,
 		focusedChecks: Object.freeze([...evidence.focusedChecks]),
 	});
+}
+
+function hasInvalidEvidence(evidence: readonly unknown[]): boolean {
+	for (let index = 0; index < evidence.length; index += 1) {
+		if (!Object.prototype.hasOwnProperty.call(evidence, index) || !isNonEmptyText(evidence[index])) return true;
+	}
+	return false;
 }
 
 function normalizeSettlement(input: WorkUnitSettlementInputV1, workUnitId: string): WorkUnitSettlementInputV1 {
@@ -328,7 +336,8 @@ function settlementMatches(settlement: WorkUnitSettlementV1, input: WorkUnitSett
 }
 
 function sameLeaseIdentity(expected: WorkUnitLeaseV1, candidate: WorkUnitLeaseV1): boolean {
-	return expected.repository === candidate.repository
+	return expected.workUnitId === candidate.workUnitId
+		&& expected.repository === candidate.repository
 		&& expected.worktree === candidate.worktree
 		&& expected.mode === candidate.mode
 		&& Array.isArray(candidate.writeSurface)
@@ -519,7 +528,7 @@ export class WorkUnitSchedulerV1 {
 	}
 
 	recordFinalVerification(input: FinalVerificationV1): void {
-		if (!input || typeof input !== "object" || typeof input.passed !== "boolean" || !Array.isArray(input.evidence) || input.evidence.length > MAX_SURFACE_ENTRIES || input.evidence.some((entry) => !isNonEmptyText(entry)) || (input.passed && input.evidence.length === 0)) {
+		if (!input || typeof input !== "object" || typeof input.passed !== "boolean" || !Array.isArray(input.evidence) || input.evidence.length > MAX_SURFACE_ENTRIES || hasInvalidEvidence(input.evidence) || (input.passed && input.evidence.length === 0)) {
 			throw new WorkUnitSchedulerError("invalid_settlement", "Final verification requires a boolean result and evidence.");
 		}
 		const next = { passed: input.passed, evidence: Object.freeze([...input.evidence]) } as const;
