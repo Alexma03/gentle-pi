@@ -129,3 +129,14 @@ test("runtime rejects invalid tasks before crossing the adapter boundary", async
 	await assert.rejects(runtime.start({ ...TASK, dependencies: ["ok", 3] } as unknown as SubagentTaskV1), /dependencies/);
 	assert.equal(starts, 0);
 });
+
+test("runtime bounds an event-backed completion wait by result timeout", async () => {
+	const runtime = new SubagentRuntimeV1(adapter({
+		waitForCompletion: async () => new Promise<SubagentResultV1>(() => {}),
+	}), { resultTimeoutMs: 25, pollIntervalMs: 5 });
+	await assert.rejects(
+		runtime.result({ id: "run-1" }),
+		(error: unknown) => error instanceof SubagentRuntimeError && error.code === "result_timeout",
+		"result() must not wait forever when the provider emits no completion event",
+	);
+});

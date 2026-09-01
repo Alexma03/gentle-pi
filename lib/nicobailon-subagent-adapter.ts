@@ -174,7 +174,9 @@ function resultFromProvider(value: unknown, fallbackStatus?: unknown): SubagentR
 function normalizeCapabilities(value: unknown): SubagentRuntimeCapabilitiesV1 {
 	const record = isRecord(value) && isRecord(value.data) ? value.data : value;
 	if (!isRecord(record)) throw new NicobailonAdapterError("invalid_ready", "Nicobailon ping did not return an object.");
-	if (record.version !== 1 && record.protocol !== 1) throw new NicobailonAdapterError("invalid_ready", "Nicobailon runtime must advertise protocol 1.");
+	if (record.version !== 1 || (record.protocol !== undefined && record.protocol !== 1)) {
+		throw new NicobailonAdapterError("invalid_ready", "Nicobailon runtime must advertise protocol 1.");
+	}
 	const methods = Array.isArray(record.methods) ? record.methods.filter((method): method is string => typeof method === "string") : [];
 	const rawCapabilities = record.capabilities;
 	const capabilityNames = Array.isArray(rawCapabilities)
@@ -221,14 +223,12 @@ export class NICObailonSubagentAdapter implements SubagentRuntimeAdapterV1 {
 	private readonly waiters = new Map<string, Set<{ resolve: (result: SubagentResultV1) => void; reject: (error: unknown) => void }>>();
 	private readonly unsubscribers: Array<() => void> = [];
 	private readonly requestTimeoutMs: number;
-	private readonly now: () => number;
 	private readonly requestId: () => string;
 	private disposed = false;
 
 	constructor(options: CreateNicobailonSubagentAdapterOptions) {
 		this.options = options;
 		this.requestTimeoutMs = assertTimeout(options.requestTimeoutMs);
-		this.now = options.now ?? (() => Date.now());
 		this.requestId = options.requestId ?? randomUUID;
 		this.listen(NICOBailonRpcReadyEvent, (payload) => this.readyPayloads.push(payload));
 		this.listen(NICOBailonAsyncCompleteEvent, (payload) => this.handleCompletion(payload));

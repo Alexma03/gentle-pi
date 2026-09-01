@@ -145,6 +145,16 @@ test("adapter fails closed when ping omits the mandatory async completion event"
 	);
 });
 
+test("adapter rejects a conflicting protocol marker even when the envelope version is valid", async () => {
+	const { adapter } = adapterWithResponder((events, request) => {
+		if (request.method === "ping") reply(events, request, { ...READY, protocol: 2 });
+	});
+	await assert.rejects(
+		adapter.negotiate(),
+		(error: unknown) => error instanceof NicobailonAdapterError && error.code === "invalid_ready",
+	);
+});
+
 test("adapter correlates concurrent replies by request id and ignores a mismatched payload", async () => {
 	const bus = new EventBus();
 	const ids = ["ping-1", "status-1", "status-2"];
