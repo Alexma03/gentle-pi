@@ -270,3 +270,70 @@ No push, PR, merge, or release operation was performed. The parent orchestrator 
 ### Remaining unchecked tasks
 
 The following tasks remain unchecked and intentionally outside this PR2 slice: **3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 4.1, 4.2, 4.3, 4.4, 4.5, and 4.6**.
+
+## PR2 bounded correction — independent audit follow-up
+
+This section appends the bounded correction evidence to the cumulative PR1 + PR2 record above. It does not alter the approved design file, task scope, or historical PR1 evidence. Tasks 2.1–2.7 remain checked; Phase 3 and Phase 4 remain unchecked.
+
+- **Worktree:** `/home/alex/Projects/forks/gentle-pi-worktrees/pr2-dag-review`
+- **Branch:** `codex/personal-gentle-stack-pr2-dag-review`
+- **Correction commit:** `aee4885e` (`fix(sdd): close PR2 scheduler and status audit gaps`)
+- **Native attempt authority:** no acquire, settle, reset, Pi-owned token, counter, or attempt ledger was created; the parent retains the already-held attempt authority.
+
+### Corrected audit findings
+
+1. **Final-verification accessor shadowing:** `WorkUnitSchedulerV1` renamed its private record to `finalVerificationRecord`, restoring the public `finalVerification()` accessor and returning detached evidence.
+2. **Empty successful evidence:** successful final verification now requires bounded, non-empty evidence; `integrationReady()` independently fails closed when the recorded evidence is empty.
+3. **Production SDD status routing:** `sdd-status` and `sdd-continue` now call the structured `resolveSddStatusRouting` path and render a nested `gentle-pi.sdd-status-routing` projection. The extension accepts parent-owned work-unit readiness through a narrow optional seam; output remains artifact-only, RDD-independent, and contains no attempt tokens/counters/reset state.
+4. **Full lease identity:** active and idempotent settlement now compares work-unit lease key, repository, worktree, mode, and write surface. The settled lease identity is retained only for exact idempotent replay.
+5. **Typed null surfaces:** omitted-mode units with `writeSurface: null` now fail as `WorkUnitSchedulerError("invalid_unit")`, not a raw `TypeError`.
+6. **Per-finding correction paths:** correction plans accept canonical per-finding path assignments (array or record form), require every confirmed finding to receive a non-empty selection, reject cross-finding paths, reject ambiguous shared paths without explicit assignment, and require the forecast to preserve the exact mapping.
+
+### Strict TDD correction evidence
+
+| Behavior | RED | GREEN | TRIANGULATE | REFACTOR |
+| --- | --- | --- | --- | --- |
+| Scheduler accessor/evidence/typed surface/lease identity | Safety baseline was **75/75 passed**. New scheduler regressions then reported **15 tests: 11 passed, 4 failed**: accessor was not callable, empty successful evidence was accepted, `writeSurface: null` raised raw `TypeError` after the test was narrowed to omitted mode, and forged lease identity was accepted. | `node --experimental-strip-types --test tests/work-unit-scheduler.test.ts` → **15/15 passed**. | Separate variants covered repository, worktree, mode, write surface, and post-settlement forged leases; successful evidence remained required for integration. | Internal state no longer shadows the public method; settled leases preserve exact identity without adding provider attempt state. |
+| Production status commands | `pnpm run test:harness` failed at the new command assertion because production `sdd-status --json` emitted only `gentle-pi.sdd-status`, with no routing projection. | `pnpm run test:harness` → exit **0**; actual command output contains both status and routing schemas plus `artifactOnly: true`. | Harness injected two parent-owned readiness entries and verified deterministic IDs, while renderer tests covered status and dispatcher markdown. | Routing is a separate DTO and optional dependency seam; legacy status schema remains intact. |
+| Per-finding correction paths | `tests/review-correction-scope.test.ts` initially reported **7 tests: 6 passed, 1 failed** because the plan had no `pathsByFinding` output and cross-finding assignment was not rejected. | `node --experimental-strip-types --test tests/review-correction-scope.test.ts` → **8/8 passed**. | Array and record mappings, ambiguous shared paths, forecast mapping, detached output, and Judgment Day semantics are covered. | Canonical mapping is sorted/detached; legacy disjoint path inputs derive an unambiguous mapping, while ambiguous scopes fail closed. |
+
+### Corrected verification
+
+```text
+node --experimental-strip-types --test tests/work-unit-scheduler.test.ts tests/review-correction-scope.test.ts tests/review-correction-lifecycle.test.ts tests/sdd-status.test.ts tests/sdd-status-routing.test.ts
+ℹ tests 85
+ℹ pass 85
+ℹ fail 0
+
+node --experimental-strip-types --test tests/review-candidate-view.test.ts tests/review-controller-native-routing.test.ts tests/review-policy-ordinary.test.ts tests/review-policy-judgment-day.test.ts
+ℹ tests 127
+ℹ pass 127
+ℹ fail 0
+
+node --experimental-strip-types --test tests/sdd-agent-tools.test.ts tests/artifact-language.test.ts tests/delegated-key-learnings-contract.test.ts tests/native-sdd-attempt-authority.test.ts tests/review-ledger-contract.test.ts tests/orchestrator-rdd-ownership.test.ts tests/package-manifest.test.ts
+ℹ tests 110
+ℹ pass 110
+ℹ fail 0
+```
+
+Provider/runtime checks all exited **0**:
+
+- `pnpm run check:provider-contract` — provider contract mirror passed (contract 1.1.0, 8 bundle entries, 2 generated baselines, acquisition `field-test-local`).
+- `pnpm run check:runtime-modules` — runtime matches TypeScript sources (4 modules).
+- `pnpm run test:harness` — exit 0, including production status/continue routing coverage.
+- `git diff --check` — clean.
+
+The corrected full command exited **0**:
+
+```text
+pnpm test
+ℹ tests 1211
+ℹ pass 1210
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 1
+```
+
+### Correction rollback boundary
+
+Revert `aee4885e` to remove the bounded audit correction while retaining the original PR2 slice. The correction is isolated to `lib/work-unit-scheduler.ts`, `lib/review-correction-lifecycle.ts`, `lib/sdd-status.ts`, `extensions/gentle-ai.ts`, and their focused/regression tests. The apply-progress append is a separate documentation-only commit and can be reverted independently. No Phase 3/4 file or task was changed.
