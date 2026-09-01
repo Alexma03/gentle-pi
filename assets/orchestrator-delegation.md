@@ -152,6 +152,14 @@ An atomic work unit is a coherent, context-complete, independently verifiable ou
 
 Parallel writers are allowed only for distinct repositories or explicitly isolated Git worktrees, with no overlapping paths, shared contracts, migrations, generated outputs, or unresolved dependencies. Keep one writer per `(repository, worktree, write surface)`; the parent owns integration order.
 
+#### DAG Readiness and Lease Contract (PR2)
+
+The parent owns one validated dependency DAG before launching any worker. The **DAG readiness gate** rejects unknown, duplicate, and cyclic dependencies, then selects ready work units in stable identifier order. A unit MUST pass this gate before the parent invokes native/provider attempt acquire; a scheduler lease is local serialization evidence, not a runtime attempt or receipt.
+
+Each lease records the work-unit identity, repository, worktree, mode, and bounded write surface. A writer lease claims its bound worktree and serializes every other unit there; read/verify work may run in parallel when no writer owns that worktree, and isolated worktrees may run independently. Failed, cancelled, and completed settlements release the local lease exactly once; duplicate requests with the same caller-owned idempotency key are idempotent, while conflicting keys or settlements stop.
+
+Native/provider attempt authority remains provider-owned. Pi MUST NOT mint, persist, increment, reset, or reconcile attempt tokens or counters in the DAG scheduler, task artifacts, prompts, or worker state. The scheduler only reports readiness and lease settlement so the parent can route the provider-owned continuation.
+
 #### Selective Continuation
 
 Use `subagent_continue` only after `total_timeout` or `stall_timeout`. It may resume only the same persisted task after the parent revalidates that it remains correct, scoped, and non-conflicting, including repository/worktree, git state, dependencies, and allowed edit surfaces. Never continue completed, user-cancelled, interrupted, superseded, drifted, or scope-invalid work; never automatically reuse completed worker context.

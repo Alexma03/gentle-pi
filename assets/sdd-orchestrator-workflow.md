@@ -224,6 +224,14 @@ Every settle field is required: `cwd`, `change`, `token`, `request-id`, `outcome
 
 `status`, `begin`, `finish`, and `reset` are diagnostic/compatibility surfaces, not the normal runtime route. Route continuation only from the provider-returned `proceed|blocked|complete`. `reset` is never automatic and requires an explicit maintainer scope decision.
 
+## Work-Unit DAG and Lease Routing
+
+The parent validates the complete work-unit DAG and runs the DAG readiness gate before native attempt acquire. Unknown, duplicate, or cyclic dependencies are terminal planning errors; incomplete dependencies remain blocked and are never launched. Ready selection is deterministic and records the unit's repository, worktree, mode, read scope, write surface, validation, rollback boundary, and stop conditions.
+
+The local lease coordinator enforces writer serialization: one writer lease owns a bound worktree, while read/verify units may run in parallel without a writer and independent worktrees may proceed concurrently. Settlement for pass, failure, cancellation, or block releases the lease; duplicate idempotency keys replay the same lease/settlement and conflicting requests stop. This lease state is orchestration metadata only—native attempt authority remains provider-owned and no Pi layer may mint or persist attempt tokens, counters, or reset state.
+
+The parent routes only from the provider's returned `proceed|blocked|complete` result after readiness and lease admission. A final integration gate requires every scheduled unit to have focused evidence and one final verification; it does not create a second attempt ledger or an RDD delivery decision.
+
 ### Gatekeeper Reconciliation
 
 The Automatic Mode Gatekeeper one-rerun rule above is a quality gate, not a launch authorization. A rerun never bypasses native attempt authority: every rerun still requires a fresh compact acquire, and the rerun must stop immediately if the provider returns `blocked` or `complete`. The gatekeeper quality rule is preserved and remains subordinate to this authority.
