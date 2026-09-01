@@ -1580,7 +1580,7 @@ export function decorateReviewCandidateTask(request: ReviewCandidateDecorationRe
 		throw new CandidateViewError("review subagent role must name one supported review lens");
 	}
 	assertReviewDecorationTask(request.task);
-	if (request.candidateViews === null) throw new CandidateViewError("review subagent dispatch has no controller-owned candidate view registry");
+	if (!request.candidateViews) throw new CandidateViewError("review subagent dispatch has no controller-owned candidate view registry");
 	const lineageId = request.candidateViews.currentLineageId(request.workspaceRoot);
 	const reviewAgents = [request.role] as ReviewLens[];
 	const views = request.candidateViews.resolveCurrentForLenses(reviewAgents, request.workspaceRoot);
