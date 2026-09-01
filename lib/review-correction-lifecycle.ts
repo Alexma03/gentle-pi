@@ -47,6 +47,143 @@ export interface CorrectionEvidence {
 	readonly rawPayloadSha256?: string;
 }
 
+export type CorrectionReviewMode = "ordinary" | "judgment-day";
+
+export class CorrectionScopeError extends Error {
+	constructor(message: string) {
+		super(`correction-scope-invalid: ${message}`);
+		this.name = "CorrectionScopeError";
+	}
+}
+
+/** Frozen finding-to-path scope supplied by the native review authority. */
+export interface CorrectionFindingScopeV1 {
+	readonly id: string;
+	readonly paths: readonly string[];
+}
+
+export interface CorrectionScopeRequestV1 {
+	readonly mode: CorrectionReviewMode;
+	readonly confirmedFindings: readonly CorrectionFindingScopeV1[];
+	/** The one correction must account for every confirmed finding. */
+	readonly findingIds: readonly string[];
+	/** Git-derived paths touched by this correction; no unrelated path is valid. */
+	readonly paths: readonly string[];
+	readonly forecast: CorrectionForecastV1;
+}
+
+export interface CorrectionForecastV1 {
+	readonly positive: true;
+	readonly findingIds: readonly string[];
+	readonly paths: readonly string[];
+	readonly effects: readonly string[];
+}
+
+export interface BoundedCorrectionPlanV1 {
+	readonly mode: CorrectionReviewMode;
+	readonly findingIds: readonly string[];
+	readonly paths: readonly string[];
+	readonly correctionBatches: 1 | 2;
+	readonly validatorRuns: 0 | 1;
+	readonly judgmentRounds: 0 | 2;
+	readonly reviewerRuns: 0;
+	readonly refuterRuns: 0;
+	readonly finalVerificationRuns: 1;
+	readonly rerunLenses: false;
+	readonly rerunRefutation: false;
+	readonly forecast: CorrectionForecastV1;
+	/** Scope is path/finding bounded; no changed-line quota is applied here. */
+	readonly changedLineBudget: "none";
+}
+
+const MAX_CORRECTION_SCOPE_ENTRIES = 1024;
+
+function safeCorrectionPath(value: unknown): value is string {
+	if (typeof value !== "string" || value.length === 0 || value.trim() !== value || value.includes("\\") || /[\u0000-\u001f\u007f]/.test(value)) return false;
+	if (value.startsWith("/") || /^[A-Za-z]:\//.test(value)) return false;
+	return value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
+function scopeList(value: unknown, label: string): readonly string[] {
+	if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CORRECTION_SCOPE_ENTRIES || value.some((entry) => !safeCorrectionPath(entry))) {
+		throw new CorrectionScopeError(`${label} must contain bounded, canonical repository-relative paths`);
+	}
+	const sorted = [...value].sort((left, right) => left.localeCompare(right));
+	if (new Set(sorted).size !== sorted.length) throw new CorrectionScopeError(`${label} must not contain duplicate paths`);
+	return Object.freeze(sorted);
+}
+
+function scopeIds(value: unknown): readonly string[] {
+	if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CORRECTION_SCOPE_ENTRIES || value.some((entry) => typeof entry !== "string" || entry.length === 0 || entry.trim() !== entry || /[\u0000-\u001f\u007f]/.test(entry))) {
+		throw new CorrectionScopeError("findingIds must contain bounded, canonical identifiers");
+	}
+	const sorted = [...value].sort((left, right) => left.localeCompare(right));
+	if (new Set(sorted).size !== sorted.length) throw new CorrectionScopeError("findingIds must not contain duplicates");
+	return Object.freeze(sorted);
+}
+
+/**
+ * Resolve one immutable, finding/path-bounded correction plan. This planner
+ * owns no attempt token, line counter, lens discovery, refuter dispatch, or
+ * rerun; ordinary and Judgment Day actor semantics remain provider-owned.
+ */
+export function resolveBoundedCorrectionPlan(request: CorrectionScopeRequestV1): BoundedCorrectionPlanV1 {
+	if (!request || typeof request !== "object" || (request.mode !== "ordinary" && request.mode !== "judgment-day")) {
+		throw new CorrectionScopeError("mode must be ordinary or judgment-day");
+	}
+	if (!Array.isArray(request.confirmedFindings) || request.confirmedFindings.length === 0 || request.confirmedFindings.length > MAX_CORRECTION_SCOPE_ENTRIES) {
+		throw new CorrectionScopeError("confirmedFindings must contain at least one frozen finding");
+	}
+	const findings = request.confirmedFindings.map((finding) => {
+		if (!finding || typeof finding !== "object" || typeof finding.id !== "string" || finding.id.length === 0 || finding.id.trim() !== finding.id) {
+			throw new CorrectionScopeError("each confirmed finding needs one canonical identifier");
+		}
+		return { id: finding.id, paths: scopeList(finding.paths, `finding ${finding.id} paths`) };
+	});
+	const findingIds = scopeIds(request.findingIds);
+	const knownIds = findings.map(({ id }) => id).sort((left, right) => left.localeCompare(right));
+	if (new Set(knownIds).size !== knownIds.length) throw new CorrectionScopeError("confirmedFindings must not contain duplicate identifiers");
+	if (JSON.stringify(findingIds) !== JSON.stringify(knownIds)) throw new CorrectionScopeError("the correction must address exactly every confirmed finding");
+	const paths = scopeList(request.paths, "correction paths");
+	const relevantPaths = new Set(findings.flatMap(({ paths: findingPaths }) => findingPaths));
+	if (paths.some((path) => !relevantPaths.has(path))) throw new CorrectionScopeError("correction paths must belong to a confirmed finding scope");
+	const forecast = request.forecast;
+	if (!forecast || typeof forecast !== "object" || forecast.positive !== true) throw new CorrectionScopeError("correction requires a positive pre-edit forecast");
+	const forecastFindingIds = scopeIds(forecast.findingIds);
+	const forecastPaths = scopeList(forecast.paths, "forecast paths");
+	if (JSON.stringify(forecastFindingIds) !== JSON.stringify(findingIds) || JSON.stringify(forecastPaths) !== JSON.stringify(paths)) {
+		throw new CorrectionScopeError("forecast must preserve the exact finding and path scope");
+	}
+	if (!Array.isArray(forecast.effects) || forecast.effects.length === 0 || forecast.effects.length > MAX_CORRECTION_SCOPE_ENTRIES || forecast.effects.some((effect) => typeof effect !== "string" || effect.length === 0 || effect.length > 4096 || /[\u0000-\u001f\u007f]/.test(effect))) {
+		throw new CorrectionScopeError("forecast effects must be bounded non-empty text");
+	}
+	const judgmentDay = request.mode === "judgment-day";
+	return Object.freeze({
+		mode: request.mode,
+		findingIds,
+		paths,
+		correctionBatches: judgmentDay ? 2 : 1,
+		validatorRuns: judgmentDay ? 0 : 1,
+		judgmentRounds: judgmentDay ? 2 : 0,
+		reviewerRuns: 0,
+		refuterRuns: 0,
+		finalVerificationRuns: 1,
+		rerunLenses: false,
+		rerunRefutation: false,
+		forecast: Object.freeze({
+			positive: true,
+			findingIds: forecastFindingIds,
+			paths: forecastPaths,
+			effects: Object.freeze([...forecast.effects]),
+		}),
+		changedLineBudget: "none",
+	});
+}
+
+/** Semantic aliases for callers that use scope rather than plan vocabulary. */
+export const resolveCorrectionScope = resolveBoundedCorrectionPlan;
+export const createBoundedCorrectionPlan = resolveBoundedCorrectionPlan;
+
 interface CorrectionStepBase {
 	readonly kind: string;
 	readonly lineageId: string;
