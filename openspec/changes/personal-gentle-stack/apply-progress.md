@@ -919,11 +919,10 @@ attestation file is available, so the checked-in record stays pending and
 release mode stays fail-closed without invented values. These conditions do
 not block functional acceptance of the Phase 4 implementation.
 
-### Native closure placeholder
+### Native closure handoff
 
-The parent will append the provider-owned native SDD closure attempt
-settlement and its evidence revision here after final checks. This executor
-did not acquire, settle, reset, or otherwise mutate the native attempt ledger.
+The documentation executor did not mutate the native attempt ledger. The
+parent-owned settlement is recorded in the final section below.
 
 ### Closure rollback boundary
 
@@ -931,3 +930,16 @@ This bounded closure pass changes only the Phase 4 acceptance note in
 `tasks.md` and this append-only closure section. Reverting this pass removes
 the human-owned exception and closure reconciliation text without changing
 the implementation evidence or any prior apply-progress section.
+
+### Native functional-closure settlement
+
+The maintainer-authorized closure objective was narrowed to truthful exception documentation and terminal reconciliation. A new native attempt was acquired only after the ledger permitted the narrower successor scope.
+
+- Work unit: `pr4-functional-closure`
+- Human acceptance: tasks 4.1–4.6 are accepted on final functional evidence; unavailable historical task-specific RED evidence for 4.2/4.4 remains explicitly unavailable and was not fabricated, reinterpreted, or retroactively rewritten.
+- Outcome: `passed`; ledger state `complete`.
+- Evidence revision: `sha256:cab3ead76ec63f3e3f972f53c5649bedff2907788b21f24c44d2fccfb07c9738`.
+- Remediates failed evidence: `sha256:aca2c17ee95bc45d82a04fc4ab6017fbace9783a5e0de819bbdb9fd67376e547`.
+- Functional proof: provider contract `1.1.0` / 8 entries / 2 baselines; 4 generated runtime modules; package inventory 178 files / 69 pins; runtime harness pass; `pnpm test` 1174 total / 1173 passed / 1 skipped / 0 failed; packed-package pass; workflow YAML and diff checks pass.
+- Release boundary: publication remains fail-closed until hosted macOS/Windows evidence and external `pi-subagents` provider attestation are available.
+- Delivery boundary: no publish, push, PR, merge, tag, release, or archive was performed.
