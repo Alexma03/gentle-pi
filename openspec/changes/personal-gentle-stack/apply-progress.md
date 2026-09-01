@@ -68,7 +68,7 @@ Each task followed RED → GREEN → triangulate → refactor. The focused runs 
 
 ## Correction cycle — independent PR1 audit
 
-An independent audit reopened PR1 for eight correctness findings. Each finding first received a new RED regression before the minimal correction; no Phase 2/3/4 work was added and no native attempt token was acquired or settled.
+An independent audit reopened PR1 for eight correctness findings. Each finding first received a new RED regression before the minimal correction; no Phase 2/3/4 work was added and no replacement native attempt token was acquired.
 
 ### Finding evidence and GREEN results
 
@@ -121,7 +121,15 @@ The exact full command exited **0**. The harness was also rerun directly with `p
 - `git diff --check` passed.
 - Worktree was clean before this apply-progress artifact was written.
 - No push, PR, merge, or release operation was performed.
-- No native SDD attempt token was acquired or settled.
+- The pre-acquired native SDD attempt token was settled once with outcome `passed`; the provider returned `state: complete`.
+
+### Native attempt settlement
+
+- Token: `sha256:7444ea15d8d79bdf9a2acaecbaac4ac0d9e8b68fffaf3478cc07f452c2d94095`
+- Request ID: `codex-pr1-settle-20260901t130324z-8306`
+- Evidence revision: `sha256:767ffb966a2206a53ef1b60d7025874441cf944ac18344894a602c07908b99ac`
+- Outcome: `passed`
+- Result: `state: complete`
 
 ## Rollback boundary
 
@@ -142,4 +150,4 @@ The boundary includes only `lib/subagent-runtime.ts`, `lib/nicobailon-subagent-a
 
 - **PR1 blockers:** none observed; the complete test command, provider-contract check, runtime-module check, and harness pass.
 - **Deferred work:** tasks 2.1–4.6 remain unchecked by design.
-- **Next recommended:** parent performs independent SDD verification and settles the native attempt exactly once, then proceeds to the next chained slice only after verification.
+- **Next recommended:** parent consumes this completed PR1 handoff and proceeds to the next chained slice only after its own routing checks.
