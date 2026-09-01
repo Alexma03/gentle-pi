@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "provider": "nicobailon",
+  "package": "pi-subagents",
+  "protocol": 1,
+  "requiredCapabilities": [
+    "spawn",
+    "status",
+    "stop",
+    "events.asyncComplete"
+  ],
+  "methods": {
+    "ping": "ping",
+    "spawn": "spawn",
+    "status": "status",
+    "stop": "stop"
+  },
+  "events": {
+    "ready": "subagents:rpc:v1:ready",
+    "request": "subagents:rpc:v1:request",
+    "replyPrefix": "subagents:rpc:v1:reply:",
+    "asyncComplete": "subagent:async-complete"
+  },
+  "spawn": {
+    "async": true
+  },
+  "completion": "status-or-events.asyncComplete"
+}
