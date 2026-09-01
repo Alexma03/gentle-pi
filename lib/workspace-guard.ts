@@ -193,8 +193,8 @@ function validateBinding(binding: WorkspaceBindingV1): WorkspaceBindingV1 {
 	assertNoSymlinkSegments(cwd);
 	assertNoSymlinkSegments(worktree);
 	assertNoSymlinkSegments(commonDir);
+	if (binding.repositoryId !== commonDir) throw new WorkspaceGuardError("invalid-binding", "Workspace repository identity must equal its canonical Git common directory.");
 	if (!pathInside(worktree, cwd)) throw new WorkspaceGuardError("invalid-binding", "Workspace cwd is outside its bound worktree.");
-	if (!pathInside(worktree, worktree)) throw new WorkspaceGuardError("invalid-binding", "Workspace worktree is malformed.");
 	return Object.freeze({
 		cwd,
 		worktree,
@@ -316,12 +316,41 @@ function gitSelectors(tokens: readonly string[], guardPath: (value: string) => W
 	for (let index = 1; index < tokens.length; index += 1) {
 		const token = tokens[index];
 		if (token === "--") break;
+		if (token === "-c") {
+			const value = tokens[index + 1];
+			if (!value) return decision(false, "ambiguous-command", "Git configuration selector is missing a value.");
+			const equals = value.indexOf("=");
+			const key = equals === -1 ? value : value.slice(0, equals);
+			const configuredPath = equals === -1 ? undefined : value.slice(equals + 1);
+			if ((key === "core.worktree" || key === "core.gitdir") && configuredPath !== undefined) {
+				const checked = guardPath(configuredPath);
+				if (!checked.allowed) return checked;
+			}
+			index += 1;
+			continue;
+		}
 		if (token === "-C" || token === "--git-dir" || token === "--work-tree") {
 			const value = tokens[index + 1];
 			if (!value) return decision(false, "ambiguous-command", `Git selector ${token} is missing a path.`);
 			const checked = guardPath(value);
 			if (!checked.allowed) return checked;
 			index += 1;
+			continue;
+		}
+		if (token.startsWith("-C") && token.length > 2) {
+			const checked = guardPath(token.slice(2));
+			if (!checked.allowed) return checked;
+			continue;
+		}
+		if (token.startsWith("-c") && token.length > 2) {
+			const value = token.slice(2);
+			const equals = value.indexOf("=");
+			const key = equals === -1 ? value : value.slice(0, equals);
+			const configuredPath = equals === -1 ? undefined : value.slice(equals + 1);
+			if ((key === "core.worktree" || key === "core.gitdir") && configuredPath !== undefined) {
+				const checked = guardPath(configuredPath);
+				if (!checked.allowed) return checked;
+			}
 			continue;
 		}
 		for (const prefix of ["--git-dir=", "--work-tree="]) {
@@ -343,6 +372,10 @@ function gitSubcommandIndex(tokens: readonly string[]): number {
 			index += 2;
 			continue;
 		}
+		if (token.startsWith("-C") && token.length > 2) {
+			index += 1;
+			continue;
+		}
 		if (token.startsWith("--git-dir=") || token.startsWith("--work-tree=") || token.startsWith("-c")) {
 			index += 1;
 			continue;
@@ -350,6 +383,60 @@ function gitSubcommandIndex(tokens: readonly string[]): number {
 		break;
 	}
 	return index;
+}
+
+const COMMAND_WRAPPERS = new Set(["env", "sudo", "command", "nice", "timeout", "nohup"]);
+
+function unwrapCommand(tokens: readonly string[]): { tokens: readonly string[]; wrapped: boolean } {
+	let index = 0;
+	let wrapped = false;
+	while (index < tokens.length && COMMAND_WRAPPERS.has(commandName(tokens[index] ?? ""))) {
+		wrapped = true;
+		const wrapper = commandName(tokens[index] ?? "");
+		index += 1;
+		if (wrapper === "env") {
+			while (index < tokens.length) {
+				const token = tokens[index];
+				if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+					index += 1;
+					continue;
+				}
+				if (token === "-i" || token === "--ignore-environment") {
+					index += 1;
+					continue;
+				}
+				if (token === "-u" || token === "--unset") {
+					index += 2;
+					continue;
+				}
+				if (token.startsWith("--unset=")) {
+					index += 1;
+					continue;
+				}
+				break;
+			}
+			continue;
+		}
+		if (wrapper === "sudo") {
+			while (index < tokens.length && tokens[index]?.startsWith("-")) index += 1;
+			continue;
+		}
+		if (wrapper === "command") {
+			while (index < tokens.length && (tokens[index] === "-p" || tokens[index] === "-v" || tokens[index] === "-V")) index += 1;
+			continue;
+		}
+		if (wrapper === "nice") {
+			if (tokens[index] === "-n") index += 2;
+			continue;
+		}
+		if (wrapper === "timeout") {
+			while (index < tokens.length && tokens[index]?.startsWith("-")) index += 1;
+			if (index < tokens.length) index += 1;
+			continue;
+		}
+		// nohup has no wrapper-specific operands.
+	}
+	return { tokens: tokens.slice(index), wrapped };
 }
 
 function pushDecision(tokens: readonly string[], pushIndex: number): WorkspaceGuardDecisionV1 {
@@ -375,7 +462,7 @@ function destructiveCommand(tokens: readonly string[]): WorkspaceGuardDecisionV1
 	const name = commandName(tokens[0] ?? "");
 	const args = tokens.slice(1);
 	if (name === "rm") {
-		if (args.some((arg) => arg === "--recursive" || arg === "--force" || /^-[^-]*[rRf]/.test(arg))) return decision(false, "destructive-command", "Recursive or force deletion is denied.");
+		return decision(false, "destructive-command", "File deletion is denied.");
 	}
 	if (name === "chmod" || name === "chown" || name === "dd" || name === "mkfs" || name === "shred") return decision(false, "destructive-command", `Destructive command '${name}' is denied.`);
 	if (name === "git") {
@@ -460,21 +547,30 @@ export class WorkspaceGuard implements WorkspaceGuardV1 {
 	checkCommand(command: string): WorkspaceGuardDecisionV1 {
 		const tokens = tokensForCommand(command);
 		if (!tokens) return decision(false, "ambiguous-command", "Shell composition, expansion, or malformed quoting is denied.", { command });
-		const destructive = destructiveCommand(tokens);
+		const unwrapped = unwrapCommand(tokens);
+		const inspectedTokens = unwrapped.tokens.length > 0 ? unwrapped.tokens : tokens;
+		const destructive = destructiveCommand(inspectedTokens);
 		if (destructive) return { ...destructive, command };
-		const name = commandName(tokens[0] ?? "");
+		const name = commandName(inspectedTokens[0] ?? "");
 		const guardPath = (value: string) => this.checkPath(value);
 		if (name === "git") {
-			const selector = gitSelectors(tokens, guardPath);
+			const selector = gitSelectors(inspectedTokens, guardPath);
 			if (selector && !selector.allowed) return { ...selector, command };
-			const commandIndex = gitSubcommandIndex(tokens);
-			if (tokens[commandIndex] === "push") return { ...pushDecision(tokens, commandIndex), command };
+			const commandIndex = gitSubcommandIndex(inspectedTokens);
+			if (inspectedTokens[commandIndex] === "push") {
+				const push = pushDecision(inspectedTokens, commandIndex);
+				return unwrapped.wrapped && push.allowed
+					? decision(false, "ambiguous-command", "Wrapped pushes are denied; invoke an explicitly guarded push directly.", { command })
+					: { ...push, command };
+			}
 		}
-		for (const token of tokens.slice(1)) {
+		for (const token of inspectedTokens.slice(1)) {
+			if (isSensitiveWorkspacePath(token)) return { ...decision(false, "sensitive-path", `Sensitive workspace path is denied: ${token}.`, { path: token }), command };
 			if (!looksLikePath(token) || token.startsWith("-")) continue;
 			const checked = this.checkPath(token);
 			if (!checked.allowed) return { ...checked, command };
 		}
+		if (unwrapped.wrapped) return decision(false, "ambiguous-command", "Wrapped commands are denied; invoke an explicitly guarded command directly.", { command });
 		return decision(true, "allowed", "Command stays within the bound workspace.", { command });
 	}
 
