@@ -117,6 +117,28 @@ test("adapter negotiates from a protocol-1 ping and starts an async task", async
 	assert.equal((requests[1]?.params as Record<string, unknown>).cwd, "/repo");
 });
 
+test("adapter forwards the complete portable task across the spawn boundary", async () => {
+	const { bus, adapter } = adapterWithResponder((events, request) => {
+		if (request.method === "ping") reply(events, request, READY);
+		if (request.method === "spawn") reply(events, request, { runId: "run-forwarded", state: "queued" });
+	});
+	await adapter.negotiate();
+	await adapter.start(TASK, { role: "gentle-ai-worker", cwd: "/repo" });
+	const spawn = bus.emitted
+		.filter((entry) => entry.event === NICOBailonRpcRequestEvent)
+		.map((entry) => entry.payload as NicobailonRpcRequestV1)
+		.find((request) => request.method === "spawn");
+	assert.deepEqual(spawn?.params, {
+		agent: "gentle-ai-worker",
+		task: TASK.task,
+		context: TASK.context,
+		dependencies: [...TASK.dependencies],
+		expectedOutcome: TASK.expectedOutcome,
+		async: true,
+		cwd: "/repo",
+	});
+});
+
 test("adapter normalizes status and maps cancellation to the provider stop method", async () => {
 	const { bus, adapter } = adapterWithResponder((events, request) => {
 		if (request.method === "ping") reply(events, request, READY);
@@ -152,6 +174,34 @@ test("adapter rejects a conflicting protocol marker even when the envelope versi
 	await assert.rejects(
 		adapter.negotiate(),
 		(error: unknown) => error instanceof NicobailonAdapterError && error.code === "invalid_ready",
+	);
+});
+
+test("adapter rejects a spawn reply that only echoes the request id", async () => {
+	const { adapter } = adapterWithResponder((events, request) => {
+		if (request.method === "ping") reply(events, request, READY);
+		if (request.method === "spawn") reply(events, request, { requestId: request.requestId, state: "queued" });
+	});
+	await adapter.negotiate();
+	await assert.rejects(
+		adapter.start(TASK, { role: "gentle-ai-worker" }),
+		(error: unknown) => error instanceof NicobailonAdapterError && error.code === "missing_handle",
+	);
+});
+
+test("adapter rejects status from a different provider run", async () => {
+	const { bus, adapter } = adapterWithResponder((events, request) => {
+		if (request.method === "ping") reply(events, request, READY);
+		if (request.method === "status") reply(events, request, { runId: "other-run", state: "running" });
+	});
+	await adapter.negotiate();
+	await assert.rejects(
+		adapter.status({ id: "run-1" }),
+		(error: unknown) => error instanceof NicobailonAdapterError && error.code === "invalid_provider_status",
+	);
+	assert.equal(
+		bus.emitted.filter((entry) => entry.event === NICOBailonRpcRequestEvent).length,
+		2,
 	);
 });
 
@@ -215,4 +265,26 @@ test("adapter maps async completion events without inventing a result RPC", asyn
 		.filter((entry) => entry.event === NICOBailonRpcRequestEvent)
 		.map((entry) => (entry.payload as NicobailonRpcRequestV1).method);
 	assert.deepEqual(methods, ["ping", "spawn"]);
+});
+
+test("adapter rejects malformed or nonterminal completion evidence", async () => {
+	const cases: readonly unknown[] = [
+		{ runId: "run-1", state: "running", summary: "still running" },
+		{ runId: "run-1", state: "unknown", summary: "bad state" },
+		{ runId: "run-1" },
+	];
+	for (const payload of cases) {
+		const { bus, adapter } = adapterWithResponder((events, request) => {
+			if (request.method === "ping") reply(events, request, READY);
+			if (request.method === "spawn") reply(events, request, { runId: "run-1", state: "queued" });
+		});
+		await adapter.negotiate();
+		const handle = await adapter.start(TASK, { role: "gentle-ai-worker" });
+		const completion = adapter.waitForCompletion(handle);
+		bus.emit(NICOBailonAsyncCompleteEvent, payload);
+		await assert.rejects(
+			completion,
+			(error: unknown) => error instanceof NicobailonAdapterError && error.code === "invalid_provider_status",
+		);
+	}
 });
