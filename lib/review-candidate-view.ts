@@ -5,6 +5,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
+import type { SubagentTaskV1 } from "./subagent-runtime.ts";
 
 const REVIEW_LENS = ["review-risk", "review-resilience", "review-readability", "review-reliability"] as const;
 export type ReviewLens = (typeof REVIEW_LENS)[number];
@@ -1523,11 +1524,23 @@ interface MutableSubagentRunInput {
 	[key: string]: unknown;
 }
 
+/**
+ * Provider-neutral pre-start decoration request. The candidate registry is
+ * deliberately required for review roles: a missing or stale binding is a
+ * hard failure, never an invitation to use live or provider-owned content.
+ */
+export interface ReviewCandidateDecorationRequestV1 {
+	readonly role: string;
+	readonly task: SubagentTaskV1;
+	readonly candidateViews: CandidateViewRegistry | null;
+	readonly workspaceRoot?: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isReviewLens(value: string): value is ReviewLens {
+export function isReviewLens(value: string): value is ReviewLens {
 	return (REVIEW_LENS as readonly string[]).includes(value);
 }
 
@@ -1535,6 +1548,60 @@ function hasCandidateContextConflict(text: string, views: readonly CandidateView
 	return text.includes(CONTROLLER_CANDIDATE_VIEW_HEADING)
 		|| views.some((view) => text.includes(view.root) || text.includes(view.candidateTree));
 }
+
+function assertReviewDecorationTask(task: SubagentTaskV1): void {
+	if (!isRecord(task)) throw new CandidateViewError("review subagent task must be a provider-neutral object");
+	const keys = Object.keys(task);
+	if (keys.some((key) => !["task", "context", "dependencies", "expectedOutcome"].includes(key))) {
+		throw new CandidateViewError("review subagent task contains provider-specific fields");
+	}
+	if (typeof task.task !== "string" || task.task.length === 0 || task.task.length > MAX_SUBAGENT_TASK_LENGTH) {
+		throw new CandidateViewError("review subagent task is malformed or exceeds the bounded contract");
+	}
+	if (typeof task.context !== "string" || task.context.length > MAX_SUBAGENT_CONTEXT_LENGTH) {
+		throw new CandidateViewError("review subagent context is malformed or exceeds the bounded contract");
+	}
+	if (!Array.isArray(task.dependencies) || task.dependencies.some((dependency) => typeof dependency !== "string" || dependency.length === 0 || dependency.length > 512)) {
+		throw new CandidateViewError("review subagent dependencies are malformed or exceed the bounded contract");
+	}
+	if (typeof task.expectedOutcome !== "string" || task.expectedOutcome.length === 0 || task.expectedOutcome.length > MAX_SUBAGENT_CONTEXT_LENGTH) {
+		throw new CandidateViewError("review subagent expected outcome is malformed or exceeds the bounded contract");
+	}
+}
+
+/**
+ * Decorate one provider-neutral task before runtime.start. The registry
+ * verifies the current live identity against its immutable candidate binding
+ * before returning the frozen view instructions; no provider-specific payload
+ * or ambient fallback can enter the returned DTO.
+ */
+export function decorateReviewCandidateTask(request: ReviewCandidateDecorationRequestV1): SubagentTaskV1 {
+	if (!isRecord(request) || typeof request.role !== "string" || !isReviewLens(request.role)) {
+		throw new CandidateViewError("review subagent role must name one supported review lens");
+	}
+	assertReviewDecorationTask(request.task);
+	if (request.candidateViews === null) throw new CandidateViewError("review subagent dispatch has no controller-owned candidate view registry");
+	const lineageId = request.candidateViews.currentLineageId(request.workspaceRoot);
+	const reviewAgents = [request.role] as ReviewLens[];
+	const views = request.candidateViews.resolveCurrentForLenses(reviewAgents, request.workspaceRoot);
+	const view = views[0];
+	if (!view || views.some((candidate) => candidate.root !== view.root || candidate.candidateTree !== view.candidateTree || JSON.stringify(candidate.paths) !== JSON.stringify(view.paths) || JSON.stringify(candidate.modes) !== JSON.stringify(view.modes) || !gitlinkMapsEqual(candidate.gitlinks, view.gitlinks) || JSON.stringify(candidate.deletedPaths) !== JSON.stringify(view.deletedPaths))) {
+		throw new CandidateViewError("review subagent dispatch does not resolve one exact frozen candidate view");
+	}
+	const userText = `${request.task.task}\n${request.task.context}`;
+	if (hasCandidateContextConflict(userText, views)) throw new CandidateViewError("review subagent dispatch contains conflicting candidate-view text");
+	const task = `${request.task.task}${candidateContextBlock(lineageId, reviewAgents, view)}`;
+	if (task.length > MAX_SUBAGENT_TASK_LENGTH) throw new CandidateViewError("review subagent task exceeds the bounded candidate decoration contract");
+	return {
+		task,
+		context: request.task.context,
+		dependencies: [...request.task.dependencies],
+		expectedOutcome: request.task.expectedOutcome,
+	};
+}
+
+/** Stable alias for runtime adapters that call the seam a subagent decorator. */
+export const decorateReviewSubagentTask = decorateReviewCandidateTask;
 
 function compareCanonicalStrings(left: string, right: string): number {
 	return left < right ? -1 : left > right ? 1 : 0;

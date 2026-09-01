@@ -97,7 +97,7 @@ import {
 } from "../lib/review-snapshot.ts";
 import { renderGentleAiLifecycleCall, renderGentleAiResult, type GentleAiRenderContext } from "../lib/gentle-ai-renderer.ts";
 import { sanitizeTerminalText, stripAnsi } from "../lib/terminal-theme.ts";
-import { CandidateViewError, CandidateViewRegistry, injectReviewCandidateView, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
+import { CandidateViewError, CandidateViewRegistry, decorateReviewCandidateTask, injectReviewCandidateView, isReviewLens, readCandidateContextManifestPage, resolveCanonicalCandidateBase, type CandidateView } from "../lib/review-candidate-view.ts";
 import {
 	GentleAiDevBinaryOverrideError,
 	GentleAiPinnedMainBinaryError,
@@ -5145,6 +5145,7 @@ function registerSubagentDelegationTool(
 	pi: ExtensionAPI,
 	runtime: SubagentRuntimeV1,
 	workspaceGuardFor: WorkspaceGuardResolver,
+	candidateViews: CandidateViewRegistry | null,
 ): void {
 	pi.registerTool({
 		name: "gentle_subagent",
@@ -5158,8 +5159,11 @@ function registerSubagentDelegationTool(
 			const guard = workspaceGuardFor(ctx);
 			guard.assertPath(ctx.cwd);
 			const { role, ...task } = input;
+			const decoratedTask = isReviewLens(role)
+				? decorateReviewCandidateTask({ role, task, candidateViews, workspaceRoot: guard.binding.worktree })
+				: task;
 			await runtime.negotiate();
-			const handle = await runtime.start(task, {
+			const handle = await runtime.start(decoratedTask, {
 				role,
 				cwd: guard.binding.worktree,
 				signal,
@@ -5203,7 +5207,7 @@ function createGentleAiExtensionForTesting(
 		const subagentRuntime = runtimeForExtension(dependencies, pi.events as unknown as NicobailonEventBusV1);
 		const workspaceGuardFor = subagentRuntime === null ? undefined : createWorkspaceGuardResolver(dependencies);
 		if (subagentRuntime !== null && workspaceGuardFor !== undefined) {
-			registerSubagentDelegationTool(pi, subagentRuntime, workspaceGuardFor);
+			registerSubagentDelegationTool(pi, subagentRuntime, workspaceGuardFor, candidateViews);
 		}
 
 		pi.on("session_shutdown", (_event, context) => {

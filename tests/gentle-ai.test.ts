@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -15,6 +16,7 @@ import type {
 import gentleAi, { __testing, createGentleAiExtension } from "../extensions/gentle-ai.ts";
 import type { NativeReviewCli } from "../lib/native-review-cli.ts";
 import type { ReviewCollectInputV3, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
+import { CandidateViewRegistry } from "../lib/review-candidate-view.ts";
 import { MANDATORY_SUBAGENT_CAPABILITIES, type SubagentResultV1, type SubagentRuntimeCapabilitiesV1, type SubagentRuntimeHandleV1, type SubagentRuntimeStatusV1, type SubagentTaskV1 } from "../lib/subagent-runtime.ts";
 import type { WorkspaceBindingV1, WorkspaceGuardV1 } from "../lib/workspace-guard.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
@@ -149,6 +151,64 @@ test("injected runtime routes provider-neutral delegation through the workspace 
 		`path:${root}`,
 		"negotiate",
 		`start:Run focused verification:gentle-ai-worker:${root}`,
+		"result",
+	]);
+});
+
+test("review delegation decorates the provider-neutral task before runtime start", async (t) => {
+	const root = mkdtempSync(join(tmpdir(), "gentle-pi-runtime-review-decoration-"));
+	const git = (...arguments_: string[]) => execFileSync("git", arguments_, { cwd: root, encoding: "utf8" }).trim();
+	git("init", "-b", "main");
+	writeFileSync(join(root, "tracked.txt"), "base\n");
+	git("add", "tracked.txt");
+	git("-c", "user.name=Candidate Test", "-c", "user.email=candidate@example.invalid", "commit", "-m", "base");
+	writeFileSync(join(root, "tracked.txt"), "candidate\n");
+	const candidateViews = new CandidateViewRegistry();
+	t.after(() => {
+		candidateViews.cleanupAll();
+		try { chmodSync(root, 0o755); } catch {}
+		try { rmSync(root, { recursive: true, force: true }); } catch {}
+	});
+	const view = candidateViews.create({ contributorRoot: root });
+	candidateViews.bindCurrent({ token: view.token, lineageId: "runtime-decoration-lineage", selectedLenses: ["review-risk"] });
+	const tools = new Map<string, any>();
+	const calls: string[] = [];
+	const runtime = {
+		async negotiate() { calls.push("negotiate"); },
+		async start(task: SubagentTaskV1, options: { role?: string; cwd?: string }) {
+			calls.push(`start:${task.task.includes("Controller-owned candidate view")}:${options.role}:${options.cwd}`);
+			return { id: "review-decoration-runtime" };
+		},
+		async result() { calls.push("result"); return { status: "completed", summary: "ok", evidence: ["bound"], blockers: [] }; },
+		async status() { return { id: "review-decoration-runtime", status: "completed" }; },
+		async cancel() {},
+	} as unknown;
+	const guard: WorkspaceGuardV1 = {
+		binding: { cwd: root, worktree: root, commonDir: join(root, ".git"), repositoryId: join(root, ".git") },
+		checkPath: (path) => ({ allowed: true, code: "allowed", path }),
+		assertPath: (path) => path,
+		checkCommand: (command) => ({ allowed: true, code: "allowed", command }),
+		assertCommand: (command) => command,
+	};
+	const pi = {
+		events: { on() {}, emit() {} },
+		on() {},
+		registerCommand() {},
+		registerTool(tool: { name: string }) { tools.set(tool.name, tool); },
+	} as unknown as ExtensionAPI;
+	createGentleAiExtension({ nativeReviewCli: null, subagentRuntime: runtime as never, workspaceGuard: guard, candidateViews })(pi);
+	const delegate = tools.get("gentle_subagent");
+	assert.ok(delegate);
+	await delegate.execute("review-decoration-call", {
+		role: "review-risk",
+		task: "Inspect the frozen candidate",
+		context: "Return bounded findings",
+		dependencies: [],
+		expectedOutcome: "A review result",
+	}, undefined, undefined, { cwd: root, hasUI: false } as unknown as ExtensionContext);
+	assert.deepEqual(calls, [
+		"negotiate",
+		`start:true:review-risk:${root}`,
 		"result",
 	]);
 });
