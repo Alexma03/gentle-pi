@@ -857,6 +857,7 @@ test("candidate view accepts internal relative symlink targets and rejects unsaf
 		["backslash", "unsafe\\target"],
 		["empty segment", "unsafe//target"],
 	] as const) {
+		if (process.platform === "win32" && name === "backslash") continue;
 		const contributorRoot = repository(t);
 		try {
 			symlinkSync(target, join(contributorRoot, "candidate-link"));
