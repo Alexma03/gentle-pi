@@ -224,7 +224,7 @@ test("a pinned main snapshot persists exact provenance and resolves before a leg
 	const registered = registerGentleAiPinnedMainBinary(snapshot.path, environment(home), PLATFORM);
 
 	assert.equal(registered.registrationPath, gentleAiPinnedMainRegistrationPath(environment(home)));
-	assert.equal(statSync(registered.registrationPath).mode & 0o777, 0o600);
+	if (PLATFORM !== "win32") assert.equal(statSync(registered.registrationPath).mode & 0o777, 0o600);
 	const document = JSON.parse(readFileSync(registered.registrationPath, "utf8"));
 	assert.deepEqual(document, {
 		schema: GENTLE_AI_PINNED_MAIN_REGISTRATION_SCHEMA,
@@ -325,7 +325,7 @@ test("a custom/main snapshot binds its exact branch, persists exact provenance, 
 	assert.equal(registered.binary.sourceTreeSha256, "d".repeat(64));
 	assert.equal(registered.binary.versionOutput, "gentle-ai custom/main@cafe1234+local");
 	assert.equal(registered.binary.buildCommand, "go build -trimpath ./cmd/gentle-ai");
-	assert.equal(statSync(registered.registrationPath).mode & 0o777, 0o600);
+	if (PLATFORM !== "win32") assert.equal(statSync(registered.registrationPath).mode & 0o777, 0o600);
 	const document = JSON.parse(readFileSync(registered.registrationPath, "utf8"));
 	assert.deepEqual(document, {
 		schema: GENTLE_AI_PINNED_MAIN_REGISTRATION_SCHEMA,

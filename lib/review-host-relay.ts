@@ -263,6 +263,8 @@ export interface ReviewHostRelayRequest {
 	readonly signal?: AbortSignal;
 	/** Test-only process seam for portable fixture launchers. */
 	readonly spawnProcess?: typeof spawn;
+	/** Test-only cleanup seam for deterministic cross-platform failure coverage. */
+	readonly removeDirectory?: (path: string, options: { recursive: true; force: true }) => Promise<void>;
 }
 
 export interface ReviewHostRelayResult {
@@ -501,6 +503,7 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 			timeoutMs: piTimeoutMs,
 			...(request.signal === undefined ? {} : { signal: request.signal }),
 			...(request.spawnProcess === undefined ? {} : { spawnProcess: request.spawnProcess }),
+			...(request.removeDirectory === undefined ? {} : { removeDirectory: request.removeDirectory }),
 		});
 	} catch (error) {
 		throw relayPiTransportError(error, promptBytes.length, piTimeoutMs);
@@ -545,7 +548,7 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 		throw error;
 	} finally {
 		try {
-			await rm(stagingDirectory, { recursive: true, force: true });
+			await (request.removeDirectory ?? rm)(stagingDirectory, { recursive: true, force: true });
 		} catch (error) {
 			if (!primaryFailure) {
 				throw new ReviewHostRelayError(

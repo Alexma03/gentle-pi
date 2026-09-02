@@ -34,6 +34,8 @@ export interface OpaquePiReviewerOptions {
 	readonly signal?: AbortSignal;
 	/** Test-only process seam for portable fixture launchers. */
 	readonly spawnProcess?: typeof spawn;
+	/** Test-only cleanup seam for deterministic cross-platform failure coverage. */
+	readonly removeDirectory?: (path: string, options: { recursive: true; force: true }) => Promise<void>;
 }
 
 export interface OpaquePiReviewerResult {
@@ -234,7 +236,7 @@ export async function runOpaquePiReviewer(prompt: Buffer, options: OpaquePiRevie
 	} finally {
 		if (scratchDirectory !== undefined) {
 			try {
-				await rm(scratchDirectory, { recursive: true, force: true });
+				await (options.removeDirectory ?? rm)(scratchDirectory, { recursive: true, force: true });
 			} catch (error) {
 				if (!primaryFailure) {
 					throw new OpaquePiReviewerTransportError(

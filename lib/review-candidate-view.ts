@@ -368,6 +368,17 @@ function assertSafeSymlinkTarget(root: string, entryPath: string, value: Buffer)
 	}
 }
 
+// Windows may return a relative symlink target with native backslashes even
+// when the frozen Git blob used forward slashes. Normalize only this
+// post-materialization readback; tree input still rejects backslashes, and the
+// safety check below runs after normalization so containment is not weakened.
+function normalizeMaterializedSymlinkTarget(value: Buffer): Buffer {
+	if (process.platform !== "win32") return value;
+	const target = value.toString("utf8");
+	if (!Buffer.from(target, "utf8").equals(value)) return value;
+	return Buffer.from(target.replaceAll("\\", "/"), "utf8");
+}
+
 function splitNulTerminated(raw: Buffer, errorMessage: string): Buffer[] {
 	if (raw.length === 0) return [];
 	if (raw.at(-1) !== 0) throw new CandidateViewError(errorMessage);
@@ -559,7 +570,7 @@ function entryContentHash(root: string, entry: CandidateTreeEntry): string {
 	if (entry.mode === "120000") {
 		if (!item.isSymbolicLink()) throw new CandidateViewError("candidate view symlink does not match its frozen tree");
 		const target = readlinkSync(path, "buffer");
-		const bytes = Buffer.isBuffer(target) ? target : Buffer.from(target);
+		const bytes = normalizeMaterializedSymlinkTarget(Buffer.isBuffer(target) ? target : Buffer.from(target));
 		assertSafeSymlinkTarget(root, entry.path, bytes);
 		return createHash("sha256").update(bytes).digest("hex");
 	}

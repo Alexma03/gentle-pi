@@ -495,8 +495,12 @@ test("a result staging cleanup failure remains a typed submit failure", async (t
 	const originalTmpdir = process.env.TMPDIR;
 	process.env.TMPDIR = scratchParent;
 	try {
+		const removeDirectory = async (path: string, options: { recursive: true; force: true }): Promise<void> => {
+			if (path.includes("gentle-pi-host-relay-result-")) throw new Error("simulated staging cleanup failure");
+			rmSync(path, options);
+		};
 		const error = await rejectsWithRelayError(
-			runReviewHostRelaySlot(relayRequest(fixture)),
+			runReviewHostRelaySlot(relayRequest(fixture, { removeDirectory })),
 			REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED,
 			"submit",
 		);

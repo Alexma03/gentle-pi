@@ -187,9 +187,13 @@ async function uniqueExistingDirs(dirs: string[]): Promise<string[]> {
 	const seen = new Set<string>();
 	const out: string[] = [];
 	for (const dir of dirs) {
-		const clean = comparablePath(dir);
-		if (seen.has(clean) || !(await pathExists(clean))) continue;
-		seen.add(clean);
+		// Keep the normalized spelling for filesystem operations and generated
+		// registry output; use the case-folded form only as the Windows identity
+		// key. Returning the key itself would lowercase native path names.
+		const clean = normalize(dir);
+		const key = comparablePath(clean);
+		if (seen.has(key) || !(await pathExists(clean))) continue;
+		seen.add(key);
 		out.push(clean);
 	}
 	return out;

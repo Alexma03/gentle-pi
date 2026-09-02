@@ -664,9 +664,12 @@ test("candidate view derives deletion, rename, executable, and symlink scope fro
 	const registry = new CandidateViewRegistry();
 	const view = registry.create({ contributorRoot });
 	try {
-		assert.deepEqual(view.paths, ["deleted.txt", "linked.sh", "renamed.txt", "script.sh"]);
+		const expectedPaths = ["deleted.txt", "linked.sh", "renamed.txt", ...(process.platform === "win32" ? [] : ["script.sh"])]
+		assert.deepEqual(view.paths, expectedPaths);
 		assert.deepEqual(view.deletedPaths, ["deleted.txt"]);
-		assert.deepEqual(view.modes, { "linked.sh": "120000", "renamed.txt": "100644", "script.sh": "100755" });
+		const expectedModes: Record<string, string> = { "linked.sh": "120000", "renamed.txt": "100644" };
+		if (process.platform !== "win32") expectedModes["script.sh"] = "100755";
+		assert.deepEqual(view.modes, expectedModes);
 		registry.bind({ token: view.token, lineageId: "scope-kinds", selectedLenses: ["review-risk"] });
 		const dispatch = { agent: "review-risk", task: "review", mode: "task" };
 		decorateDispatch(dispatch, registry);

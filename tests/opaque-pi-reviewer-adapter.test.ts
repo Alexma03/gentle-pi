@@ -189,6 +189,7 @@ test("the opaque adapter leaves no prompt or result file in scratch and reports 
 			runOpaqueFixture(PROMPT_BYTES, {
 				piExecutable: fixture.pi,
 				environment: { ...fixture.environment, OPAQUE_PI_MODE: "break-cleanup" },
+				removeDirectory: async () => { throw new Error("simulated cleanup failure"); },
 				timeoutMs: 10_000,
 			}),
 			OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.CLEANUP_FAILED,
