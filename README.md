@@ -45,7 +45,7 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 
 | Capability                     | What it does                                                                                                                                  |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| **el Gentleman persona**       | Makes Pi behave like a senior architect and teacher, not a generic chatbot. Spanish responses use Rioplatense voseo by default; neutral mode is saved globally with project overrides. |
+| **neutral persona**            | Same senior-architect discipline without regional Spanish. Neutral is the default; `/gentle:persona` can still switch to gentleman (Rioplatense voseo). |
 | **Work routing discipline**    | Small tasks stay inline. Context-heavy exploration can be delegated. Large or risky changes go through SDD/OpenSpec.                          |
 | **SDD/OpenSpec assets**        | Installs phase agents and chains for `init`, `onboard`, `explore`, `proposal`, `spec`, `design`, `tasks`, `apply`, `verify`, `sync`, and `archive`. |
 | **Lazy SDD preflight**         | Resolves SDD mode, artifact store, and delivery strategy once per session; prompts only when a choice is genuinely unresolved.                            |
@@ -483,8 +483,8 @@ Delegation contract:
 
 | Persona     | Behavior                                                                                                      |
 | ----------- | ------------------------------------------------------------------------------------------------------------- |
+| `neutral`   | Same discipline, warmer professional language, no regional expression. **Default** when no `persona.json` exists. |
 | `gentleman` | Senior architect, teacher, direct technical feedback, Rioplatense Spanish/voseo when the user writes Spanish. |
-| `neutral`   | Same discipline, warmer professional language, no regional expression.                                        |
 
 Saved globally at:
 
