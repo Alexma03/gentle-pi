@@ -57,7 +57,7 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 | **Skill creation workflow**    | Provides the `gentle-ai-skill-creator`/`gentle-ai-skill-improver` skills, `/skill-creation` prompt, and packaged style guide for LLM-first skills. |
 | **Delivery skills**            | Includes issue-first PRs, chained PRs, work-unit commits, cognitive docs, comment writing, and Judgment Day review.                           |
 | **Bounded native review**      | Freezes one candidate, dispatches only controller-selected lenses, and records native authority. Review outcomes are informational; delivery follows ordinary repository policy. |
-| **Verified native runtime**    | Provisions the exact package-local Gentle AI v2.5.0-rc.3 runtime: SHA-256-pinned prerelease binaries on Darwin/Linux and a Go SumDB-verified source build on Windows x64/arm64. It validates package-local integrity and rejects PATH, global, sibling, symlink, and mode fallbacks. |
+| **Verified personal runtime**  | Builds `Alexma03/gentle-ai@custom/main` locally, records its exact commit, source-tree digest, binary digest, and version, then activates that pinned snapshot. The temporary source checkout is removed after installation. |
 | **Runtime safety**             | Blocks destructive shell commands, asks for confirmation for sensitive operations, and blocks direct read/write/edit access to sensitive paths. |
 
 ## Install
@@ -66,11 +66,11 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 pi install git:github.com/Alexma03/gentle-pi@custom/main
 ```
 
-This fork installs from git, not npm. Postinstall builds Gentle AI from [Alexma03/gentle-ai](https://github.com/Alexma03/gentle-ai) `custom/main` and registers it as the persistent Pi binary. It does not download Gentleman-Programming release assets or `go install` the official module.
+This fork installs from git, not npm. Postinstall builds Gentle AI from [Alexma03/gentle-ai](https://github.com/Alexma03/gentle-ai) `custom/main`, records the resolved commit and integrity metadata, and registers the snapshot as Pi's persistent pinned-main binary. It does not download Gentleman-Programming release assets or retain the source checkout.
 
 Requires Git and local Go 1.25.10+. To skip the fork build, set `GENTLE_PI_SKIP_GENTLE_AI_INSTALL=1`.
 
-### RDD version policy
+### Upstream npm release policy
 
 Native RDD started in `gentle-pi` `v0.15.0` on 2026-07-10 with bounded review transactions. Every release from `v0.15.0` onward is part of the unstable RDD development line. New releases will continue improving RDD until the project declares the line stable. The stable version for normal use without native RDD is the last preceding release, `v0.14.0`.
 
@@ -84,10 +84,10 @@ pi install npm:gentle-pi@latest
 
 The latest RDD package installs Gentle AI only into its private `.gentle-ai/` directory. Darwin and Linux use pinned release assets with asset and executable SHA-256 verification (signed archives for stable pins, raw prerelease binaries for the current v2.5.0-rc.3 pin). Windows x64 and arm64 build the exact `v2.5.0-rc.3` source tag with a local Go 1.25.10+ toolchain, a sealed Go environment, `GOTOOLCHAIN=local`, and `GOSUMDB=sum.golang.org`; it does not download Go automatically. Windows provenance is Go-toolchain plus SumDB evidence and postinstall tamper detection, **not** Authenticode or protection against a malicious joint binary-and-manifest replacement. Package-private locks coordinate cooperative concurrent or crashed installers; their tombstones fail closed. A malicious same-user process with write access to package-private `node_modules` is outside that protocol because it can already replace package code, binary, or manifest, and portable Node has no pathname-delete CAS. It never uses `PATH` or a global `gentle-ai` installation. For development or offline installs only, set `GENTLE_PI_SKIP_GENTLE_AI_INSTALL=1`; native review operations then fail closed with an actionable `package-local-binary-missing` error until the package is reinstalled normally.
 
-Recommended companion packages:
+Required subagent runtime and recommended memory integration:
 
 ```bash
-pi install npm:pi-subagents
+pi install npm:pi-subagents@0.63.0
 pi install npm:gentle-engram
 ```
 

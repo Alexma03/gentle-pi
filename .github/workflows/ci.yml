@@ -34,32 +34,36 @@ jobs:
           node-version: "24"
           cache: "pnpm"
 
-      # Windows uses Gentle AI's verified Go SumDB source-build path because
-      # the pinned provider release intentionally ships no unsigned Windows
-      # binary. Keep the compiler floor explicit in the cross-OS evidence.
-      - name: Setup Go for the Windows source-build path
-        if: runner.os == 'Windows'
+      # The personal fork is built once on every platform. Dependency install
+      # stays script-free so it cannot perform a second implicit clone/build.
+      - name: Setup Go for the fork source-build path
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.25.10"
           check-latest: false
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build and register Gentle AI fork
+        run: pnpm run install:gentle-ai-fork
+
+      - name: Select the platform fork binary
+        run: >-
+          node -e "const fs=require('node:fs'); const path=require('node:path');
+          const binary=path.resolve('.gentle-ai','custom-main',process.platform==='win32'?'gentle-ai.exe':'gentle-ai');
+          fs.appendFileSync(process.env.GITHUB_ENV,'GENTLE_AI_DEV_BINARY='+binary+'\nGENTLE_PI_GENTLE_AI_DEV_BINARY='+binary+'\n')"
 
       - name: Run tests
         run: pnpm test
-        env:
-          GENTLE_PI_REQUIRE_NATIVE_BINARY: "1"
 
-      - name: Verify generated runtime modules
-        run: pnpm run check:runtime-modules
+      - name: Verify the current personal-fork runtime
+        run: pnpm run test:dev-binary
+        env:
+          GENTLE_PI_REQUIRE_DEV_BINARY: "1"
 
       - name: Verify coordinated release evidence
         run: pnpm run check:release-evidence
-
-      - name: Verify package contents
-        run: node scripts/verify-package-files.mjs
 
       - name: Verify packed installation
         run: pnpm run test:packed-package

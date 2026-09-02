@@ -38,8 +38,11 @@
 	"scripts": {
 		"check:provider-contract": "node scripts/check-provider-contract.mjs",
 		"check:release-evidence": "node scripts/check-release-evidence.mjs",
+		"install:gentle-ai-fork": "node scripts/install-gentle-ai.mjs",
 		"postinstall": "node scripts/install-gentle-ai.mjs",
-		"test": "node --import ./scripts/canonical-test-temp.mjs --experimental-strip-types --test tests/*.test.ts && pnpm run check:provider-contract && pnpm run check:runtime-modules && node scripts/verify-package-files.mjs && pnpm run check:release-evidence && pnpm run test:harness",
+		"test": "pnpm run test:unit && pnpm run test:contracts && pnpm run test:harness",
+		"test:unit": "node --import ./scripts/canonical-test-temp.mjs --experimental-strip-types --test tests/*.test.ts",
+		"test:contracts": "pnpm run check:provider-contract && pnpm run check:runtime-modules && node scripts/verify-package-files.mjs && pnpm run check:release-evidence",
 		"test:harness": "node --import ./scripts/canonical-test-temp.mjs --experimental-strip-types tests/runtime-harness.mjs",
 		"test:dev-binary": "node --experimental-strip-types --test tests/devbinary/*.devtest.ts",
 		"test:cross-lane": "node tests/crosslane/cross-lane.mjs",
@@ -47,8 +50,8 @@
 		"build:runtime-modules": "node scripts/build-runtime-modules.mjs --write",
 		"check:runtime-modules": "node scripts/build-runtime-modules.mjs --check",
 		"test:packed-package": "node --import ./scripts/canonical-test-temp.mjs scripts/test-packed-runner.mjs",
-		"prepack": "pnpm test && pnpm run check:runtime-modules && node scripts/verify-package-files.mjs",
-		"prepublishOnly": "node scripts/check-release-evidence.mjs --release && pnpm test && pnpm run check:runtime-modules && node scripts/verify-package-files.mjs && pnpm run test:packed-package"
+		"prepack": "pnpm test",
+		"prepublishOnly": "node scripts/check-release-evidence.mjs --release && pnpm run install:gentle-ai-fork && pnpm test && pnpm run test:packed-package"
 	},
 	"pi": {
 		"extensions": [
