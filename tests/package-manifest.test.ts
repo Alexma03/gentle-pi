@@ -221,6 +221,7 @@ test("generated runtime modules and packed-package checks are deterministic", ()
 		assert.doesNotMatch(source, /\.split\(" "\)/, `${name}: rendered native invocations require semantic argument handling`);
 	}
 	assert.match(ci, /pnpm run test:packed-package/);
+	assert.match(ci, /push:\s*\n\s*branches:\s*\n\s*- main\s*\n\s*- custom\/main/, "push CI must verify both maintained branches");
 	assert.match(ci, /go-version: "1\.25\.10"/);
 	assert.doesNotMatch(ci, /if: runner\.os == 'Windows'/);
 	assert.match(ci, /pnpm install --frozen-lockfile --ignore-scripts/);
