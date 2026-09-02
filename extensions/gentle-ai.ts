@@ -3176,6 +3176,13 @@ const processAgentEndSubagentDepth = new Map<PendingReviewConsentSessionKey, num
 // `agent_end` preflight reminder fires at most once per unreviewed candidate.
 const processAgentEndPreflightNudgedTargets = new Map<PendingReviewConsentSessionKey, Set<string>>();
 
+// gentle-pi#568: the target identity negotiated STATUS reported at
+// `session_start`, before this session touched the worktree. A candidate
+// already present at that point is the user's own pre-session work, not
+// something this session produced, so `agent_end` must not treat it as an
+// unreviewed candidate this session should be reminded about.
+const processAgentEndSessionBaseline = new Map<PendingReviewConsentSessionKey, string>();
+
 function pendingReviewConsentSessionKey(context: ExtensionContext | undefined, fallbackKey: symbol): PendingReviewConsentSessionKey {
 	try {
 		const sessionManager = (context as unknown as { sessionManager?: { getSessionId?: () => unknown } } | undefined)?.sessionManager;
@@ -3923,12 +3930,43 @@ async function negotiatedStatusForHostTransport(
 	}
 }
 
+// gentle-pi#568: resolves the current negotiated review STATUS for a session,
+// under the exact guards `agent_end` uses to decide whether to nudge: a
+// native review CLI with both `reviewMode` and `targetStatus`, a UI-bearing
+// context, and RDD effectively on. Returns `undefined` on any missing guard,
+// an effective-off mode, or any STATUS error or transport refusal, so both
+// `session_start` (recording a baseline) and `agent_end` (deciding whether to
+// nudge) resolve the same target identity through the same path.
+async function resolveNegotiatedReviewStatusForSession(
+	nativeReviewCli: NativeReviewCli | null,
+	ctx: ExtensionContext,
+	sessionKey: PendingReviewConsentSessionKey,
+): Promise<ReviewStatusV3 | undefined> {
+	if (nativeReviewCli?.reviewMode === undefined || nativeReviewCli.targetStatus === undefined) return undefined;
+	if (ctx.hasUI !== true) return undefined;
+	let modeEffective: "on" | "off";
+	try {
+		const mode = await nativeReviewCli.reviewMode({ cwd: ctx.cwd, operation: NATIVE_REVIEW_MODE_OPERATION.STATUS });
+		modeEffective = mode.status.effective;
+	} catch {
+		return undefined;
+	}
+	if (modeEffective === "off") return undefined;
+	try {
+		const retainedSelections = ((key: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(key) ?? processRetainedNativeStatusSelections.set(key, new Map()).get(key)!)(sessionKey);
+		const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: ctx.cwd }, retainedSelections, ctx.cwd);
+		return negotiated.status;
+	} catch {
+		return undefined;
+	}
+}
+
 // gentle-pi#556 / gentle-ai#4051: the exact once-per-candidate reminder sent
 // through `agent_end`. It never runs START itself, so it names the one
-// supported continuation (gentle_review inspect) and defers the resulting
-// consent envelope to the human.
+// supported continuation (gentle_review inspect). The globally enabled RDD
+// switch is already the user's authorization, so no candidate consent exists.
 function renderAgentEndReviewPreflightMessage(targetIdentity: string): string {
-	return `Receipt-driven development is enabled, and this worktree holds an unreviewed candidate (target ${targetIdentity}). By the review contract entry rule, run the review preflight before reporting completion.\n\nCall the gentle_review tool with {"operation":"inspect"} and follow the transition it returns; it currently offers review.start for this target. Relay the resulting gentle-ai.review-integration.consent/v3 envelope to the human losslessly, and never answer it on the human's behalf.\n\nThis extension never runs START itself. This reminder is sent once per candidate.`;
+	return `Receipt-driven development is enabled, and this worktree holds an unreviewed candidate (target ${targetIdentity}). By the review contract entry rule, run the review preflight before reporting completion.\n\nCall the gentle_review tool with {"operation":"inspect"} and follow the transition it returns; it currently offers review.start for this target. The enabled RDD switch is complete authorization, so continue the returned lifecycle without asking for candidate consent.\n\nThis extension never starts review itself. This reminder is sent once per candidate.`;
 }
 
 function canonicalReviewCaptureBinding(value: unknown): string {
@@ -5248,6 +5286,7 @@ function createGentleAiExtensionForTesting(
 			processRetainedNativeStatusSelections.delete(sessionKey);
 			processAgentEndSubagentDepth.delete(sessionKey);
 			processAgentEndPreflightNudgedTargets.delete(sessionKey);
+			processAgentEndSessionBaseline.delete(sessionKey);
 			if (dependencies.subagentRuntime === undefined) subagentRuntime?.dispose();
 		});
 
@@ -5438,6 +5477,19 @@ function createGentleAiExtensionForTesting(
 				);
 			}
 		}
+		// gentle-pi#568: record the target identity STATUS reports right now,
+		// before this session does anything, as the baseline `agent_end` skips
+		// later. Best-effort and silent: it never notifies and never lets a
+		// STATUS failure fail session start.
+		try {
+			const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
+			const status = await resolveNegotiatedReviewStatusForSession(nativeReviewCli, ctx, sessionKey);
+			if (status?.targetIdentity !== undefined) {
+				processAgentEndSessionBaseline.set(sessionKey, status.targetIdentity);
+			}
+		} catch {
+			// Baseline recording is best-effort only; never surface or throw.
+		}
 	});
 
 	pi.on("input", async (event, ctx) => {
@@ -5487,6 +5539,10 @@ function createGentleAiExtensionForTesting(
 	// the review STATUS preflight. This handler is read-only and idempotent: it
 	// never runs START and never writes a file. It only sends one turn-triggering
 	// reminder, at most once per unreviewed target identity per session.
+	// gentle-pi#568: a candidate matching the baseline `session_start`
+	// recorded predates this session's own work and is skipped rather than
+	// nudged, so a worktree already dirty from the user's own edits does not
+	// draw a reminder about work this session never produced.
 	pi.on("agent_end", async (_event, ctx) => {
 		if (nativeReviewCli?.reviewMode === undefined || nativeReviewCli.targetStatus === undefined) return;
 		if (ctx.hasUI !== true) return;
@@ -5496,25 +5552,11 @@ function createGentleAiExtensionForTesting(
 			processAgentEndSubagentDepth.set(sessionKey, subagentDepth - 1);
 			return;
 		}
-		let modeEffective: "on" | "off";
-		try {
-			const mode = await nativeReviewCli.reviewMode({ cwd: ctx.cwd, operation: NATIVE_REVIEW_MODE_OPERATION.STATUS });
-			modeEffective = mode.status.effective;
-		} catch {
-			return;
-		}
-		if (modeEffective === "off") return;
-		let status: ReviewStatusV3;
-		try {
-			const retainedSelections = ((key: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(key) ?? processRetainedNativeStatusSelections.set(key, new Map()).get(key)!)(sessionKey);
-			const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: ctx.cwd }, retainedSelections, ctx.cwd);
-			if (negotiated.status === undefined) return;
-			status = negotiated.status;
-		} catch {
-			return;
-		}
+		const status = await resolveNegotiatedReviewStatusForSession(nativeReviewCli, ctx, sessionKey);
+		if (status === undefined) return;
 		if (status.nextTransition?.kind !== "execute" || status.nextTransition.execute.operation !== "review.start") return;
 		const targetIdentity = status.targetIdentity;
+		if (processAgentEndSessionBaseline.get(sessionKey) === targetIdentity) return;
 		let nudged = processAgentEndPreflightNudgedTargets.get(sessionKey);
 		if (nudged === undefined) {
 			nudged = new Set<string>();
