@@ -63,8 +63,12 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 ## Install
 
 ```bash
-pi install npm:gentle-pi@0.14.0
+pi install git:github.com/Alexma03/gentle-pi@custom/main
 ```
+
+This fork installs from git, not npm. Postinstall builds Gentle AI from [Alexma03/gentle-ai](https://github.com/Alexma03/gentle-ai) `custom/main` and registers it as the persistent Pi binary. It does not download Gentleman-Programming release assets or `go install` the official module.
+
+Requires Git and local Go 1.25.10+. To skip the fork build, set `GENTLE_PI_SKIP_GENTLE_AI_INSTALL=1`.
 
 ### RDD version policy
 
