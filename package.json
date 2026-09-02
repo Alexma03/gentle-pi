@@ -44,7 +44,7 @@
 		"test:unit": "node --import ./scripts/canonical-test-temp.mjs --experimental-strip-types --test tests/*.test.ts",
 		"test:contracts": "pnpm run check:provider-contract && pnpm run check:runtime-modules && node scripts/verify-package-files.mjs && pnpm run check:release-evidence",
 		"test:harness": "node --import ./scripts/canonical-test-temp.mjs --experimental-strip-types tests/runtime-harness.mjs",
-		"test:dev-binary": "node --experimental-strip-types --test tests/devbinary/*.devtest.ts",
+		"test:dev-binary": "node --import ./scripts/canonical-test-temp.mjs --experimental-strip-types --test tests/devbinary/*.devtest.ts",
 		"test:cross-lane": "node tests/crosslane/cross-lane.mjs",
 		"test:maintainer": "node --experimental-strip-types --test tests/maintainer/*.maintest.ts",
 		"build:runtime-modules": "node scripts/build-runtime-modules.mjs --write",

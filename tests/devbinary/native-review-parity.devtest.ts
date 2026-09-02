@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import test from "node:test";
 import {
 	NATIVE_REVIEW_ERROR_CODE,
@@ -23,7 +23,7 @@ import { requireDevBinary } from "../support/native-binary-gate.ts";
 const DEV_BINARY = process.env.GENTLE_AI_DEV_BINARY;
 const devBinaryGate = requireDevBinary({
 	devBinaryPath: DEV_BINARY,
-	exists: typeof DEV_BINARY === "string" && DEV_BINARY.length > 0 && DEV_BINARY.startsWith("/") && existsSync(DEV_BINARY),
+	exists: typeof DEV_BINARY === "string" && DEV_BINARY.length > 0 && isAbsolute(DEV_BINARY) && existsSync(DEV_BINARY),
 	env: process.env,
 });
 if (!devBinaryGate.run) console.log(`tests/devbinary/native-review-parity.devtest.ts: ${devBinaryGate.reason}`);

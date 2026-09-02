@@ -207,6 +207,15 @@ test("generated runtime modules and packed-package checks are deterministic", ()
 	assert.match(packageJson.scripts?.["test:contracts"] ?? "", /pnpm run check:runtime-modules/);
 	assert.match(ci, /pnpm test/);
 	assert.match(ci, /pnpm run test:dev-binary/);
+	assert.equal(
+		packageJson.scripts?.["test:dev-binary"],
+		"node --import ./scripts/canonical-test-temp.mjs --experimental-strip-types --test tests/devbinary/*.devtest.ts",
+		"dev-binary journeys must share the cross-platform canonical temp bootstrap",
+	);
+	const devParity = readFileSync(join(PACKAGE_ROOT, "tests", "devbinary", "native-review-parity.devtest.ts"), "utf8");
+	assert.match(devParity, /import \{ isAbsolute, join \} from "node:path"/);
+	assert.match(devParity, /isAbsolute\(DEV_BINARY\)/);
+	assert.doesNotMatch(devParity, /DEV_BINARY\.startsWith\("\/"\)/, "Windows drive-letter paths are absolute without a leading slash");
 	assert.match(ci, /pnpm run test:packed-package/);
 	assert.match(ci, /go-version: "1\.25\.10"/);
 	assert.doesNotMatch(ci, /if: runner\.os == 'Windows'/);
