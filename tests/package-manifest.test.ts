@@ -213,9 +213,13 @@ test("generated runtime modules and packed-package checks are deterministic", ()
 		"dev-binary journeys must share the cross-platform canonical temp bootstrap",
 	);
 	const devParity = readFileSync(join(PACKAGE_ROOT, "tests", "devbinary", "native-review-parity.devtest.ts"), "utf8");
+	const devRelay = readFileSync(join(PACKAGE_ROOT, "tests", "devbinary", "pi-host-relay.devtest.ts"), "utf8");
 	assert.match(devParity, /import \{ isAbsolute, join \} from "node:path"/);
 	assert.match(devParity, /isAbsolute\(DEV_BINARY\)/);
-	assert.doesNotMatch(devParity, /DEV_BINARY\.startsWith\("\/"\)/, "Windows drive-letter paths are absolute without a leading slash");
+	for (const [name, source] of [["native parity", devParity], ["Pi host relay", devRelay]] as const) {
+		assert.doesNotMatch(source, /DEV_BINARY\.startsWith\("\/"\)/, `${name}: Windows drive-letter paths are absolute without a leading slash`);
+		assert.doesNotMatch(source, /\.split\(" "\)/, `${name}: rendered native invocations require semantic argument handling`);
+	}
 	assert.match(ci, /pnpm run test:packed-package/);
 	assert.match(ci, /go-version: "1\.25\.10"/);
 	assert.doesNotMatch(ci, /if: runner\.os == 'Windows'/);

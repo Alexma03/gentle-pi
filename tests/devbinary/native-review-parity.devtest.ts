@@ -106,6 +106,34 @@ function consentAnswerCall(calls: NativeCall[], answer: "granted" | "declined"):
 	return matching[0]!;
 }
 
+function nativeOptions(arguments_: NativeCall): Map<string, string> {
+	assert.deepEqual(arguments_.slice(0, 2), ["review", "start"], "consent must execute the native review START operation");
+	const options = new Map<string, string>();
+	for (let index = 2; index < arguments_.length; index += 1) {
+		const token = arguments_[index]!;
+		assert.ok(token.startsWith("--"), `unexpected positional consent argument ${token}`);
+		const equals = token.indexOf("=");
+		const name = equals < 0 ? token : token.slice(0, equals);
+		const value = equals < 0 ? arguments_[++index] : token.slice(equals + 1);
+		assert.ok(value !== undefined && !value.startsWith("--"), `${name} must carry one value`);
+		assert.equal(options.has(name), false, `${name} must occur exactly once`);
+		options.set(name, value);
+	}
+	return options;
+}
+
+function assertConsentAnswerCall(calls: NativeCall[], answer: "granted" | "declined", cwd: string, consent: Awaited<ReturnType<typeof candidateConsent>>): void {
+	const options = nativeOptions(consentAnswerCall(calls, answer));
+	assert.deepEqual([...options.keys()].sort(), ["--agent", "--consent", "--contract", "--cwd", "--lineage", "--projection", "--target"]);
+	assert.equal(options.get("--contract"), consent.contract);
+	assert.equal(options.get("--cwd"), cwd);
+	assert.equal(options.get("--target"), consent.targetIdentity);
+	assert.equal(options.get("--projection"), consent.projection);
+	assert.equal(options.get("--agent"), consent.agent);
+	assert.match(options.get("--lineage") ?? "", /^review-[A-Za-z0-9._-]+$/);
+	assert.equal(options.get("--consent"), answer);
+}
+
 // ---------------------------------------------------------------------------
 // Kill switch round trip.
 // ---------------------------------------------------------------------------
@@ -144,9 +172,7 @@ test("dev-binary: granted consent executes its exact candidate-bound invocation 
 		assert.ok(answered.start.selectedLenses.length > 0);
 		assert.equal(answered.start.raw?.repository_context !== undefined, true);
 	}
-	const grantedChoice = consent.choices.find((choice) => choice.answer === "granted");
-	assert.ok(grantedChoice, "consent must include a granted choice");
-	assert.deepEqual(consentAnswerCall(calls, "granted"), grantedChoice.invocation.split(" ").slice(1));
+	assertConsentAnswerCall(calls, "granted", cwd, consent);
 });
 
 test("dev-binary: declined consent executes its exact candidate-bound invocation once and creates no lineage, result, or actor", { skip: !RUNNABLE }, async (t) => {
@@ -169,9 +195,7 @@ test("dev-binary: declined consent executes its exact candidate-bound invocation
 		assert.equal("start" in answered, false);
 		assert.equal("actor" in answered.raw, false);
 	}
-	const declinedChoice = consent.choices.find((choice) => choice.answer === "declined");
-	assert.ok(declinedChoice, "consent must include a declined choice");
-	assert.deepEqual(consentAnswerCall(calls, "declined"), declinedChoice.invocation.split(" ").slice(1));
+	assertConsentAnswerCall(calls, "declined", cwd, consent);
 	const after = await native.targetStatus({ cwd, agent: "pi" });
 	assert.equal(after.authority, undefined);
 	assert.equal("receipt" in after, false, "last-event STATUS no longer exposes receipt state");
