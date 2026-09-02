@@ -604,7 +604,7 @@ test("Windows source publication rolls back a prior bundle when final directory 
 	assert.equal(await readFile(join(versionDirectory, "old.txt"), "utf8"), "previous bundle");
 });
 
-test("Darwin/Linux signed bundles retain their four-field manifest and reusable compatibility", async () => {
+test("Darwin/Linux signed bundles retain their four-field manifest and reusable compatibility", { skip: process.platform === "win32" ? "POSIX executable mode semantics are unavailable on Windows" : false }, async () => {
 	const packageRoot = await mkdtemp(join(tmpdir(), "gentle-pi-installer-signed-compatibility-"));
 	const payload = Buffer.from("signed archive fixture");
 	const asset = { name: "gentle-ai_2.4.0_linux_amd64.tar.gz", sha256: createHash("sha256").update(payload).digest("hex"), url: "https://example.invalid/gentle-ai.tar.gz", executable: "gentle-ai" };
@@ -744,7 +744,7 @@ test("checksum mismatch cleans temporary state without promoting a binary", asyn
 	assert.deepEqual((await readdir(packageRoot)).filter((entry) => entry.startsWith(".gentle-ai-install-")), []);
 });
 
-test("installer promotes only the expected regular executable with executable POSIX mode", async () => {
+test("installer promotes only the expected regular executable with executable POSIX mode", { skip: process.platform === "win32" ? "POSIX executable mode semantics are unavailable on Windows" : false }, async () => {
 	const packageRoot = await mkdtemp(join(tmpdir(), "gentle-pi-installer-promote-"));
 	const payload = Buffer.from("trusted archive fixture");
 	const sha256 = createHash("sha256").update(payload).digest("hex");

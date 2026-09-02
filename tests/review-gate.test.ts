@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,8 @@ import {
 	evaluateReleaseFastPathV1,
 	recheckReleaseFastPathRemoteHeadV1,
 	resolveConfiguredPushDestinationV1,
+	setPublicationGitCommandRunnerForTestingV1,
+	type PublicationGitCommandRunnerV1,
 	type GateTargetV1,
 	type GhCommandRunnerV1,
 	type ReleaseFastPathEvidenceV1,
@@ -123,6 +125,18 @@ function budget(overrides: Partial<ReviewBudgetV1> = {}): ReviewBudgetV1 {
 		judge_runs: 0,
 		...overrides,
 	};
+}
+
+function nativePublicationGitRunner(
+	args: readonly string[],
+	options: { cwd?: string; env: NodeJS.ProcessEnv },
+): ReturnType<PublicationGitCommandRunnerV1> {
+	const result = spawnSync(process.platform === "win32" ? "git.exe" : "git", args, {
+		...options,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	return { status: result.status, stdout: result.stdout ?? "", error: result.error };
 }
 
 function initialState(repository: GateRepository, lineageId = "approved-lineage"): ReviewStateV1 {
@@ -407,25 +421,20 @@ test("push gate treats only successful empty output as absent and fails closed o
 		}],
 	} as const;
 	assert.equal(evaluateGateTarget(receipt, target, repository).status, GATE_RESULT.ALLOW);
-	const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
-	const originalPath = process.env.PATH;
-	for (const [name, body] of [
-		["nonzero", "exit 1"],
-		["malformed", "printf 'not-a-valid-row\\n'; exit 0"],
-		["ambiguous", `printf '${finalCommit}\\trefs/heads/feature\\n${finalCommit}\\trefs/heads/feature\\n'; exit 0`],
+	for (const [name, probe] of [
+		["nonzero", { status: 1, stdout: "" }],
+		["malformed", { status: 0, stdout: "not-a-valid-row\n" }],
+		["ambiguous", { status: 0, stdout: `${finalCommit}\trefs/heads/feature\n${finalCommit}\trefs/heads/feature\n` }],
 	] as const) {
 		await t.test(name, () => {
-			const bin = join(authority.repository, `fake-git-${name}`);
-			mkdirSync(bin);
-			const fakeGit = join(bin, "git");
-			writeFileSync(fakeGit, `#!/bin/sh\nif [ "$1" = "ls-remote" ]; then ${body}; fi\nexec "${realGit}" "$@"\n`);
-			chmodSync(fakeGit, 0o755);
-			process.env.PATH = `${bin}:${originalPath ?? ""}`;
 			try {
+				setPublicationGitCommandRunnerForTestingV1((args, options) =>
+					args[0] === "ls-remote" ? probe : nativePublicationGitRunner(args, options),
+				);
 				const result = evaluateGateTarget(receipt, target, repository);
 				assert.equal(result.status, GATE_RESULT.DENY, result.reason);
 			} finally {
-				process.env.PATH = originalPath;
+				setPublicationGitCommandRunnerForTestingV1(undefined);
 			}
 		});
 	}

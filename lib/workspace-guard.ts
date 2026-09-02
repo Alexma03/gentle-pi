@@ -238,6 +238,12 @@ function tokensForCommand(command: string): string[] | undefined {
 	let current = "";
 	let quote: "'" | '"' | undefined;
 	let escaped = false;
+	// Backslash is a path separator on Windows, not a shell escape in the
+	// command forms this guard admits.  Treating every backslash as an escape
+	// turns `C:\\outside` into `C:outside`, which can make an outside selector
+	// look like a harmless relative path.  POSIX parsing retains the existing
+	// escape handling for quoted and unquoted shell input.
+	const windows = process.platform === "win32";
 	const push = () => {
 		if (current.length > 0) {
 			tokens.push(current);
@@ -257,7 +263,7 @@ function tokensForCommand(command: string): string[] | undefined {
 		}
 		if (quote === '"') {
 			if (char === '"') quote = undefined;
-			else if (char === "\\") escaped = true;
+			else if (char === "\\" && !windows) escaped = true;
 			else current += char;
 			continue;
 		}
@@ -266,7 +272,8 @@ function tokensForCommand(command: string): string[] | undefined {
 			continue;
 		}
 		if (char === "\\") {
-			escaped = true;
+			if (windows) current += char;
+			else escaped = true;
 			continue;
 		}
 		if (char === ";" || char === "|" || char === "&" || char === "<" || char === ">" || char === "`" || char === "\n" || char === "\r" || char === "\t") {

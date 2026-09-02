@@ -145,7 +145,7 @@ test("quiet tool rendering registers noisy built-in tools", () => {
 test("quiet tool execution uses the tool-call cwd", async () => {
 	const tool = registeredQuietTools().get("bash");
 	const cwd = tmpdir();
-	const output = extractTextContent(await tool.execute("tool-call", { command: "pwd" }, new AbortController().signal, undefined, { cwd })).trim();
+	const output = extractTextContent(await tool.execute("tool-call", { command: 'node -e "process.stdout.write(process.cwd())"' }, new AbortController().signal, undefined, { cwd })).trim();
 	assert.equal(output, realpathSync(cwd));
 	assert.notEqual(output, process.cwd());
 });

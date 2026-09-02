@@ -5,6 +5,38 @@ import {
 	reviewGitEnvironment,
 } from "./review-repository.ts";
 
+export type PublicationGitCommandRunnerV1 = (
+	args: readonly string[],
+	options: { cwd?: string; env: NodeJS.ProcessEnv },
+) => { status: number | null; stdout: string; error?: Error };
+
+let publicationGitCommandRunnerForTesting: PublicationGitCommandRunnerV1 | undefined;
+
+export function setPublicationGitCommandRunnerForTestingV1(
+	runner: PublicationGitCommandRunnerV1 | undefined,
+): void {
+	publicationGitCommandRunnerForTesting = runner;
+}
+
+function defaultPublicationGitCommandRunner(
+	args: readonly string[],
+	options: { cwd?: string; env: NodeJS.ProcessEnv },
+): { status: number | null; stdout: string; error?: Error } {
+	const result = spawnSync("git", args, {
+		...options,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	return { status: result.status, stdout: result.stdout ?? "", error: result.error };
+}
+
+function publicationGitCommand(
+	args: readonly string[],
+	options: { cwd?: string; env: NodeJS.ProcessEnv },
+): { status: number | null; stdout: string; error?: Error } {
+	return (publicationGitCommandRunnerForTesting ?? defaultPublicationGitCommandRunner)(args, options);
+}
+
 export const GATE_TARGET_KIND = {
 	INTENDED_COMMIT: "intended-commit",
 	PUSH: "push",
@@ -131,12 +163,7 @@ function publicationError(message: string): Error {
 }
 
 function runGateGit(cwd: string, args: readonly string[]): string {
-	const result = spawnSync("git", args, {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		env: reviewGitEnvironment(),
-	});
+	const result = publicationGitCommand(args, { cwd, env: reviewGitEnvironment() });
 	if (result.error || result.status !== 0) throw publicationError(`Git publication identity could not be resolved: ${args.join(" ")}`);
 	return result.stdout.trim();
 }
@@ -146,21 +173,13 @@ function repositoryRootForGate(cwd: string): string {
 }
 
 function listConfiguredRemotes(cwd: string): string[] {
-	const result = spawnSync("git", ["-C", cwd, "remote"], {
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		env: reviewGitEnvironment(),
-	});
+	const result = publicationGitCommand(["-C", cwd, "remote"], { env: reviewGitEnvironment() });
 	if (result.error || result.status !== 0) throw publicationError("Configured Git remotes could not be listed");
 	return result.stdout.split(/\r?\n/).filter(Boolean);
 }
 
 function configuredRemoteValues(cwd: string, key: string): string[] {
-	const result = spawnSync("git", ["-C", cwd, "config", "--get-all", key], {
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		env: publicationProbeGitEnvironment(),
-	});
+	const result = publicationGitCommand(["-C", cwd, "config", "--get-all", key], { env: publicationProbeGitEnvironment() });
 	if (result.error || (result.status !== 0 && result.status !== 1)) {
 		throw publicationError(`Configured Git remote value "${key}" could not be resolved`);
 	}
@@ -174,11 +193,7 @@ export function resolveConfiguredPushDestinationV1(cwd: string, remote: string):
 	if (!listConfiguredRemotes(cwd).includes(remote)) {
 		throw publicationError(`Publication remote "${remote}" is not a configured Git remote`);
 	}
-	const result = spawnSync("git", ["-C", cwd, "remote", "get-url", "--push", "--all", remote], {
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		env: publicationProbeGitEnvironment(),
-	});
+	const result = publicationGitCommand(["-C", cwd, "remote", "get-url", "--push", "--all", remote], { env: publicationProbeGitEnvironment() });
 	if (result.error || result.status !== 0) throw publicationError(`Configured remote "${remote}" push destination could not be resolved`);
 	const urls = result.stdout.split(/\r?\n/).filter(Boolean);
 	if (urls.length !== 1) throw publicationError(`Configured remote "${remote}" must have one effective push destination`);
@@ -200,12 +215,7 @@ export function resolvePushRemoteRefV1(
 		throw publicationError(`${label} publication destination changed or does not match`);
 	}
 	if (!isFullRef(ref)) throw publicationError(`${label} is not a full ref`);
-	const result = spawnSync("git", ["ls-remote", "--refs", destination.url, ref], {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		env: publicationProbeGitEnvironment(),
-	});
+	const result = publicationGitCommand(["ls-remote", "--refs", destination.url, ref], { cwd, env: publicationProbeGitEnvironment() });
 	if (result.error || result.status !== 0) throw publicationError(`${label} could not be resolved`);
 	if (result.stdout.length === 0) return { destination, object_id: null };
 	const rows = result.stdout.split(/\r?\n/).filter(Boolean);
@@ -228,19 +238,10 @@ export function resolvePushDestinationRefV1(
 	if (destinationValue.startsWith("refs/")) {
 		return { ...resolvePushRemoteRefV1(cwd, remote, destinationValue, label), ref: destinationValue };
 	}
-	const formatCheck = spawnSync("git", ["check-ref-format", `refs/${destinationValue}`], {
-		cwd,
-		stdio: "ignore",
-		env: reviewGitEnvironment(),
-	});
+	const formatCheck = publicationGitCommand(["check-ref-format", `refs/${destinationValue}`], { cwd, env: reviewGitEnvironment() });
 	if (formatCheck.error || formatCheck.status !== 0) throw publicationError(`${label} is malformed`);
 	const destination = resolveConfiguredPushDestinationV1(cwd, remote);
-	const result = spawnSync("git", ["ls-remote", "--refs", destination.url], {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		env: publicationProbeGitEnvironment(),
-	});
+	const result = publicationGitCommand(["ls-remote", "--refs", destination.url], { cwd, env: publicationProbeGitEnvironment() });
 	if (result.error || result.status !== 0) throw publicationError(`${label} could not be resolved`);
 	const rows = result.stdout.split(/\r?\n/).filter(Boolean);
 	const advertised = rows.flatMap((line) => {
@@ -266,12 +267,7 @@ export function pushRemoteAdvertisesObjectV1(
 ): boolean {
 	const destination = resolveConfiguredPushDestinationV1(cwd, remote);
 	if (destination.destination_id !== expectedDestinationId) throw publicationError("Push parent publication destination changed or does not match");
-	const result = spawnSync("git", ["ls-remote", "--refs", destination.url], {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		env: publicationProbeGitEnvironment(),
-	});
+	const result = publicationGitCommand(["ls-remote", "--refs", destination.url], { cwd, env: publicationProbeGitEnvironment() });
 	if (result.error || result.status !== 0) throw publicationError("Push parent advertisement could not be resolved");
 	const rows = result.stdout.split(/\r?\n/).filter(Boolean);
 	const advertised = rows.flatMap((line) => {
@@ -419,11 +415,7 @@ export function recheckReleaseFastPathCiStatusV1(options: {
 function resolveConfiguredRemoteUrl(cwd: string, remote: string): string {
 	if (!CONFIGURED_REMOTE_NAME.test(remote)) throw publicationError("Release fast path remote must be a bare configured Git remote name, not a URL or path");
 	if (!listConfiguredRemotes(cwd).includes(remote)) throw publicationError(`Release fast path remote "${remote}" is not a configured Git remote`);
-	const result = spawnSync("git", ["-C", cwd, "remote", "get-url", remote], {
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		env: reviewGitEnvironment(),
-	});
+	const result = publicationGitCommand(["-C", cwd, "remote", "get-url", remote], { env: reviewGitEnvironment() });
 	if (result.error || result.status !== 0) throw publicationError(`Configured remote "${remote}" URL could not be resolved`);
 	const url = result.stdout.trim();
 	if (!url) throw publicationError(`Configured remote "${remote}" has no URL`);
@@ -432,12 +424,7 @@ function resolveConfiguredRemoteUrl(cwd: string, remote: string): string {
 
 function resolveRemoteGateRef(cwd: string, remote: string, ref: string, label: string): string | null {
 	if (!isFullRef(ref)) throw publicationError(`${label} is not a full ref`);
-	const result = spawnSync("git", ["ls-remote", "--refs", resolveConfiguredRemoteUrl(cwd, remote), ref], {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		env: reviewGitEnvironment(),
-	});
+	const result = publicationGitCommand(["ls-remote", "--refs", resolveConfiguredRemoteUrl(cwd, remote), ref], { cwd, env: reviewGitEnvironment() });
 	if (result.error || result.status !== 0) throw publicationError(`${label} could not be resolved`);
 	const matches = result.stdout.split(/\r?\n/).filter(Boolean).flatMap((line) => {
 		const [objectId, remoteRef] = line.split("\t");

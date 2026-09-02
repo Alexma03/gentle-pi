@@ -13,7 +13,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import https from "node:https";
-import { dirname, isAbsolute, join, relative } from "node:path";
+import { dirname, isAbsolute, join, posix, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -214,7 +214,11 @@ export function trustedSystemExtractor(archive, platform = process.platform, exi
 		throw new Error("Gentle AI installer requires the System32 tar.exe extractor");
 	}
 	const name = archive.endsWith(".zip") ? "unzip" : "tar";
-	const command = [join("/usr/bin", name), join("/bin", name)].find((path) => exists(path));
+	// POSIX extractor locations are protocol paths, not paths relative to the
+	// host running this test seam.  `path.join` would emit backslashes when a
+	// caller validates a Linux target on Windows, defeating the absolute trusted
+	// path check.  Keep the spelling POSIX-native regardless of host platform.
+	const command = [posix.join("/usr/bin", name), posix.join("/bin", name)].find((path) => exists(path));
 	if (!command) throw new Error(`Gentle AI installer requires a trusted system ${name} extractor`);
 	return { command, arguments_: archive.endsWith(".zip") ? ["-q", archive, "-d"] : ["-xzf", archive, "-C"] };
 }

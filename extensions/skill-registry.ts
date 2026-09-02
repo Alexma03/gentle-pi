@@ -10,7 +10,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join, normalize, relative, sep } from "node:path";
+import { basename, join, normalize, parse, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -174,8 +174,13 @@ function isExcluded(name: string): boolean {
 }
 
 function comparablePath(path: string): string {
-	const clean = normalize(path);
-	return clean.length > 1 ? clean.replace(/[\\/]+$/, "") : clean;
+	const normalized = normalize(path);
+	const root = parse(normalized).root;
+	const clean = normalized.length > root.length ? normalized.replace(/[\\/]+$/, "") : normalized;
+	// Windows paths are case-insensitive and callers may hand us Git/URL
+	// spellings with either slash direction.  A single comparison form keeps
+	// project-local precedence stable across package and project sources.
+	return process.platform === "win32" ? clean.toLowerCase() : clean;
 }
 
 async function uniqueExistingDirs(dirs: string[]): Promise<string[]> {
@@ -451,7 +456,16 @@ function extensionSourcePath(source: string): string | undefined {
 	try {
 		return comparablePath(fileURLToPath(cleanSource));
 	} catch {
-		return undefined;
+		// Synthetic file URLs used by tests and some extension loaders can be
+		// POSIX-shaped even while the host is Windows.  Keep the URL's path as a
+		// comparison-only fallback instead of silently losing the source identity.
+		try {
+			const pathname = decodeURIComponent(new URL(cleanSource).pathname);
+			const windowsDrivePath = /^\/[A-Za-z]:[\\/]/.test(pathname) ? pathname.slice(1) : pathname;
+			return comparablePath(windowsDrivePath);
+		} catch {
+			return undefined;
+		}
 	}
 }
 

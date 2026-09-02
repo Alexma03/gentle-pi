@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test, { after } from "node:test";
 
 // ---------------------------------------------------------------------------
@@ -82,7 +83,16 @@ function readRealAsset(name: string): string {
 
 function measureOrchestratorPromptBytes(assetsDir: string): number {
 	const scriptPath = join(import.meta.dirname, "fixtures", "measure-orchestrator-prompt.mjs");
-	const result = spawnSync(process.execPath, ["--experimental-strip-types", scriptPath, assetsDir], {
+	const fixtureUrl = pathToFileURL(scriptPath).href;
+	const result = spawnSync(process.execPath, [
+		"--experimental-strip-types",
+		"--input-type=module",
+		"--eval",
+		`await import(${JSON.stringify(fixtureUrl)})`,
+		"--",
+		"measure-orchestrator-prompt",
+		assetsDir,
+	], {
 		env: process.env,
 		encoding: "utf8",
 	});

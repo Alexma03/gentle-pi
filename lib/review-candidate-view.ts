@@ -1,6 +1,6 @@
 import { execFileSync, type ExecFileSyncOptions } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -37,6 +37,7 @@ const CANDIDATE_VIEW_GIT_FAILURE_CATEGORY = {
 export type CandidateViewGitFailureCategory = (typeof CANDIDATE_VIEW_GIT_FAILURE_CATEGORY)[keyof typeof CANDIDATE_VIEW_GIT_FAILURE_CATEGORY];
 const CANDIDATE_GIT_SUBCOMMAND = {
 	ADD: "add",
+	CAT_FILE: "cat-file",
 	CHECKOUT_INDEX: "checkout-index",
 	DIFF: "diff",
 	FOR_EACH_REF: "for-each-ref",
@@ -241,6 +242,7 @@ export class CandidateViewError extends Error {
 function candidateGitSubcommand(arguments_: readonly string[]): CandidateGitSubcommand {
 	switch (arguments_[0]) {
 		case CANDIDATE_GIT_SUBCOMMAND.ADD: return CANDIDATE_GIT_SUBCOMMAND.ADD;
+		case CANDIDATE_GIT_SUBCOMMAND.CAT_FILE: return CANDIDATE_GIT_SUBCOMMAND.CAT_FILE;
 		case CANDIDATE_GIT_SUBCOMMAND.CHECKOUT_INDEX: return CANDIDATE_GIT_SUBCOMMAND.CHECKOUT_INDEX;
 		case CANDIDATE_GIT_SUBCOMMAND.DIFF: return CANDIDATE_GIT_SUBCOMMAND.DIFF;
 		case CANDIDATE_GIT_SUBCOMMAND.FOR_EACH_REF: return CANDIDATE_GIT_SUBCOMMAND.FOR_EACH_REF;
@@ -718,19 +720,24 @@ export function resolveCanonicalCandidateBase(contributorRoot: string, baseRef: 
 }
 
 function checkoutMaterializedEntries(root: string, entries: readonly CandidateTreeEntry[], executor: CandidateGitExecutor): void {
-	let batch: string[] = [];
-	let bytes = 0;
-	const flush = (): void => {
-		if (batch.length === 0) return;
-		git(root, ["checkout-index", "-f", "--", ...batch], process.env, executor);
-		batch = []; bytes = 0;
-	};
+	// `checkout-index` is not an exact tree materializer on Windows: Git's
+	// checkout filters can normalize LF to CRLF, and a large path batch can
+	// exceed the Windows process command-line limit.  Read each immutable blob
+	// directly from the frozen tree and create the entry ourselves.  This keeps
+	// bytes, symlink targets, and Git modes under the candidate-view contract on
+	// every host without weakening any safety checks.
 	for (const entry of entries) {
-		const size = Buffer.byteLength(entry.path, "utf8") + 1;
-		if (batch.length > 0 && bytes + size > 16_384) flush();
-		batch.push(entry.path); bytes += size;
+		const bytes = candidateGit(root, ["cat-file", "blob", entry.objectId], process.env, "buffer", executor) as Buffer;
+		const path = join(root, entry.path);
+		mkdirSync(dirname(path), { recursive: true });
+		if (entry.mode === "120000") {
+			assertSafeSymlinkTarget(root, entry.path, bytes);
+			symlinkSync(bytes.toString("utf8"), path);
+			continue;
+		}
+		writeFileSync(path, bytes, { mode: entry.mode === "100755" ? 0o755 : 0o644 });
+		chmodSync(path, entry.mode === "100755" ? 0o755 : 0o644);
 	}
-	flush();
 }
 
 // Creates an unborn worktree (symbolic HEAD pointing at a branch with no
@@ -898,7 +905,7 @@ function assertRecordSafe(record: CandidateViewRecord): void {
 		if (!item) throw new CandidateViewError("candidate view entry is missing or moved");
 		if (entry.mode === "120000") {
 			if (!item.isSymbolicLink()) throw new CandidateViewError("candidate view symlink is unsafe or changed");
-		} else if (!item.isFile() || item.isSymbolicLink() || (item.mode & 0o222) !== 0 || ((item.mode & 0o111) !== (entry.mode === "100755" ? 0o111 : 0))) {
+		} else if (!item.isFile() || item.isSymbolicLink() || (item.mode & 0o222) !== 0 || (process.platform !== "win32" && (item.mode & 0o111) !== (entry.mode === "100755" ? 0o111 : 0))) {
 			throw new CandidateViewError("candidate view entry is unsafe, writable, or has a changed mode");
 		}
 		const actualHash = entryContentHash(root, entry);

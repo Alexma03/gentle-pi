@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile, spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { createNodeExecFileAdapter } from "../lib/native-review-cli.ts";
 import {
 	REVIEW_HOST_RELAY_FAILURE,
@@ -22,6 +24,8 @@ import {
 } from "../lib/review-host-relay.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "../lib/review-relay-contract.ts";
 import { decodeReviewNextTransitionV3, type ReviewCaptureSubmissionV1, type ReviewCollectInputV3 } from "../lib/review-integration-v2.ts";
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Fake binaries. Following the repo's fake-executable idiom (shell/git
@@ -135,6 +139,19 @@ function readLog(path: string): Array<{ argv: string[]; contract: string | null;
 	return readFileSync(path, "utf8").split("\n").filter((line) => line.length > 0).map((line) => JSON.parse(line));
 }
 
+// Windows cannot launch the extensionless shebang fixtures with shell:false.
+// Invoke an existing fixture through the test's Node interpreter while keeping
+// missing files on the native ENOENT path and preserving the exact argv.
+const portableFixtureSpawn = ((file: string, arguments_: readonly string[], options: Parameters<typeof spawn>[2]) =>
+	process.platform === "win32" && existsSync(file)
+		? spawn(process.execPath, [file, ...arguments_], options)
+		: spawn(file, arguments_, options)) as typeof spawn;
+
+const portableFixtureExecFile = ((file: string, arguments_: readonly string[], options: Parameters<typeof execFileAsync>[2]) =>
+	process.platform === "win32" && existsSync(file)
+		? execFileAsync(process.execPath, [file, ...arguments_], options)
+		: execFileAsync(file, arguments_, options)) as Parameters<typeof createNodeExecFileAdapter>[0];
+
 const BINDING_TOKENS = Object.freeze([
 	"--lineage=review-1d5aadacc600e167",
 	`--expected-revision=sha256:${"c".repeat(64)}`,
@@ -180,6 +197,7 @@ function relayRequest(fixture: RelayHarness, overrides: Record<string, unknown> 
 		},
 		gentleAiTimeoutMs: 30_000,
 		piTimeoutMs: 30_000,
+		spawnProcess: portableFixtureSpawn,
 		...overrides,
 	};
 }
@@ -209,7 +227,7 @@ test("the central native CLI runner declares the relay contract on every gentle-
 	t.after(() => {
 		if (hadContract) process.env[GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV] = previous;
 	});
-	const adapter = createNodeExecFileAdapter();
+	const adapter = createNodeExecFileAdapter(portableFixtureExecFile);
 	for (const argv of [["version"], ["review", "status", "--cwd", fixture.directory]]) {
 		const result = await adapter({ file: probe, arguments: argv, cwd: fixture.directory, timeoutMs: 10_000, maxBufferBytes: 1024 * 1024 });
 		assert.equal(result.exitCode, 0);

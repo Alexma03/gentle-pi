@@ -32,6 +32,8 @@ export interface OpaquePiReviewerOptions {
 	readonly environment?: NodeJS.ProcessEnv;
 	readonly timeoutMs?: number;
 	readonly signal?: AbortSignal;
+	/** Test-only process seam for portable fixture launchers. */
+	readonly spawnProcess?: typeof spawn;
 }
 
 export interface OpaquePiReviewerResult {
@@ -92,7 +94,7 @@ function errorMessage(error: unknown): string {
 function runPiProcess(prompt: Buffer, scratchDirectory: string, options: OpaquePiReviewerOptions): Promise<OpaquePiProcessResult> {
 	return new Promise((resolve, reject) => {
 		const startedAt = Date.now();
-		const child = spawn(options.piExecutable ?? "pi", [...OPAQUE_PI_REVIEWER_ARGV], {
+		const child = (options.spawnProcess ?? spawn)(options.piExecutable ?? "pi", [...OPAQUE_PI_REVIEWER_ARGV], {
 			cwd: scratchDirectory,
 			env: options.environment ?? process.env,
 			stdio: ["pipe", "pipe", "pipe"],

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,12 +50,26 @@ function contextFor(cwd: string, notifications: Array<{ message: string; severit
 	} as unknown as ExtensionContext;
 }
 
+function writeFixtureBinary(directory: string, versionOutput: string): string {
+	const binary = join(directory, process.platform === "win32" ? "gentle-ai.exe" : "gentle-ai");
+	if (process.platform === "win32") {
+		// Windows does not launch extensionless shebang files with shell:false.
+		// A copied Node executable is a real PE binary; its `version` argument
+		// resolves to this adjacent extensionless CommonJS probe from the binary
+		// directory used by the production version check.
+		copyFileSync(process.execPath, binary);
+		writeFileSync(join(directory, "version"), `process.stdout.write(${JSON.stringify(`${versionOutput}\n`)});\n`);
+	} else {
+		writeFileSync(binary, `#!/bin/sh\necho '${versionOutput}'\n`);
+		chmodSync(binary, 0o755);
+	}
+	return binary;
+}
+
 async function withDevOverride<T>(callback: (state: { devBinary: string; sha256: string; home: string }) => Promise<T>): Promise<T> {
 	const home = await mkdtemp(join(tmpdir(), "gentle-pi-dev-surface-home-"));
 	const bin = await mkdtemp(join(tmpdir(), "gentle-pi-dev-surface-bin-"));
-	const devBinary = join(bin, "gentle-ai");
-	writeFileSync(devBinary, "#!/bin/sh\necho 'gentle-ai 9.9.9-dev+surface'\n");
-	chmodSync(devBinary, 0o755);
+	const devBinary = writeFixtureBinary(bin, "gentle-ai 9.9.9-dev+surface");
 	const sha256 = createHash("sha256").update(readFileSync(devBinary)).digest("hex");
 	setGentleAiDevBinaryEnvironmentForTesting({ env: { [GENTLE_AI_DEV_BINARY_ENV]: devBinary }, home });
 	try {
@@ -68,9 +82,7 @@ async function withDevOverride<T>(callback: (state: { devBinary: string; sha256:
 async function withPinnedMain<T>(callback: (state: { binary: string; sha256: string; home: string; sourceBranch: string; sourceRevision: string }) => Promise<T>): Promise<T> {
 	const home = await mkdtemp(join(tmpdir(), "gentle-pi-pinned-surface-home-"));
 	const snapshot = await mkdtemp(join(tmpdir(), "gentle-pi-pinned-surface-bin-"));
-	const binary = join(snapshot, "gentle-ai");
-	writeFileSync(binary, "#!/bin/sh\necho 'gentle-ai main@abcdef123456+local'\n");
-	chmodSync(binary, 0o755);
+	const binary = writeFixtureBinary(snapshot, "gentle-ai main@abcdef123456+local");
 	const sha256 = createHash("sha256").update(readFileSync(binary)).digest("hex");
 	writeFileSync(join(snapshot, "integrity.json"), `${JSON.stringify({
 		schema: GENTLE_AI_LOCAL_MAIN_SNAPSHOT_SCHEMA,
@@ -83,7 +95,7 @@ async function withPinnedMain<T>(callback: (state: { binary: string; sha256: str
 		buildCommand: "go build -trimpath ./cmd/gentle-ai",
 	})}\n`);
 	const environment = { env: {}, home };
-	registerGentleAiPinnedMainBinary(binary, environment, "linux");
+	registerGentleAiPinnedMainBinary(binary, environment, process.platform);
 	setGentleAiDevBinaryEnvironmentForTesting(environment);
 	try {
 		return await callback({ binary, sha256, home, sourceBranch: "main", sourceRevision: "a".repeat(40) });
@@ -95,9 +107,7 @@ async function withPinnedMain<T>(callback: (state: { binary: string; sha256: str
 async function withPinnedCustomMain<T>(callback: (state: { binary: string; sha256: string; home: string; sourceBranch: string; sourceRevision: string }) => Promise<T>): Promise<T> {
 	const home = await mkdtemp(join(tmpdir(), "gentle-pi-custom-surface-home-"));
 	const snapshot = await mkdtemp(join(tmpdir(), "gentle-pi-custom-surface-bin-"));
-	const binary = join(snapshot, "gentle-ai");
-	writeFileSync(binary, "#!/bin/sh\necho 'gentle-ai custom/main@cafe1234+local'\n");
-	chmodSync(binary, 0o755);
+	const binary = writeFixtureBinary(snapshot, "gentle-ai custom/main@cafe1234+local");
 	const sha256 = createHash("sha256").update(readFileSync(binary)).digest("hex");
 	writeFileSync(join(snapshot, "integrity.json"), `${JSON.stringify({
 		schema: GENTLE_AI_LOCAL_MAIN_SNAPSHOT_SCHEMA,
@@ -110,7 +120,7 @@ async function withPinnedCustomMain<T>(callback: (state: { binary: string; sha25
 		buildCommand: "go build -trimpath ./cmd/gentle-ai",
 	})}\n`);
 	const environment = { env: {}, home };
-	registerGentleAiPinnedMainBinary(binary, environment, "linux");
+	registerGentleAiPinnedMainBinary(binary, environment, process.platform);
 	setGentleAiDevBinaryEnvironmentForTesting(environment);
 	try {
 		return await callback({ binary, sha256, home, sourceBranch: "custom/main", sourceRevision: "c".repeat(40) });
@@ -187,9 +197,7 @@ test("an invalid override is surfaced as a failure, never silently ignored", asy
 test("gentle:dev-binary registers, reports, and clears the persistent override", async () => {
 	const home = await mkdtemp(join(tmpdir(), "gentle-pi-dev-surface-home-"));
 	const bin = await mkdtemp(join(tmpdir(), "gentle-pi-dev-surface-bin-"));
-	const devBinary = join(bin, "gentle-ai");
-	writeFileSync(devBinary, "#!/bin/sh\necho 'gentle-ai 9.9.9-dev+register'\n");
-	chmodSync(devBinary, 0o755);
+	const devBinary = writeFixtureBinary(bin, "gentle-ai 9.9.9-dev+register");
 	setGentleAiDevBinaryEnvironmentForTesting({ env: {}, home });
 	try {
 		const { pi, commands } = harness();
@@ -272,13 +280,9 @@ test("gentle:pinned-main registers, reports, and clears a digest-bound snapshot"
 test("registering one persistent channel clears the other via its command", async () => {
 	const home = await mkdtemp(join(tmpdir(), "gentle-pi-channel-home-"));
 	const bin = await mkdtemp(join(tmpdir(), "gentle-pi-channel-bin-"));
-	const devBinary = join(bin, "gentle-ai");
-	writeFileSync(devBinary, "#!/bin/sh\necho 'gentle-ai 9.9.9-dev+channel'\n");
-	chmodSync(devBinary, 0o755);
+	const devBinary = writeFixtureBinary(bin, "gentle-ai 9.9.9-dev+channel");
 	const snapshotDir = await mkdtemp(join(tmpdir(), "gentle-pi-channel-snap-"));
-	const snapshot = join(snapshotDir, "gentle-ai");
-	writeFileSync(snapshot, "#!/bin/sh\necho 'gentle-ai main@abcdef123456+channel'\n");
-	chmodSync(snapshot, 0o755);
+	const snapshot = writeFixtureBinary(snapshotDir, "gentle-ai main@abcdef123456+channel");
 	const sha256 = createHash("sha256").update(readFileSync(snapshot)).digest("hex");
 	writeFileSync(join(snapshotDir, "integrity.json"), `${JSON.stringify({
 		schema: GENTLE_AI_LOCAL_MAIN_SNAPSHOT_SCHEMA,
@@ -300,8 +304,8 @@ test("registering one persistent channel clears the other via its command", asyn
 		const pinnedRegistration = gentleAiPinnedMainRegistrationPath(env);
 
 		// Seed both channels.
-		registerGentleAiDevBinary(devBinary, env, "linux");
-		registerGentleAiPinnedMainBinary(snapshot, env, "linux");
+		registerGentleAiDevBinary(devBinary, env, process.platform);
+		registerGentleAiPinnedMainBinary(snapshot, env, process.platform);
 		assert.equal(existsSync(devRegistration), true);
 		assert.equal(existsSync(pinnedRegistration), true);
 
@@ -311,8 +315,8 @@ test("registering one persistent channel clears the other via its command", asyn
 		assert.equal(existsSync(devRegistration), false, "pinned-main registration must clear the legacy dev channel");
 
 		// Seed both again, then /gentle:dev-binary <path> removes the pinned registration.
-		registerGentleAiDevBinary(devBinary, env, "linux");
-		registerGentleAiPinnedMainBinary(snapshot, env, "linux");
+		registerGentleAiDevBinary(devBinary, env, process.platform);
+		registerGentleAiPinnedMainBinary(snapshot, env, process.platform);
 		assert.equal(existsSync(devRegistration), true);
 		assert.equal(existsSync(pinnedRegistration), true);
 		await commands.get("gentle:dev-binary")!.handler(devBinary, contextFor(cwd, []));
@@ -326,13 +330,9 @@ test("registering one persistent channel clears the other via its command", asyn
 test("a corrupted pinned registration fails closed instead of falling back to legacy or signed", async () => {
 	const home = await mkdtemp(join(tmpdir(), "gentle-pi-corrupt-home-"));
 	const bin = await mkdtemp(join(tmpdir(), "gentle-pi-corrupt-bin-"));
-	const devBinary = join(bin, "gentle-ai");
-	writeFileSync(devBinary, "#!/bin/sh\necho 'gentle-ai 9.9.9-dev+fallback'\n");
-	chmodSync(devBinary, 0o755);
+	const devBinary = writeFixtureBinary(bin, "gentle-ai 9.9.9-dev+fallback");
 	const snapshotDir = await mkdtemp(join(tmpdir(), "gentle-pi-corrupt-snap-"));
-	const snapshot = join(snapshotDir, "gentle-ai");
-	writeFileSync(snapshot, "#!/bin/sh\necho 'gentle-ai main@abcdef123456+corrupt'\n");
-	chmodSync(snapshot, 0o755);
+	const snapshot = writeFixtureBinary(snapshotDir, "gentle-ai main@abcdef123456+corrupt");
 	const sha256 = createHash("sha256").update(readFileSync(snapshot)).digest("hex");
 	writeFileSync(join(snapshotDir, "integrity.json"), `${JSON.stringify({
 		schema: GENTLE_AI_LOCAL_MAIN_SNAPSHOT_SCHEMA,
@@ -345,8 +345,8 @@ test("a corrupted pinned registration fails closed instead of falling back to le
 		buildCommand: "go build -trimpath ./cmd/gentle-ai",
 	})}\n`);
 	const env = { env: {}, home };
-	registerGentleAiDevBinary(devBinary, env, "linux");
-	registerGentleAiPinnedMainBinary(snapshot, env, "linux");
+	registerGentleAiDevBinary(devBinary, env, process.platform);
+	registerGentleAiPinnedMainBinary(snapshot, env, process.platform);
 	setGentleAiDevBinaryEnvironmentForTesting(env);
 	try {
 		// Corrupt the pinned registration document (drift in the stored revision).

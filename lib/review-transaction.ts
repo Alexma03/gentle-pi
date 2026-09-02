@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { ReviewMutationLockV1, type ReviewLockPlatformAdapterV1 } from "./review-lock.ts";
 import { ReviewGraphObjectStoreV1 } from "./review-object-store.ts";
 import { assertNoLegacyReviewAuthorityV1 } from "./review-legacy-detector.ts";
@@ -936,21 +936,21 @@ export function reviewStoreRootForRepository(cwd: string): string {
 		"git",
 		["rev-parse", "--show-toplevel"],
 		{ cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-	).trim();
+	).toString().trim();
 	const gitPath = execFileSync(
 		"git",
 		["rev-parse", "--git-path", "gentle-ai/reviews"],
 		{ cwd: repositoryRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 	).trim();
-	return isAbsolute(gitPath) ? gitPath : resolve(repositoryRoot, gitPath);
+	return resolve(repositoryRoot, gitPath);
 }
 
 function repositoryRootForGate(cwd: string): string {
-	return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+	return resolve(execFileSync("git", ["rev-parse", "--show-toplevel"], {
 		cwd,
 		encoding: "utf8",
 		stdio: ["ignore", "pipe", "pipe"],
-	}).trim();
+	}).toString().trim());
 }
 
 function createScopeChildClaim(

@@ -28,7 +28,7 @@ import {
 	type GentleAiDevBinaryEnvironment,
 } from "../lib/gentle-ai-binary.ts";
 
-const PLATFORM = "linux";
+const PLATFORM = process.platform;
 
 async function scratch(prefix: string): Promise<string> {
 	return await mkdtemp(join(tmpdir(), prefix));
@@ -127,7 +127,8 @@ test("invalid override sources fail closed instead of silently falling back to t
 	writeFileSync(nonExecutable, "#!/bin/sh\n");
 	chmodSync(nonExecutable, 0o644);
 
-	for (const value of ["relative/gentle-ai", symlinked, nonExecutable, join(bin, "missing-gentle-ai")]) {
+	const invalidPaths = ["relative/gentle-ai", symlinked, ...(PLATFORM === "win32" ? [] : [nonExecutable]), join(bin, "missing-gentle-ai")];
+	for (const value of invalidPaths) {
 		const env = environment(home, { [GENTLE_AI_DEV_BINARY_ENV]: value });
 		assert.throws(() => resolveGentleAiDevBinaryOverride(env, PLATFORM), isOverrideError(GENTLE_AI_DEV_BINARY_ENV), value);
 		assert.throws(() => resolveGentleAiBinary(packageRoot, PLATFORM, readFileSync, env), isOverrideError(GENTLE_AI_DEV_BINARY_ENV), value);

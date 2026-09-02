@@ -550,8 +550,11 @@ test("review subagent dispatch rejects missing candidate views and uses the expl
 
 test("candidate view rejects control-character paths before prompt construction", (t) => {
 	const contributorRoot = repository(t);
-	writeFileSync(join(contributorRoot, "unsafe\npath.txt"), "candidate\n");
-	assert.throws(() => createCandidateView({ contributorRoot }), CandidateViewError);
+	const executor: CandidateGitExecutor = (file, arguments_, options) =>
+		arguments_[0] === "ls-tree"
+			? Buffer.from(`100644 blob ${"0".repeat(40)}\tunsafe\npath.txt\0`)
+			: execFileSync(file, arguments_, options);
+	assert.throws(() => new CandidateViewRegistry(executor).create({ contributorRoot }), CandidateViewError);
 });
 
 test("candidate view cleanup is confined and idempotent", (t) => {
@@ -651,6 +654,7 @@ test("candidate view derives deletion, rename, executable, and symlink scope fro
 	renameSync(join(contributorRoot, "tracked.txt"), join(contributorRoot, "renamed.txt"));
 	rmSync(join(contributorRoot, "deleted.txt"));
 	chmodSync(join(contributorRoot, "script.sh"), 0o755);
+	git(contributorRoot, "update-index", "--chmod=+x", "--", "script.sh");
 	try {
 		symlinkSync("script.sh", join(contributorRoot, "linked.sh"));
 	} catch {
@@ -1392,6 +1396,7 @@ function baseTreeOf(cwd: string): string {
 test("deriveChangedPathManifest reports old and new mode, and flags a mode-only change", (t) => {
 	const cwd = repository(t);
 	chmodSync(join(cwd, "tracked.txt"), 0o755);
+	git(cwd, "update-index", "--chmod=+x", "--", "tracked.txt");
 	const candidate = treeOf(cwd);
 
 	const manifest = deriveChangedPathManifest(cwd, baseTreeOf(cwd), candidate);
@@ -1434,6 +1439,7 @@ test("deriveChangedPathManifest marks an added path and a deleted path", (t) => 
 test("a mode-only divergence is rejected even though the sorted path set matches", (t) => {
 	const cwd = repository(t);
 	chmodSync(join(cwd, "tracked.txt"), 0o755);
+	git(cwd, "update-index", "--chmod=+x", "--", "tracked.txt");
 	const candidate = treeOf(cwd);
 	const base = baseTreeOf(cwd);
 

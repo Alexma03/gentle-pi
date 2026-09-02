@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	mkdtempSync,
@@ -16,6 +16,8 @@ import {
 	GATE_TARGET_KIND,
 	PUSH_UPDATE_KIND,
 	resolveConfiguredPushDestinationV1,
+	setPublicationGitCommandRunnerForTestingV1,
+	type PublicationGitCommandRunnerV1,
 } from "../lib/review-publication-gate.ts";
 import {
 	EVIDENCE_CLASS,
@@ -52,6 +54,18 @@ const TREE = {
 	FINAL: "4".repeat(40),
 	CHILD: "5".repeat(40),
 } as const;
+
+function nativePublicationGitRunner(
+	args: readonly string[],
+	options: { cwd?: string; env: NodeJS.ProcessEnv },
+): ReturnType<PublicationGitCommandRunnerV1> {
+	const result = spawnSync(process.platform === "win32" ? "git.exe" : "git", args, {
+		...options,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	return { status: result.status, stdout: result.stdout ?? "", error: result.error };
+}
 
 function budget(overrides: Partial<ReviewBudgetV1> = {}): ReviewBudgetV1 {
 	return {
@@ -491,23 +505,17 @@ test("tag PUSH CREATE accepts an annotated tag for an approved commit advertised
 	);
 	assert.equal(unresolved.status, GATE_RESULT.DENY, unresolved.reason);
 
-	const fakeGitDirectory = join(parent, "fake-git");
-	mkdirSync(fakeGitDirectory);
-	const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
-	const fakeGit = join(fakeGitDirectory, "git");
-	writeFileSync(
-		fakeGit,
-		`#!/bin/sh\nif [ "$1" = "ls-remote" ] && [ "$4" = "refs/tags/v1.0.0" ]; then printf '${tagObject}\\trefs/tags/v1.0.0\\n${tagObject}\\trefs/tags/v1.0.0\\n'; exit 0; fi\nexec "${realGit}" "$@"\n`,
-	);
-	chmodSync(fakeGit, 0o755);
-	const originalPath = process.env.PATH;
-	process.env.PATH = `${fakeGitDirectory}:${originalPath ?? ""}`;
 	try {
+		setPublicationGitCommandRunnerForTestingV1((args, options) =>
+			args[0] === "ls-remote" && args.includes("refs/tags/v1.0.0")
+				? { status: 0, stdout: `${tagObject}\trefs/tags/v1.0.0\n${tagObject}\trefs/tags/v1.0.0\n` }
+				: nativePublicationGitRunner(args, options),
+		);
 		const ambiguous = evaluateGateTarget(receipt, tagPush("v1.0.0", tagObject, commit, tree), repository);
 		assert.equal(ambiguous.status, GATE_RESULT.DENY, ambiguous.reason);
 		assert.match(ambiguous.reason, /ambiguously/i);
 	} finally {
-		process.env.PATH = originalPath;
+		setPublicationGitCommandRunnerForTestingV1(undefined);
 	}
 
 	writeFileSync(join(repository, "release.ts"), "export const release = 2;\n");

@@ -11,7 +11,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, isAbsolute, join, resolve, sep } from "node:path";
+import { delimiter, join, resolve, sep } from "node:path";
 import {
 	REVIEW_EVENT,
 	REVIEW_ROUTE,
@@ -175,12 +175,16 @@ function runGit(
 }
 
 function repositoryRoot(cwd: string): string {
-	return runGit(cwd, ["rev-parse", "--show-toplevel"]);
+	// Git emits a slash-separated path on Windows, while Node's path APIs and
+	// snapshot identity use the native spelling.  Resolve the authoritative Git
+	// result before persisting it so every later identity comparison sees one
+	// canonical representation.
+	return resolve(runGit(cwd, ["rev-parse", "--show-toplevel"]));
 }
 
 function repositoryObjectDirectory(root: string): string {
 	const path = runGit(root, ["rev-parse", "--git-path", "objects"]);
-	return isAbsolute(path) ? path : resolve(root, path);
+	return resolve(root, path);
 }
 
 function snapshotsRoot(root: string): string {
@@ -189,7 +193,7 @@ function snapshotsRoot(root: string): string {
 		"--git-path",
 		"gentle-ai/reviews/snapshots",
 	]);
-	return isAbsolute(gitPath) ? gitPath : resolve(root, gitPath);
+	return resolve(root, gitPath);
 }
 
 function resolveBaseTree(root: string): string {

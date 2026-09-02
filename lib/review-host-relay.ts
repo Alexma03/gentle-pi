@@ -261,6 +261,8 @@ export interface ReviewHostRelayRequest {
 	 */
 	readonly piTimeoutMs?: number;
 	readonly signal?: AbortSignal;
+	/** Test-only process seam for portable fixture launchers. */
+	readonly spawnProcess?: typeof spawn;
 }
 
 export interface ReviewHostRelayResult {
@@ -336,11 +338,11 @@ interface ProcessCapture {
 function collectGentleAiProcess(
 	file: string,
 	arguments_: readonly string[],
-	options: { cwd: string; env: NodeJS.ProcessEnv; stdin?: Buffer; timeoutMs: number; signal?: AbortSignal },
+	options: { cwd: string; env: NodeJS.ProcessEnv; stdin?: Buffer; timeoutMs: number; signal?: AbortSignal; spawnProcess?: typeof spawn },
 ): Promise<ProcessCapture> {
 	return new Promise((resolve, reject) => {
 		const startedAt = Date.now();
-		const child = spawn(file, [...arguments_], {
+		const child = (options.spawnProcess ?? spawn)(file, [...arguments_], {
 			cwd: options.cwd,
 			env: options.env,
 			stdio: ["pipe", "pipe", "pipe"],
@@ -460,6 +462,7 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 			env: gentleAiEnvironment,
 			timeoutMs: gentleAiTimeoutMs,
 			...(request.signal === undefined ? {} : { signal: request.signal }),
+			...(request.spawnProcess === undefined ? {} : { spawnProcess: request.spawnProcess }),
 		});
 	} catch (error) {
 		throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.MATERIALIZE_FAILED, "materialize", `gentle-ai prompt materialization could not start: ${error instanceof Error ? error.message : String(error)}`);
@@ -497,6 +500,7 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 			environment: baseEnvironment,
 			timeoutMs: piTimeoutMs,
 			...(request.signal === undefined ? {} : { signal: request.signal }),
+			...(request.spawnProcess === undefined ? {} : { spawnProcess: request.spawnProcess }),
 		});
 	} catch (error) {
 		throw relayPiTransportError(error, promptBytes.length, piTimeoutMs);
@@ -523,6 +527,7 @@ export async function runReviewHostRelaySlot(request: ReviewHostRelayRequest): P
 				env: gentleAiEnvironment,
 				timeoutMs: gentleAiTimeoutMs,
 				...(request.signal === undefined ? {} : { signal: request.signal }),
+				...(request.spawnProcess === undefined ? {} : { spawnProcess: request.spawnProcess }),
 			});
 		} catch (error) {
 			throw new ReviewHostRelayError(REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED, "submit", `gentle-ai capture submission could not start: ${error instanceof Error ? error.message : String(error)}`);

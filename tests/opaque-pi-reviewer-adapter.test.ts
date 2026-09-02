@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -93,6 +94,19 @@ function readLog(path: string): OpaquePiLog[] {
 		.map((line) => JSON.parse(line) as OpaquePiLog);
 }
 
+// Windows does not execute extensionless shebang files through spawn(...,
+// {shell:false}).  Keep the fixture shell-free and explicit by invoking the
+// same Node interpreter that runs the test when the fixture exists; missing
+// paths still take the native launch-error path.
+const portableFixtureSpawn = ((file: string, arguments_: readonly string[], options: Parameters<typeof spawn>[2]) =>
+	process.platform === "win32" && existsSync(file)
+		? spawn(process.execPath, [file, ...arguments_], options)
+		: spawn(file, arguments_, options)) as typeof spawn;
+
+function runOpaqueFixture(prompt: Buffer, options: Parameters<typeof runOpaquePiReviewer>[1] = {}): ReturnType<typeof runOpaquePiReviewer> {
+	return runOpaquePiReviewer(prompt, { ...options, spawnProcess: portableFixtureSpawn });
+}
+
 async function rejectsWithTransportError(
 	promise: Promise<unknown>,
 	kind: (typeof OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE)[keyof typeof OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE],
@@ -108,7 +122,7 @@ async function rejectsWithTransportError(
 
 test("the opaque adapter streams arbitrary prompt and stdout bytes verbatim through the fixed Pi subprocess", async (t) => {
 	const fixture = harness(t);
-	const result = await runOpaquePiReviewer(PROMPT_BYTES, {
+	const result = await runOpaqueFixture(PROMPT_BYTES, {
 		piExecutable: fixture.pi,
 		environment: fixture.environment,
 		timeoutMs: 10_000,
@@ -131,30 +145,30 @@ test("the opaque adapter streams arbitrary prompt and stdout bytes verbatim thro
 test("the opaque adapter returns typed transport errors for launch, nonzero, empty, timeout, and cancellation", async (t) => {
 	const fixture = harness(t);
 	await rejectsWithTransportError(
-		runOpaquePiReviewer(PROMPT_BYTES, { piExecutable: join(fixture.directory, "missing-pi"), environment: fixture.environment, timeoutMs: 10_000 }),
+		runOpaqueFixture(PROMPT_BYTES, { piExecutable: join(fixture.directory, "missing-pi"), environment: fixture.environment, timeoutMs: 10_000 }),
 		OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.LAUNCH_FAILED,
 	);
 
 	const nonzero = await rejectsWithTransportError(
-		runOpaquePiReviewer(PROMPT_BYTES, { piExecutable: fixture.pi, environment: { ...fixture.environment, OPAQUE_PI_MODE: "nonzero" }, timeoutMs: 10_000 }),
+		runOpaqueFixture(PROMPT_BYTES, { piExecutable: fixture.pi, environment: { ...fixture.environment, OPAQUE_PI_MODE: "nonzero" }, timeoutMs: 10_000 }),
 		OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.NONZERO_EXIT,
 	);
 	assert.equal(nonzero.exitCode, 7);
 	assert.deepEqual(nonzero.stderr, Buffer.from("opaque pi failed\n"));
 
 	await rejectsWithTransportError(
-		runOpaquePiReviewer(PROMPT_BYTES, { piExecutable: fixture.pi, environment: { ...fixture.environment, OPAQUE_PI_MODE: "empty" }, timeoutMs: 10_000 }),
+		runOpaqueFixture(PROMPT_BYTES, { piExecutable: fixture.pi, environment: { ...fixture.environment, OPAQUE_PI_MODE: "empty" }, timeoutMs: 10_000 }),
 		OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.EMPTY_OUTPUT,
 	);
 
 	const timedOut = await rejectsWithTransportError(
-		runOpaquePiReviewer(PROMPT_BYTES, { piExecutable: fixture.pi, environment: { ...fixture.environment, OPAQUE_PI_MODE: "hang" }, timeoutMs: 300 }),
+		runOpaqueFixture(PROMPT_BYTES, { piExecutable: fixture.pi, environment: { ...fixture.environment, OPAQUE_PI_MODE: "hang" }, timeoutMs: 300 }),
 		OPAQUE_PI_REVIEWER_TRANSPORT_FAILURE.TIMED_OUT,
 	);
 	assert.equal(timedOut.timedOut, true);
 
 	const controller = new AbortController();
-	const cancellation = runOpaquePiReviewer(PROMPT_BYTES, {
+	const cancellation = runOpaqueFixture(PROMPT_BYTES, {
 		piExecutable: fixture.pi,
 		environment: { ...fixture.environment, OPAQUE_PI_MODE: "hang" },
 		timeoutMs: 10_000,
@@ -172,7 +186,7 @@ test("the opaque adapter leaves no prompt or result file in scratch and reports 
 	process.env.TMPDIR = scratchParent;
 	try {
 		const error = await rejectsWithTransportError(
-			runOpaquePiReviewer(PROMPT_BYTES, {
+			runOpaqueFixture(PROMPT_BYTES, {
 				piExecutable: fixture.pi,
 				environment: { ...fixture.environment, OPAQUE_PI_MODE: "break-cleanup" },
 				timeoutMs: 10_000,
@@ -195,7 +209,7 @@ test("the opaque adapter preserves primary nonzero and timeout errors when scrat
 	process.env.TMPDIR = scratchParent;
 	try {
 		const nonzero = await rejectsWithTransportError(
-			runOpaquePiReviewer(PROMPT_BYTES, {
+			runOpaqueFixture(PROMPT_BYTES, {
 				piExecutable: fixture.pi,
 				environment: { ...fixture.environment, OPAQUE_PI_MODE: "nonzero", OPAQUE_PI_BREAK_CLEANUP: "true" },
 				timeoutMs: 10_000,
@@ -207,7 +221,7 @@ test("the opaque adapter preserves primary nonzero and timeout errors when scrat
 		chmodSync(scratchParent, 0o700);
 
 		const timedOut = await rejectsWithTransportError(
-			runOpaquePiReviewer(PROMPT_BYTES, {
+			runOpaqueFixture(PROMPT_BYTES, {
 				piExecutable: fixture.pi,
 				environment: { ...fixture.environment, OPAQUE_PI_MODE: "hang", OPAQUE_PI_BREAK_CLEANUP: "true" },
 				timeoutMs: 300,
