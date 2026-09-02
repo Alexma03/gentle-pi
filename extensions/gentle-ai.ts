@@ -867,7 +867,10 @@ function readPersonaFile(path: string): PersonaMode | undefined {
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
 		if (!isRecord(parsed)) return undefined;
-		return parsed.mode === "neutral" ? "neutral" : "gentleman";
+		if (parsed.mode === "neutral" || parsed.mode === "gentleman") {
+			return parsed.mode;
+		}
+		return undefined;
 	} catch {
 		return undefined;
 	}
@@ -877,7 +880,7 @@ function readPersonaMode(cwd: string): PersonaMode {
 	return (
 		readPersonaFile(projectPersonaConfigPath(cwd)) ??
 		readPersonaFile(personaConfigPath(cwd)) ??
-		"gentleman"
+		"neutral"
 	);
 }
 
