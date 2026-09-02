@@ -357,6 +357,16 @@ export interface NativeReviewAcknowledgeApprovedRequest {
 	readonly signal?: AbortSignal;
 }
 
+export interface NativeReviewAcknowledgedResult {
+	readonly schema: "gentle-ai.review-acknowledged/v1";
+	readonly operation: "review/acknowledge-approved";
+	readonly action: "acknowledged";
+	readonly lineageId: string;
+	readonly targetIdentity: string;
+	readonly consumedRevision: string;
+	readonly authority: "burned";
+}
+
 export interface NativeReviewCorrectionPlanCaptureRequest {
 	readonly argumentTokens: readonly string[];
 	readonly correctionLines: number;
@@ -1773,10 +1783,8 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		signal: AbortSignal | undefined,
 		path: string,
 		toleratedStderr: readonly string[] = [],
-		// A successful acknowledgement burns its authority and prints nothing:
-		// there is no receipt left to describe. Only that shape opts out of the
-		// body, and only for a zero exit; a non-zero exit still has to produce
-		// its typed failure envelope like every other operation.
+		// Compatibility operations may still be bodyless. Current acknowledgement
+		// commands return their own typed burn envelope and use the normal path.
 		expectsBody = true,
 	): Promise<NegotiatedExecution> {
 		let result: ExecFileResult;
@@ -2020,18 +2028,31 @@ export class NativeReviewCliV216 implements NativeReviewCli {
 		}
 	}
 
-	// Relays the provider-issued acknowledgement exactly as rendered. A success
-	// burns the authority and its artifacts and prints nothing, so there is no
-	// body to decode and nothing survives to describe; a refusal still arrives
-	// as the ordinary typed failure envelope.
-	async acknowledgeApproved(request: NativeReviewAcknowledgeApprovedRequest): Promise<void> {
+	// Relays the provider-issued acknowledgement exactly as rendered and validates
+	// the typed burn envelope printed by current Gentle AI builds.
+	async acknowledgeApproved(request: NativeReviewAcknowledgeApprovedRequest): Promise<NativeReviewAcknowledgedResult> {
 		if (request.argumentTokens.length === 0) throw new TypeError("Native ACKNOWLEDGE_APPROVED requires the provider-issued argument tokens");
 		if (request.argumentTokens.some((token) => typeof token !== "string" || token.length === 0)) throw new TypeError("Native ACKNOWLEDGE_APPROVED argument tokens must all be non-empty strings");
 		if (request.argumentTokens.some((token) => token.includes("{{value}}"))) throw new TypeError("Native ACKNOWLEDGE_APPROVED argument tokens carry no caller-substituted value");
 		const executable = this.executablePath(NATIVE_REVIEW_OPERATION.ACKNOWLEDGE_APPROVED, true);
-		await this.invoke(NATIVE_REVIEW_OPERATION.ACKNOWLEDGE_APPROVED, request.cwd, [
+		const execution = await this.invoke(NATIVE_REVIEW_OPERATION.ACKNOWLEDGE_APPROVED, request.cwd, [
 			"review", "acknowledge-approved", ...request.argumentTokens,
-		], true, request.signal, executable, [], false);
+		], true, request.signal, executable);
+		return decode(NATIVE_REVIEW_OPERATION.ACKNOWLEDGE_APPROVED, true, () => {
+			const body = exactObject(execution.body, ["schema", "operation", "action", "lineage_id", "target_identity", "consumed_revision", "authority"]);
+			if (body.schema !== "gentle-ai.review-acknowledged/v1") throw new TypeError("unsupported acknowledgement schema");
+			if (body.operation !== "review/acknowledge-approved") throw new TypeError("acknowledgement returned another operation");
+			if (body.action !== "acknowledged" || body.authority !== "burned") throw new TypeError("acknowledgement did not confirm the authority burn");
+			return {
+				schema: body.schema,
+				operation: body.operation,
+				action: body.action,
+				lineageId: requiredString(body.lineage_id),
+				targetIdentity: requiredString(body.target_identity),
+				consumedRevision: requiredString(body.consumed_revision),
+				authority: body.authority,
+			};
+		});
 	}
 
 	async captureCorrectionPlan(request: NativeReviewCorrectionPlanCaptureRequest): Promise<ReviewLastEventClosureV1> {

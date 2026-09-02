@@ -135,6 +135,7 @@ import {
 	sanitizeForeignNativeReviewDiagnostics,
 	type NativeReviewCli,
 	type NativeReviewAcknowledgeApprovedRequest,
+	type NativeReviewAcknowledgedResult,
 	type NativeTargetStatusRequest,
 	type NativeReviewModeOperation,
 	type NativeReviewModeSource,
@@ -2264,7 +2265,7 @@ interface ReviewControllerParameters {
 }
 
 type NativeReviewAcknowledgementCli = NativeReviewCli & {
-	acknowledgeApproved?: (request: NativeReviewAcknowledgeApprovedRequest) => Promise<void>;
+	acknowledgeApproved?: (request: NativeReviewAcknowledgeApprovedRequest) => Promise<NativeReviewAcknowledgedResult | void>;
 };
 
 interface ReviewControllerStartInput {
@@ -4331,11 +4332,16 @@ async function executeReviewControllerOperation(
 			return nativeOperationFailure(parameters.operation, error);
 		}
 		try {
-			await acknowledgementCli.acknowledgeApproved({
+			const acknowledged = await acknowledgementCli.acknowledgeApproved({
 				argumentTokens,
 				cwd: defaultCwd,
 				...(signal === undefined ? {} : { signal }),
 			});
+			if (acknowledged !== undefined && (
+				acknowledged.lineageId !== parameters.lineageId
+				|| acknowledged.targetIdentity !== status.targetIdentity
+				|| acknowledged.consumedRevision !== status.authority.revision
+			)) throw new TypeError("Native acknowledgement envelope does not match the current approved authority");
 			return {
 				operation: parameters.operation,
 				status: "closed",
