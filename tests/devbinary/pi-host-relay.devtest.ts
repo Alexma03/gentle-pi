@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { __testing, createGentleAiExtension } from "../../extensions/gentle-ai.ts";
@@ -11,7 +11,7 @@ import { OPAQUE_PI_REVIEWER_ARGV } from "../../lib/opaque-pi-reviewer-adapter.ts
 import { NativeReviewCliV216, type ExecFileAdapter, type NativeReviewCli } from "../../lib/native-review-cli.ts";
 import { reviewHostRelaySlots, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "../../lib/review-relay-contract.ts";
-import { decodeReviewStatusV3 } from "../../lib/review-integration-v2.ts";
+import { decodeReviewConsentV3, decodeReviewStatusV3 } from "../../lib/review-integration-v2.ts";
 import { requireDevBinary } from "../support/native-binary-gate.ts";
 
 const DEV_BINARY = process.env.GENTLE_AI_DEV_BINARY;
@@ -19,13 +19,13 @@ const RELAY_DEV_BINARY = process.env.GENTLE_PI_GENTLE_AI_DEV_BINARY;
 const POSIX = process.platform !== "win32";
 const primaryDevBinaryGate = requireDevBinary({
 	devBinaryPath: DEV_BINARY,
-	exists: typeof DEV_BINARY === "string" && DEV_BINARY.length > 0 && DEV_BINARY.startsWith("/") && existsSync(DEV_BINARY),
+	exists: typeof DEV_BINARY === "string" && DEV_BINARY.length > 0 && isAbsolute(DEV_BINARY) && existsSync(DEV_BINARY),
 	env: process.env,
 });
 const relayDevBinaryGate = POSIX
 	? requireDevBinary({
 		devBinaryPath: RELAY_DEV_BINARY,
-		exists: typeof RELAY_DEV_BINARY === "string" && RELAY_DEV_BINARY.length > 0 && RELAY_DEV_BINARY.startsWith("/") && existsSync(RELAY_DEV_BINARY),
+		exists: typeof RELAY_DEV_BINARY === "string" && RELAY_DEV_BINARY.length > 0 && isAbsolute(RELAY_DEV_BINARY) && existsSync(RELAY_DEV_BINARY),
 		env: process.env,
 	})
 	: { run: false as const, reason: "Windows is explicitly skipped until a native fake-pi.exe exists; this test never enables a shell fallback." };
@@ -114,12 +114,10 @@ function enableGlobalReview(binary: string, sessionCwd: string, cwd: string, env
 	assert.equal(record(status.status, "global mode status result").effective, "on");
 }
 
-function runRenderedInvocation(binary: string, sessionCwd: string, command: string, environment: NodeJS.ProcessEnv): unknown {
-	const words = command.split(" ");
-	assert.ok(words.length >= 3, `rendered invocation is incomplete: ${command}`);
-	assert.deepEqual(words.slice(0, 2), ["gentle-ai", "review"], `rendered invocation is not a native review command: ${command}`);
-	assert.equal(words.some((word) => word.includes("'") || word.includes('"')), false, `devtest fixture command must remain unquoted: ${command}`);
-	return candidateJson(binary, sessionCwd, words.slice(1), environment);
+function runRenderedStart(binary: string, sessionCwd: string, operation: string, argumentTokens: readonly string[], environment: NodeJS.ProcessEnv): unknown {
+	assert.equal(operation, "review.start", "rendered operation must be native review START");
+	assert.ok(argumentTokens.length > 0 && argumentTokens.every((token) => token.startsWith("--")), "rendered START must carry provider argument tokens");
+	return candidateJson(binary, sessionCwd, ["review", "start", ...argumentTokens], environment);
 }
 
 interface RegisteredReviewTools {
@@ -255,15 +253,6 @@ function sessionContext(cwd: string): ExtensionContext {
 	return { cwd, hasUI: false, ui: { notify() {} } } as unknown as ExtensionContext;
 }
 
-function grantedConsentInvocation(value: unknown): string {
-	const consent = record(value, "consent response");
-	const choices = consent.choices;
-	assert.ok(Array.isArray(choices), "consent response must carry choices");
-	const granted = choices.map((choice) => record(choice, "consent choice")).find((choice) => choice.answer === "granted");
-	assert.ok(granted, "consent response must carry the granted choice");
-	return stringValue(granted!.invocation, "granted consent invocation");
-}
-
 const FAKE_POSIX_PI = `#!/usr/bin/env node
 import fs from "node:fs";
 const expectedArgv = JSON.parse(process.env.OPAQUE_PI_REVIEWER_ARGV);
@@ -360,17 +349,17 @@ test("dev-binary: POSIX Pi host relay captures one real B-target slot from an A-
 	const execute = selectedStatus.nextTransition?.execute;
 	assert.ok(execute, "selected Pi STATUS must render a START execution");
 	assert.equal(execute!.operation, "review.start");
-	assert.equal(execute!.command.startsWith("gentle-ai review start "), true);
-	assert.deepEqual(execute!.command.split(" ").slice(3), execute!.arguments.map((argument) => argument.token));
 	assert.ok(execute!.arguments.some((argument) => argument.token === `--cwd=${canonicalB}`), "rendered START must canonically target B, not A or B/nested");
 	assert.ok(execute!.arguments.some((argument) => argument.token === "--intended-untracked=selected.txt"), "rendered START must retain B's selected untracked path");
 	assert.equal(execute!.arguments.some((argument) => argument.token === "--intended-untracked=excluded.txt"), false, "rendered START must exclude B's unselected control");
 
-	const consent = runRenderedInvocation(RELAY_DEV_BINARY!, sessionA, execute!.command, environment);
-	const started = runRenderedInvocation(RELAY_DEV_BINARY!, sessionA, grantedConsentInvocation(consent), environment);
-	const startedRecord = record(started, "granted START response");
-	assert.equal(startedRecord.action, "created");
-	const lineage = stringValue(startedRecord.lineage_id, "granted START lineage_id");
+	const consent = decodeReviewConsentV3(runRenderedStart(RELAY_DEV_BINARY!, sessionA, execute!.operation, execute!.arguments.map((argument) => argument.token), environment));
+	const consentCalls: NativeProcessCall[] = [];
+	const started = await devNativeCli(RELAY_DEV_BINARY!, environment, consentCalls).answerConsent({ cwd: canonicalB, consent, answer: "granted" });
+	assert.equal(consentCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "start").length, 1, "granted consent must execute exactly one native START");
+	assert.equal(started.kind, "started");
+	if (started.kind !== "started") throw new Error("granted consent did not start review authority");
+	const lineage = started.start.lineageId;
 
 	const collecting = candidateStatus(RELAY_DEV_BINARY!, sessionA, canonicalB, environment, lineage);
 	const slots = reviewHostRelaySlots(collecting.nextTransition?.collect?.inputs ?? []);

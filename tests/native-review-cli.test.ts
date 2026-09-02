@@ -83,6 +83,32 @@ test("a final reviewer capture returns its native last-event closure without a f
 	assert.equal(queue.calls[0]?.arguments.includes("--contract"), false);
 });
 
+test("approved acknowledgement validates the provider burn envelope", async () => {
+	const queue = queuedAdapter([{ stdout: JSON.stringify({
+		schema: "gentle-ai.review-acknowledged/v1",
+		operation: "review/acknowledge-approved",
+		action: "acknowledged",
+		lineage_id: "review-c7c923a031112dd7",
+		target_identity: "sha256:" + "a".repeat(64),
+		consumed_revision: "sha256:" + "b".repeat(64),
+		authority: "burned",
+	}) }]);
+	const result = await client(queue.adapter).acknowledgeApproved({
+		argumentTokens: ["--lineage=review-c7c923a031112dd7", "--token=provider-issued"],
+		cwd: "/repo",
+	});
+
+	assert.equal(result.schema, "gentle-ai.review-acknowledged/v1");
+	assert.equal(result.authority, "burned");
+	assert.equal(result.lineageId, "review-c7c923a031112dd7");
+	assert.deepEqual(queue.calls[0]?.arguments, ["review", "acknowledge-approved", "--lineage=review-c7c923a031112dd7", "--token=provider-issued"]);
+
+	await assert.rejects(
+		() => client(queuedAdapter([{ stdout: "" }]).adapter).acknowledgeApproved({ argumentTokens: ["--token=x"], cwd: "/repo" }),
+		(error: unknown) => error instanceof NativeReviewCliError && error.code === NATIVE_REVIEW_ERROR_CODE.EMPTY_OUTPUT,
+	);
+});
+
 test("correction-plan capture substitutes only the provider slot and closes natively", async () => {
 	const closure = fixture("last-event-capture-correction-plan.captured.json");
 	const queue = queuedAdapter([{ stdout: JSON.stringify(closure) }]);

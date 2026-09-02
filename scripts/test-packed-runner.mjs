@@ -2,8 +2,8 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -11,6 +11,19 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const temporary = mkdtempSync(join(tmpdir(), "gentle-pi-packed-runner-"));
 const packDirectory = join(temporary, "pack");
 const installDirectory = join(temporary, "install");
+const isolatedConfigHome = join(temporary, "config");
+const ambientConfigHome = process.env.GENTLE_PI_CONFIG_HOME ?? join(homedir(), ".pi", "gentle-ai");
+const ambientRegistrationPaths = [join(ambientConfigHome, "dev-binary.json"), join(ambientConfigHome, "pinned-main-binary.json")];
+const ambientRegistrationSnapshot = ambientRegistrationPaths.map((path) => existsSync(path) ? readFileSync(path) : undefined);
+
+function assertAmbientRegistrationsUnchanged() {
+	for (const [index, path] of ambientRegistrationPaths.entries()) {
+		const before = ambientRegistrationSnapshot[index];
+		const after = existsSync(path) ? readFileSync(path) : undefined;
+		if (before?.equals(after) ?? after === undefined) continue;
+		throw new Error(`packed package E2E modified ambient Gentle Pi registration: ${path}`);
+	}
+}
 
 function windowsNpmInvocation() {
 	const candidates = [];
@@ -45,16 +58,19 @@ try {
 	if (packed.length !== 1 || typeof packed[0]?.filename !== "string") throw new Error("npm pack did not return one tarball");
 	const tarball = join(packDirectory, packed[0].filename);
 	writeFileSync(join(installDirectory, "package.json"), JSON.stringify({ name: "gentle-pi-packed-runner-test", private: true }), "utf8");
-	runNpm(["install", "--ignore-scripts=false", "--no-audit", "--no-fund", "--package-lock=false", "--omit=dev", "--legacy-peer-deps", tarball], {
+	runNpm(["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "--omit=dev", "--legacy-peer-deps", tarball], {
 		cwd: installDirectory,
 		stdio: "inherit",
+		env: { ...process.env, GENTLE_PI_CONFIG_HOME: isolatedConfigHome },
 	});
 	const packageRoot = join(installDirectory, "node_modules", "gentle-pi");
-	// Accept prerelease pins too: a stable-only pattern here was a second,
-	// silent pin that refused the first prerelease version directory.
-	const versions = readdirSync(join(packageRoot, ".gentle-ai"), { withFileTypes: true }).filter((entry) => entry.isDirectory() && /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.]*)?$/.test(entry.name));
-	if (versions.length !== 1) throw new Error("packed install did not contain exactly one package-local Gentle AI version");
-	const executable = join(packageRoot, ".gentle-ai", versions[0].name, process.platform === "win32" ? "gentle-ai.exe" : "gentle-ai");
+	const executable = process.env.GENTLE_PI_PACKED_GENTLE_AI_BINARY ?? join(root, ".gentle-ai", "custom-main", process.platform === "win32" ? "gentle-ai.exe" : "gentle-ai");
+	if (!existsSync(executable)) throw new Error("packed package E2E requires one previously built custom/main Gentle AI binary");
+	const integrity = JSON.parse(readFileSync(join(dirname(executable), "integrity.json"), "utf8"));
+	if (integrity.sourceRepository !== "https://github.com/Alexma03/gentle-ai.git" || integrity.sourceBranch !== "custom/main") {
+		throw new Error("packed package E2E binary is not the expected Alexma03/custom-main snapshot");
+	}
+	if (existsSync(join(root, ".gentle-ai", "fork-src"))) throw new Error("Gentle AI installer retained its temporary source checkout");
 	const capabilities = JSON.parse(execFileSync(executable, ["review", "capabilities", "--contract", "gentle-ai.review-integration/v2"], { cwd: installDirectory, encoding: "utf8" }));
 	// Decode with the PACKED consumer's own decoder rather than comparing the
 	// schema string against a list hand-copied into this script. The copy was a
@@ -69,9 +85,13 @@ try {
 	const { decodeReviewCapabilitiesV2 } = await import(pathToFileURL(join(packageRoot, "runtime", "review-integration-v2.mjs")).href);
 	const executableDigest = `sha256:${createHash("sha256").update(readFileSync(executable)).digest("hex")}`;
 	const decoded = decodeReviewCapabilitiesV2(capabilities, executableDigest);
-	if (decoded.contract !== "gentle-ai.review-integration/v2" || decoded.packageVersion !== versions[0].name.slice(1)) throw new Error("package-local Gentle AI returned incompatible capabilities");
+	if (decoded.contract !== "gentle-ai.review-integration/v2") throw new Error("package-local Gentle AI returned incompatible capabilities");
 	const packageManifest = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 	process.stdout.write(`packed package E2E passed (gentle-pi ${packageManifest.version ?? "unknown"}; Gentle AI ${decoded.packageVersion ?? "unknown"})\n`);
 } finally {
-	rmSync(temporary, { recursive: true, force: true });
+	try {
+		assertAmbientRegistrationsUnchanged();
+	} finally {
+		rmSync(temporary, { recursive: true, force: true });
+	}
 }

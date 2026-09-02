@@ -240,10 +240,16 @@ function workflowProblems(packageRoot) {
 	if (!existsSync(ciPath)) problems.push(".github/workflows/ci.yml is missing");
 	else {
 		const ci = readFileSync(ciPath, "utf8");
+		const packageJson = readJson(join(packageRoot, "package.json"), "package manifest");
+		const scripts = isRecord(packageJson.scripts) ? packageJson.scripts : {};
+		const aggregateTest = typeof scripts.test === "string" ? scripts.test : "";
+		const contractTest = typeof scripts["test:contracts"] === "string" ? scripts["test:contracts"] : "";
+		const releaseEvidenceCovered = ci.includes("pnpm run check:release-evidence")
+			|| (ci.includes("pnpm test") && aggregateTest.includes("pnpm run test:contracts") && contractTest.includes("pnpm run check:release-evidence"));
 		if (!/matrix:\s*\n\s+os:\s*\n/s.test(ci) || !/runs-on:\s*\$\{\{\s*matrix\.os\s*\}\}/.test(ci)) problems.push("CI must run one verification job per matrix.os runner");
 		for (const runner of RELEASE_MATRIX_RUNNERS) if (!ci.includes(runner)) problems.push(`CI matrix is missing ${runner}`);
 		if (!/node-version:\s*["']?24["']?/.test(ci)) problems.push("CI matrix must use Node 24");
-		if (!ci.includes("pnpm run check:release-evidence")) problems.push("CI matrix must run the repository release-evidence check");
+		if (!releaseEvidenceCovered) problems.push("CI matrix must run the repository release-evidence check directly or through its aggregate test");
 	}
 	if (!existsSync(publishPath)) problems.push(".github/workflows/publish.yml is missing");
 	else if (!/check-release-evidence\.mjs\s+--release/.test(readFileSync(publishPath, "utf8"))) problems.push("publish workflow must run the fail-closed release-evidence gate");

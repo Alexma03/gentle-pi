@@ -110,7 +110,11 @@ test("CI and release procedures require the Node 24 cross-OS matrix and coordina
 	assert.match(ci, /macos-latest/);
 	assert.match(ci, /windows-latest/);
 	assert.match(ci, /node-version:\s*["']?24["']?/);
-	assert.match(ci, /check:release-evidence/);
+	assert.match(ci, /pnpm test/);
+	assert.doesNotMatch(ci, /pnpm run check:release-evidence/, "CI must not repeat the release-evidence check already owned by pnpm test");
+	const packageJson = readJson("package.json");
+	assert.match(String((packageJson.scripts as Record<string, string>).test), /pnpm run test:contracts/);
+	assert.match(String((packageJson.scripts as Record<string, string>)["test:contracts"]), /pnpm run check:release-evidence/);
 	assert.match(publish, /check-release-evidence\.mjs\s+--release/);
 	assert.match(release, /coordinated Gentle AI release/i);
 	assert.match(release, /rollback.*both/i);
