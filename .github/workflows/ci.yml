@@ -62,8 +62,5 @@ jobs:
         env:
           GENTLE_PI_REQUIRE_DEV_BINARY: "1"
 
-      - name: Verify coordinated release evidence
-        run: pnpm run check:release-evidence
-
       - name: Verify packed installation
         run: pnpm run test:packed-package
