@@ -29,6 +29,7 @@ import type {
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
+import { resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import {
 	ensureSddPreflight,
 	getSddPreflightPreferences,
@@ -175,7 +176,7 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ASSETS_DIR = join(PACKAGE_ROOT, "assets");
 
 function gentlePiAgentHome(): string {
-	return process.env.GENTLE_PI_AGENT_HOME ?? join(homedir(), ".pi", "agent");
+	return resolveGentlePiAgentHome();
 }
 
 function sddGlobalAssetDriftCount(): number {
