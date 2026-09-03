@@ -201,15 +201,16 @@ The package-local Gentle AI runtime owns the Git-common-dir compact SDD attempt 
 Before every runtime-bearing `sdd-apply`, `sdd-verify`, or remediation actor/harness launch, the orchestrator MUST call the compact acquire:
 
 ```text
-gentle-ai sdd-attempt acquire --cwd <repo> --change <change> --request-id <id> --work-unit <label> --evidence-goal <goal> --max-attempts <count>
+gentle-ai sdd-attempt acquire --cwd <repo> --change <change> --request-id <id> --work-unit <label> --evidence-goal <goal>
 ```
 
 Pass `--token` only to continue an active attempt; pass `--remediates-evidence-revision` only for an unmanaged remediation. Do not invent continuation or remediation state the provider has not returned.
+Attempt and changed-line limits are provider-owned advisory/no-progress telemetry. Callers do not select a one-shot budget for routine work.
 
 The provider returns exactly one routing state from `proceed|blocked|complete`:
 
 - `proceed`: launch only on `proceed`; retain the opaque token for settle.
-- `blocked`: do not launch; stop and report.
+- `blocked`: do not launch; report the integrity, ownership, binding, or continuation problem for which the provider found no safe automatic recovery.
 - `complete`: do not launch; the objective is settled.
 
 Never persist caller-authored attempt counters, tokens, or state in OpenSpec artifacts, Engram memory, prompts, or any Pi-owned state.
@@ -222,7 +223,9 @@ gentle-ai sdd-attempt settle --cwd <repo> --change <change> --token <token> --re
 
 Every settle field is required: `cwd`, `change`, `token`, `request-id`, `outcome`, `evidence-revision`, `diagnosis`, `harness-disposition`, `cleanup-evidence`, and `process-evidence`. `evidence-revision` is never `none`. Pass `--successor-lineage` only for a distinct approved successor; the current/bound lineage remains itself otherwise. Pass `--remediates-evidence-revision` only when repairing a specific failed evidence revision. Settle derives binding and remediation inputs; the orchestrator never invents them.
 
-`status`, `begin`, `finish`, and `reset` are diagnostic/compatibility surfaces, not the normal runtime route. Route continuation only from the provider-returned `proceed|blocked|complete`. `reset` is never automatic and requires an explicit maintainer scope decision.
+A failed or interrupted settlement remains retryable. Preserve its evidence, diagnose the failure, change strategy when evidence repeats, and acquire the next recorded attempt. Accounting ceilings remain visible but never require human permission or a reset. An invalidated harness means its proof is incomplete; execution may have started and partial evidence may still exist.
+
+`status`, `begin`, `finish`, and `reset` are diagnostic/compatibility surfaces, not the normal runtime route. Route continuation only from the provider-returned `proceed|blocked|complete`. Routine recovery uses the next acquire; reset is not part of the normal failure path.
 
 The gatekeeper rerun never bypasses native attempt authority: every quality-gate rerun requires a fresh compact acquire before it launches, and it stops on provider `blocked` or `complete`.
 
