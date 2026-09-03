@@ -14,7 +14,7 @@ import test from "node:test";
 // Both assets are Markdown contracts consumed by orchestrators; these tests
 // read the real repo files and assert the essential semantics, not merely
 // keyword presence. Negative controls guard against caller-authored
-// counters, OpenSpec/Engram attempt ledgers, automatic reset, and legacy
+// counters, OpenSpec/Engram attempt ledgers, bookkeeping reset consent, and legacy
 // status|begin|finish|reset normal-flow routing.
 // ---------------------------------------------------------------------------
 
@@ -106,7 +106,7 @@ test("status contract names acquire and settle and forbids OpenSpec/Engram attem
 	assert.match(section, /OpenSpec or Engram attempt ledger/i);
 });
 
-test("workflow launches only on proceed; blocked and complete stop the launch", () => {
+test("workflow launches only on proceed and reserves blocked for genuine provider safety failures", () => {
 	const section = readMarkdownSection(read(WORKFLOW), SECTION);
 	assert.match(section, /proceed/);
 	assert.match(section, /blocked/);
@@ -114,6 +114,8 @@ test("workflow launches only on proceed; blocked and complete stop the launch", 
 	assert.match(section, /launch only on `proceed`/i);
 	assert.match(section, /blocked.*do not launch/i);
 	assert.match(section, /complete.*do not launch/i);
+	assert.match(section, /integrity, ownership, binding, or continuation problem/i);
+	assert.match(section, /no safe automatic recovery/i);
 });
 
 test("workflow requires distinct request IDs with own-ID-only idempotent replay", () => {
@@ -122,7 +124,7 @@ test("workflow requires distinct request IDs with own-ID-only idempotent replay"
 	assert.match(section, /own ID only for idempotent replay/i);
 });
 
-test("workflow acquire command line binds every mandatory payload argument", () => {
+test("workflow acquire command line binds mandatory payload without a caller-selected attempt budget", () => {
 	const section = readMarkdownSection(read(WORKFLOW), SECTION);
 	const acquire = extractCommandLine(section, "gentle-ai sdd-attempt acquire ");
 	for (const arg of [
@@ -131,10 +133,10 @@ test("workflow acquire command line binds every mandatory payload argument", () 
 		"--request-id <id>",
 		"--work-unit <label>",
 		"--evidence-goal <goal>",
-		"--max-attempts <count>",
 	]) {
 		assert.ok(acquire.includes(arg), `acquire command is missing ${arg}; command: ${acquire}`);
 	}
+	assert.doesNotMatch(acquire, /max-attempts/);
 	assert.doesNotMatch(acquire, /max-changed-lines/);
 });
 
@@ -168,13 +170,18 @@ test("workflow forbids caller-authored counters and Pi-owned attempt state", () 
 	assert.match(section, /counter|token store|state machine|interception/i);
 });
 
-test("workflow states reset is never automatic and names compatibility surfaces", () => {
+test("workflow makes routine failure recovery automatic while retaining compatibility surfaces", () => {
 	const section = readMarkdownSection(read(WORKFLOW), SECTION);
 	assert.match(section, /`status`, `begin`, `finish`, and `reset`/);
 	assert.match(section, /diagnostic\/compatibility surfaces/);
 	assert.match(section, /not the normal runtime route/i);
-	assert.match(section, /reset.*never automatic/i);
-	assert.match(section, /explicit maintainer scope decision/);
+	assert.match(section, /advisory\/no-progress telemetry/i);
+	assert.match(section, /failed or interrupted/i);
+	assert.match(section, /diagnose.*change strategy.*acquire/i);
+	assert.match(section, /never require human permission or a reset/i);
+	assert.match(section, /reset is not part of the normal failure path/i);
+	assert.match(section, /invalidated harness.*proof is incomplete/i);
+	assert.match(section, /execution may have started/i);
 });
 
 test("workflow gatekeeper rerun is subordinate to a fresh native acquire", () => {
@@ -203,14 +210,18 @@ test("status contract authority is artifact-store agnostic and excluded from SDD
 	assert.match(section, /separate from artifact dispatch/i);
 });
 
-test("status contract continuation rule: acquire before launch, settle after run, distinct IDs, provider states route, reset never automatic", () => {
+test("status contract continuation rule keeps routine ceilings advisory and retries diagnosed failures", () => {
 	const section = readMarkdownSection(read(STATUS_CONTRACT), SECTION);
 	assert.match(section, /before every runtime-bearing/i);
 	assert.match(section, /after the external run completes it MUST settle/i);
 	assert.match(section, /distinct/i);
 	assert.match(section, /proceed\|blocked\|complete/);
 	assert.match(section, /launch only on `proceed`/i);
-	assert.match(section, /reset.*never automatic/i);
+	assert.match(section, /advisory\/no-progress telemetry/i);
+	assert.match(section, /failed or interrupted/i);
+	assert.match(section, /diagnose.*change strategy.*acquire/i);
+	assert.match(section, /must not demand human permission to reset bookkeeping/i);
+	assert.match(section, /invalidated harness.*proof is incomplete/i);
 });
 
 test("status contract schema is unchanged (no attempt authority payload added)", () => {
