@@ -311,7 +311,7 @@ test("Judgment Day skill and prompts preserve bounded fix and re-judgment author
 });
 
 test("orchestrator, injected skill, and README defer RDD lifecycle ownership to Gentle AI", () => {
-	const boundary = "Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. The personal Gentle AI fork defaults RDD on; respect any explicit global or clone-local disable and never reactivate it automatically. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.";
+	const boundary = "This package injects the verified mirrored provider-bundle review execution contract into the primary session's system prompt at start. The personal Gentle AI fork defaults RDD on; respect any explicit global or clone-local disable and never reactivate it automatically. An enabled switch is complete authorization without candidate-scoped consent. Follow only that exact mirrored contract; if absent or unsupported, this package does not invent or fall back.";
 	const orchestrator = union(ORCHESTRATOR);
 	assert.ok(orchestrator.includes(boundary), "orchestrator must carry the sole static ownership boundary");
 
@@ -320,7 +320,7 @@ test("orchestrator, injected skill, and README defer RDD lifecycle ownership to 
 		[README, read(README)],
 	] as const) {
 		assertMatches(label, content, [
-			/Gentle AI dynamically supplies runtime-specific RDD instructions/i,
+			/Gentle AI (?:publishes|(?:dynamically )?supplies) runtime-specific RDD instructions/i,
 			/(?:sole lifecycle authority|does not define an RDD lifecycle)/i,
 		]);
 	}
@@ -335,7 +335,7 @@ test("orchestrator, injected skill, and README defer RDD lifecycle ownership to 
 
 test("README documents the dynamic runtime authority boundary without an old package route", () => {
 	const content = read(README);
-	assert.match(content, /Gentle AI dynamically supplies runtime-specific RDD instructions/i);
+	assert.match(content, /Gentle AI publishes runtime-specific RDD instructions/i);
 	assert.match(content, /does not define an RDD lifecycle/i);
 	assert.doesNotMatch(content, /New ordinary review uses compact `gentle_review` `start -> finalize -> validate`\./);
 	assert.match(content, /Dangerous-command safety remains independent and authoritative/);

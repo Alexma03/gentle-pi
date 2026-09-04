@@ -1324,7 +1324,7 @@ test("orchestrator routes generic roles without static RDD lens routing", () => 
 	}
 
 	const core = readFileSync(join(PACKAGE_ROOT, "assets", "orchestrator.md"), "utf8");
-	assert.match(core, /Gentle AI dynamically supplies runtime-specific RDD instructions/);
+	assert.match(core, /injects the verified mirrored provider-bundle review execution contract/);
 	assert.match(core, /this package does not invent or fall back/);
 });
 
@@ -1378,7 +1378,7 @@ test("bounded review keeps the Judgment Day skill contract at canon metadata ver
 test("README documents dynamic Gentle AI RDD ownership and the installed permission boundary", () => {
 	const readme = readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8");
 	for (const clause of [
-		"Gentle AI dynamically supplies runtime-specific RDD instructions",
+		"Gentle AI publishes runtime-specific RDD instructions",
 		"does not define an RDD lifecycle",
 		"Dangerous-command safety remains independent and authoritative.",
 		"package-managed isolated installation",

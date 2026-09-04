@@ -648,7 +648,7 @@ test("runtime guidance keeps review policy out of the static orchestrator", () =
 
 	const orchestrator = readFileSync("assets/orchestrator.md", "utf8")
 		+ readFileSync("assets/orchestrator-delegation.md", "utf8");
-	assert.match(orchestrator, /Gentle AI dynamically supplies runtime-specific RDD instructions/);
+	assert.match(orchestrator, /injects the verified mirrored provider-bundle review execution contract/);
 	assert.match(orchestrator, /this package does not invent or fall back/);
 	for (const lifecycleMarker of ["review-risk", "review-reliability", "review-resilience", "review-readability", "Authority-First Terminal Procedure", "reconcile-terminal-mirrors"]) {
 		assert.doesNotMatch(orchestrator, new RegExp(lifecycleMarker), `static orchestrator must not mirror ${lifecycleMarker}`);
