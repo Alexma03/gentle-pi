@@ -55,7 +55,7 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 | **Per-agent model assignment** | Pi-native modal for assigning stronger or cheaper models to specific SDD/custom agents.                                                       |
 | **Skill discovery registry**   | Maintains `.atl/skill-registry.md` from project and user skills so review/comment/PR workflows do not silently miss the right skill.          |
 | **Skill creation workflow**    | Provides the `gentle-ai-skill-creator`/`gentle-ai-skill-improver` skills, `/skill-creation` prompt, and packaged style guide for LLM-first skills. |
-| **Delivery skills**            | Includes issue-first PRs, chained PRs, work-unit commits, cognitive docs, comment writing, and Judgment Day review.                           |
+| **Delivery skills**            | Includes issue-optional PRs, chained PRs, work-unit commits, cognitive docs, comment writing, and Judgment Day review.                           |
 | **Bounded native review**      | Freezes one candidate, dispatches only controller-selected lenses, and records native authority. Review outcomes are informational; delivery follows ordinary repository policy. |
 | **Verified personal runtime**  | Builds `Alexma03/gentle-ai@custom/main` locally, records its exact commit, source-tree digest, binary digest, and version, then activates that pinned snapshot. The temporary source checkout is removed after installation. |
 | **Runtime safety**             | Blocks destructive shell commands, asks for confirmation for sensitive operations, and blocks direct read/write/edit access to sensitive paths. |
@@ -587,7 +587,7 @@ Use it when you want skills available normally but do not want Gentle AI to refr
 ## Included skills
 
 - `gentle-ai` — harness discipline for controlled Pi work.
-- `gentle-ai-branch-pr` — issue-first PR preparation.
+- `branch-pr` — reviewable PR preparation with optional issue linkage.
 - `gentle-ai-chained-pr` — split oversized changes into reviewable PR chains.
 - `work-unit-commits` — commits as reviewable work units.
 - `gentle-ai-judgment-day` — blind dual review, fixes, and re-judgment.

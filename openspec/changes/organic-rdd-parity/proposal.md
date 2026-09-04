@@ -13,7 +13,7 @@ This change originally explored capability-gated parity work and an unrelated ar
 ### In Scope
 
 - Reflect native review mode as provider-owned lifecycle state; Pi never enables it implicitly.
-- Relay a provider-issued candidate consent envelope losslessly and execute only its returned follow-up invocation after an explicit answer.
+- Start provider-issued review automatically when RDD is enabled; the global or clone-local disable switch remains the user-owned kill switch.
 - Preserve provider-selected risk, candidate identity, lifecycle transitions, and host-relay transport without Pi-side reconstruction.
 - Treat review status and informational VALIDATE as review evidence only.
 - Keep commit, push, pull-request, and release delivery under ordinary repository policy.
@@ -29,7 +29,7 @@ This change originally explored capability-gated parity work and an unrelated ar
 
 ### Modified Capabilities
 
-- `organic-review-parity`: provider-owned review mode, candidate consent, and opaque transport behavior.
+- `organic-review-parity`: provider-owned review mode, automatic enabled-review behavior, and opaque transport behavior.
 - `review-routing`: native lifecycle transitions remain authoritative; delivery is not a lifecycle decision.
 
 ## Affected Areas
@@ -43,7 +43,7 @@ This change originally explored capability-gated parity work and an unrelated ar
 
 ## Success Criteria
 
-- Native review mode and candidate consent remain provider-owned.
+- Native review mode and automatic enabled-review behavior remain provider-owned.
 - Pi transports exact lifecycle and relay inputs without reconstructing authority.
 - No Pi-owned latch, delivery gate, publication authorization, or commit-runner claim remains in active documentation.
 - Delivery commands remain governed by ordinary repository policy.

@@ -1,202 +1,49 @@
 ---
 name: gentle-ai-branch-pr
-description: "Create Gentle AI pull requests with issue-first checks. Trigger: creating, opening, or preparing PRs for review."
+description: "Trigger: creating, opening, or preparing branches and pull requests. No mandatory issue linkage."
 license: Apache-2.0
 metadata:
   author: gentleman-programming
-  version: "2.0"
+  version: "3.0"
 ---
+
+# Gentle AI — Branch & PR Skill
 
 ## When to Use
 
-Use this skill when:
-- Creating a pull request for any change
-- Preparing a branch for submission
-- Helping a contributor open a PR
-
----
+Load this skill when creating a branch, preparing a pull request, or opening a pull request.
 
 ## Critical Rules
 
-1. **Every PR MUST link an approved issue** — no exceptions
-2. **Every PR MUST have exactly one `type:*` label**
-3. **Automated checks must pass** before merge is possible
-4. **Blank PRs without issue linkage will be blocked** by GitHub Actions
-
----
+1. **GitHub issues are optional.** Never require, create, search, or link an issue unless the user explicitly asks for that issue operation. An existing issue may be linked when it is genuinely useful, but it never authorizes or blocks implementation, review, or delivery.
+2. **Use ordinary repository policy.** Confirm the target branch, inspect the final diff, run applicable checks, and follow actual branch protection without inventing extra gates.
+3. **Keep review units cohesive.** Split only at natural architectural, domain, interface, risk, verification, or rollback boundaries; never use changed-line counts.
+4. **Use Conventional Commits.** Never add `Co-Authored-By` or AI attribution to commits.
+5. **Never force-push a protected branch.**
 
 ## Workflow
 
-```
-1. Verify issue has `status:approved` label
-2. Create branch: type/description (see Branch Naming below)
-3. Implement changes with conventional commits
-4. Run shellcheck on modified scripts
-5. Open PR using the template
-6. Add exactly one type:* label
-7. Wait for automated checks to pass
-```
-
----
+1. Confirm the repository, target branch, and requested delivery scope.
+2. Create a descriptive branch from the intended base.
+3. Implement one cohesive work unit and run applicable checks.
+4. Inspect the final diff and commit with Conventional Commits.
+5. Push and open the PR with a truthful summary and test evidence.
+6. Link an issue only when the user explicitly requested it or supplied one.
 
 ## Branch Naming
 
-Branch names MUST match this regex:
+Prefer `<type>/<short-description>` with a conventional type such as `feat`, `fix`, `docs`, `refactor`, `test`, `build`, `ci`, or `chore`. Follow a repository-specific convention when one exists.
 
-```
-^(feat|fix|chore|docs|style|refactor|perf|test|build|ci|revert)\/[a-z0-9._-]+$
-```
+## PR Body
 
-**Format:** `type/description` — lowercase, no spaces, only `a-z0-9._-` in description.
+Include:
 
-| Type | Branch pattern | Example |
-|------|---------------|---------|
-| Feature | `feat/<description>` | `feat/user-login` |
-| Bug fix | `fix/<description>` | `fix/zsh-glob-error` |
-| Chore | `chore/<description>` | `chore/update-ci-actions` |
-| Docs | `docs/<description>` | `docs/installation-guide` |
-| Style | `style/<description>` | `style/format-scripts` |
-| Refactor | `refactor/<description>` | `refactor/extract-shared-logic` |
-| Performance | `perf/<description>` | `perf/reduce-startup-time` |
-| Test | `test/<description>` | `test/add-setup-coverage` |
-| Build | `build/<description>` | `build/update-shellcheck` |
-| CI | `ci/<description>` | `ci/add-branch-validation` |
-| Revert | `revert/<description>` | `revert/broken-setup-change` |
+- A concise summary and motivation.
+- The important files or areas changed.
+- Exact checks run and their outcomes.
+- Rollback or migration notes when relevant.
+- An optional issue link only when explicitly requested.
 
----
+## Completion
 
-## PR Body Format
-
-The PR template is at `.github/PULL_REQUEST_TEMPLATE.md`. Every PR body MUST contain:
-
-### 1. Linked Issue (REQUIRED)
-
-```markdown
-Closes #<issue-number>
-```
-
-Valid keywords: `Closes #N`, `Fixes #N`, `Resolves #N` (case insensitive).
-The linked issue MUST have the `status:approved` label.
-
-### 2. PR Type (REQUIRED)
-
-Check exactly ONE in the template and add the matching label:
-
-| Checkbox | Label to add |
-|----------|-------------|
-| Bug fix | `type:bug` |
-| New feature | `type:feature` |
-| Documentation only | `type:docs` |
-| Code refactoring | `type:refactor` |
-| Maintenance/tooling | `type:chore` |
-| Breaking change | `type:breaking-change` |
-
-### 3. Summary
-
-1-3 bullet points of what the PR does.
-
-### 4. Changes Table
-
-```markdown
-| File | Change |
-|------|--------|
-| `path/to/file` | What changed |
-```
-
-### 5. Test Plan
-
-```markdown
-- [x] Scripts run without errors: `shellcheck scripts/*.sh`
-- [x] Manually tested the affected functionality
-- [x] Skills load correctly in target agent
-```
-
-### 6. Contributor Checklist
-
-All boxes must be checked:
-- Linked an approved issue
-- Added exactly one `type:*` label
-- Ran shellcheck on modified scripts
-- Skills tested in at least one agent
-- Docs updated if behavior changed
-- Conventional commit format
-- No `Co-Authored-By` trailers
-
----
-
-## Automated Checks (all must pass)
-
-| Check | Job name | What it verifies |
-|-------|----------|-----------------|
-| PR Validation | `Check Issue Reference` | Body contains `Closes/Fixes/Resolves #N` |
-| PR Validation | `Check Issue Has status:approved` | Linked issue has `status:approved` |
-| PR Validation | `Check PR Has type:* Label` | PR has exactly one `type:*` label |
-| CI | `Shellcheck` | Shell scripts pass `shellcheck` |
-
----
-
-## Conventional Commits
-
-Commit messages MUST match this regex:
-
-```
-^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9\._-]+\))?!?: .+
-```
-
-**Format:** `type(scope): description` or `type: description`
-
-- `type` — required, one of: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`
-- `(scope)` — optional, lowercase with `a-z0-9._-`
-- `!` — optional, indicates breaking change
-- `description` — required, starts after `: `
-
-Type-to-label mapping:
-
-| Commit type | PR label |
-|-------------|----------|
-| `feat` | `type:feature` |
-| `fix` | `type:bug` |
-| `docs` | `type:docs` |
-| `refactor` | `type:refactor` |
-| `chore` | `type:chore` |
-| `style` | `type:chore` |
-| `perf` | `type:feature` |
-| `test` | `type:chore` |
-| `build` | `type:chore` |
-| `ci` | `type:chore` |
-| `revert` | `type:bug` |
-| `feat!` / `fix!` | `type:breaking-change` |
-
-Examples:
-```
-feat(scripts): add Codex support to setup.sh
-fix(skills): correct topic key format in sdd-apply
-docs(readme): update multi-model configuration guide
-refactor(skills): extract shared persistence logic
-chore(ci): add shellcheck to PR validation workflow
-perf(scripts): reduce setup.sh execution time
-style(skills): fix markdown formatting
-test(scripts): add setup.sh integration tests
-ci(workflows): add branch name validation
-revert: undo broken setup change
-feat!: redesign skill loading system
-```
-
----
-
-## Commands
-
-```bash
-# Create branch
-git checkout -b feat/my-feature main
-
-# Run shellcheck before pushing
-shellcheck scripts/*.sh
-
-# Push and create PR
-git push -u origin feat/my-feature
-gh pr create --title "feat(scope): description" --body "Closes #N"
-
-# Add type label to PR
-gh pr edit <pr-number> --add-label "type:feature"
-```
+Return the branch, commit, PR URL when created, test evidence, and any real repository-policy blocker. Never report a missing issue as a blocker.

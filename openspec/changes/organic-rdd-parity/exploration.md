@@ -13,7 +13,7 @@ This change previously explored a capability-gated local implementation of revie
 - Pinned package tests must not inherit a maintainer's environment or persistent dev-binary registration. Testing seams can provide a disposable environment while explicit dev tests opt in deliberately.
 - Global native review-mode fixtures must use a disposable Git repository and temporary HOME/XDG state. The package worktree can carry an intentional clone-local mode and is not a lifecycle fixture.
 - Native review lifecycle status and transitions must be exercised with their current positional testing seams; obsolete pending-authorization arguments miswire the native client and cancellation signal.
-- The provider owns candidate consent and relay transport. Pi must not create a durable latch or replace provider-issued invocation tokens.
+- The provider owns review-mode authorization and transport. Pi executes provider-issued review transitions without adding a candidate consent layer or replacing invocation tokens.
 - Review output is not delivery authorization. Delivery is ordinary repository policy.
 
 ## Recommendation
