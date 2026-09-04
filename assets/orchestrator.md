@@ -57,8 +57,6 @@ Mandatory Delegation Triggers — stop rules; once fired, delegate through the b
 2. **Multi-file write rule** — 2+ non-trivial files touched → delegate one writer.
 3. **Incident rule** — diagnose wrong cwd/worktree/git/tooling incidents separately before resuming work.
 4. **Verification rule** — executing/delegating verification commands → `gentle-ai-verify`; only the 1-3-file read-only check stays inline.
-5. **Long-session rule** — ~20 tool calls, 5 exploratory reads, or 2 non-mechanical edits without delegation → pause and delegate.
-
 Full table, Work Routing Ladder examples/model-routing detail, Cost and Context Balance, Canonical Workflows, and the mirrored gentle-ai canon (blocking-prompt relays, language, and delegation): `orchestrator-delegation.md`.
 
 ## SDD Workflow (lazy-loaded)

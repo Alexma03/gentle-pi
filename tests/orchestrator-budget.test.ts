@@ -336,7 +336,6 @@ test("core-alone: load-bearing direct-delegation tokens remain without lazy unio
 	assert.match(core, /Multi-file write rule/);
 	assert.match(core, /Incident rule/);
 	assert.match(core, /Verification rule/);
-	assert.match(core, /Long-session rule/);
 });
 
 test("core-alone: dynamic Gentle AI ownership replaces package lifecycle instructions", () => {

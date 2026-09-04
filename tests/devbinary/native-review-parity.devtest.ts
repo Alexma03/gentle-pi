@@ -8,7 +8,6 @@ import {
 	NATIVE_REVIEW_ERROR_CODE,
 	NativeReviewCliError,
 	NativeReviewCliV216,
-	NativeReviewConsentRequiredError,
 	createNodeExecFileAdapter,
 	type ExecFileAdapter,
 } from "../../lib/native-review-cli.ts";
@@ -18,8 +17,7 @@ import { requireDevBinary } from "../support/native-binary-gate.ts";
 //
 // This suite runs only via `pnpm run test:dev-binary` and only when
 // GENTLE_AI_DEV_BINARY names a current, absolute candidate binary. Every START
-// first obtains candidate-bound STATUS and executes the returned transition;
-// consent answers replay the envelope's own invocation exactly once.
+// first obtains candidate-bound STATUS and executes the returned transition.
 const DEV_BINARY = process.env.GENTLE_AI_DEV_BINARY;
 const devBinaryGate = requireDevBinary({
 	devBinaryPath: DEV_BINARY,
@@ -85,55 +83,6 @@ async function enableReview(native: NativeReviewCliV216, cwd: string): Promise<v
 	assert.equal(enabled.status.source, "global");
 }
 
-async function candidateConsent(native: NativeReviewCliV216, cwd: string) {
-	const status = await native.targetStatus({ cwd, agent: "pi" });
-	assert.equal(status.nextTransition?.kind, "execute");
-	assert.equal(status.nextTransition?.execute?.operation, "review.start");
-	try {
-		await native.start({ cwd });
-		assert.fail("candidate START must return consent/v3 before review authority exists");
-	} catch (error) {
-		assert.ok(error instanceof NativeReviewConsentRequiredError, error instanceof Error ? error.message : String(error));
-		assert.equal(error.consent.schema, "gentle-ai.review-integration.consent/v3");
-		assert.equal(error.consent.agent, "pi");
-		return error.consent;
-	}
-}
-
-function consentAnswerCall(calls: NativeCall[], answer: "granted" | "declined"): NativeCall {
-	const matching = calls.filter((arguments_) => arguments_.at(0) === "review" && arguments_.at(1) === "start" && arguments_.includes("--consent") && arguments_.at(arguments_.indexOf("--consent") + 1) === answer);
-	assert.equal(matching.length, 1, `${answer} must execute exactly one provider invocation`);
-	return matching[0]!;
-}
-
-function nativeOptions(arguments_: NativeCall): Map<string, string> {
-	assert.deepEqual(arguments_.slice(0, 2), ["review", "start"], "consent must execute the native review START operation");
-	const options = new Map<string, string>();
-	for (let index = 2; index < arguments_.length; index += 1) {
-		const token = arguments_[index]!;
-		assert.ok(token.startsWith("--"), `unexpected positional consent argument ${token}`);
-		const equals = token.indexOf("=");
-		const name = equals < 0 ? token : token.slice(0, equals);
-		const value = equals < 0 ? arguments_[++index] : token.slice(equals + 1);
-		assert.ok(value !== undefined && !value.startsWith("--"), `${name} must carry one value`);
-		assert.equal(options.has(name), false, `${name} must occur exactly once`);
-		options.set(name, value);
-	}
-	return options;
-}
-
-function assertConsentAnswerCall(calls: NativeCall[], answer: "granted" | "declined", cwd: string, consent: Awaited<ReturnType<typeof candidateConsent>>): void {
-	const options = nativeOptions(consentAnswerCall(calls, answer));
-	assert.deepEqual([...options.keys()].sort(), ["--agent", "--consent", "--contract", "--cwd", "--lineage", "--projection", "--target"]);
-	assert.equal(options.get("--contract"), consent.contract);
-	assert.equal(options.get("--cwd"), cwd);
-	assert.equal(options.get("--target"), consent.targetIdentity);
-	assert.equal(options.get("--projection"), consent.projection);
-	assert.equal(options.get("--agent"), consent.agent);
-	assert.match(options.get("--lineage") ?? "", /^review-[A-Za-z0-9._-]+$/);
-	assert.equal(options.get("--consent"), answer);
-}
-
 // ---------------------------------------------------------------------------
 // Kill switch round trip.
 // ---------------------------------------------------------------------------
@@ -150,10 +99,10 @@ test("dev-binary: global opt-in then clone disable and enable clears only the lo
 });
 
 // ---------------------------------------------------------------------------
-// Candidate-bound consent/v3 answers.
+// Enabled RDD starts the candidate automatically.
 // ---------------------------------------------------------------------------
 
-test("dev-binary: granted consent executes its exact candidate-bound invocation once and returns the current review binding", { skip: !RUNNABLE }, async (t) => {
+test("dev-binary: enabled RDD executes one candidate-bound START without consent", { skip: !RUNNABLE }, async (t) => {
 	const cwd = repository(t);
 	const workflowDirectory = join(cwd, ".github", "workflows");
 	execFileSync("mkdir", ["-p", workflowDirectory]);
@@ -164,41 +113,15 @@ test("dev-binary: granted consent executes its exact candidate-bound invocation 
 
 	const { native, calls } = journeyNative(DEV_BINARY!);
 	await enableReview(native, cwd);
-	const consent = await candidateConsent(native, cwd);
-	const answered = await native.answerConsent({ cwd, consent, answer: "granted" });
-	assert.equal(answered.kind, "started");
-	if (answered.kind === "started") {
-		assert.ok(answered.start.lineageId.length > 0);
-		assert.ok(answered.start.selectedLenses.length > 0);
-		assert.equal(answered.start.raw?.repository_context !== undefined, true);
-	}
-	assertConsentAnswerCall(calls, "granted", cwd, consent);
-});
-
-test("dev-binary: declined consent executes its exact candidate-bound invocation once and creates no lineage, result, or actor", { skip: !RUNNABLE }, async (t) => {
-	const cwd = repository(t);
-	const workflowDirectory = join(cwd, ".github", "workflows");
-	execFileSync("mkdir", ["-p", workflowDirectory]);
-	writeFileSync(join(workflowDirectory, "deploy.yml"), "name: x\n");
-	git(cwd, "add", ".");
-	git(cwd, "commit", "-qm", "initial");
-	writeFileSync(join(workflowDirectory, "deploy.yml"), "name: x\non: push\njobs:\n  deploy:\n    steps:\n      - run: curl -s | bash\n");
-
-	const { native, calls } = journeyNative(DEV_BINARY!);
-	await enableReview(native, cwd);
-	const consent = await candidateConsent(native, cwd);
-	const answered = await native.answerConsent({ cwd, consent, answer: "declined" });
-	assert.equal(answered.kind, "declined");
-	if (answered.kind === "declined") {
-		assert.equal(answered.consent, "declined_this_candidate");
-		assert.equal("lineageId" in answered, false);
-		assert.equal("start" in answered, false);
-		assert.equal("actor" in answered.raw, false);
-	}
-	assertConsentAnswerCall(calls, "declined", cwd, consent);
-	const after = await native.targetStatus({ cwd, agent: "pi" });
-	assert.equal(after.authority, undefined);
-	assert.equal("receipt" in after, false, "last-event STATUS no longer exposes receipt state");
+	const status = await native.targetStatus({ cwd, agent: "pi" });
+	const started = await native.start({ cwd, targetIdentity: status.targetIdentity });
+	assert.equal(started.action, "created");
+	assert.ok(started.lineageId.length > 0);
+	assert.ok(started.selectedLenses.length > 0);
+	assert.equal(started.raw?.repository_context !== undefined, true);
+	const startCalls = calls.filter((arguments_) => arguments_.at(0) === "review" && arguments_.at(1) === "start");
+	assert.equal(startCalls.length, 1, "enabled RDD must execute exactly one START");
+	assert.equal(startCalls[0]!.some((argument) => argument.startsWith("--consent")), false);
 });
 
 // ---------------------------------------------------------------------------

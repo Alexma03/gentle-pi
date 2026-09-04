@@ -11,7 +11,7 @@ import { OPAQUE_PI_REVIEWER_ARGV } from "../../lib/opaque-pi-reviewer-adapter.ts
 import { NativeReviewCliV216, type ExecFileAdapter, type NativeReviewCli } from "../../lib/native-review-cli.ts";
 import { reviewHostRelaySlots, runReviewHostRelaySlot } from "../../lib/review-host-relay.ts";
 import { GENTLE_PI_REVIEW_RELAY_CONTRACT, GENTLE_PI_REVIEW_RELAY_CONTRACT_ENV } from "../../lib/review-relay-contract.ts";
-import { decodeReviewConsentV3, decodeReviewStatusV3 } from "../../lib/review-integration-v2.ts";
+import { decodeReviewStartV4, decodeReviewStatusV3 } from "../../lib/review-integration-v2.ts";
 import { requireDevBinary } from "../support/native-binary-gate.ts";
 
 const DEV_BINARY = process.env.GENTLE_AI_DEV_BINARY;
@@ -353,13 +353,10 @@ test("dev-binary: POSIX Pi host relay captures one real B-target slot from an A-
 	assert.ok(execute!.arguments.some((argument) => argument.token === "--intended-untracked=selected.txt"), "rendered START must retain B's selected untracked path");
 	assert.equal(execute!.arguments.some((argument) => argument.token === "--intended-untracked=excluded.txt"), false, "rendered START must exclude B's unselected control");
 
-	const consent = decodeReviewConsentV3(runRenderedStart(RELAY_DEV_BINARY!, sessionA, execute!.operation, execute!.arguments.map((argument) => argument.token), environment));
-	const consentCalls: NativeProcessCall[] = [];
-	const started = await devNativeCli(RELAY_DEV_BINARY!, environment, consentCalls).answerConsent({ cwd: canonicalB, consent, answer: "granted" });
-	assert.equal(consentCalls.filter((call) => call.arguments[0] === "review" && call.arguments[1] === "start").length, 1, "granted consent must execute exactly one native START");
-	assert.equal(started.kind, "started");
-	if (started.kind !== "started") throw new Error("granted consent did not start review authority");
-	const lineage = started.start.lineageId;
+	const started = decodeReviewStartV4(runRenderedStart(RELAY_DEV_BINARY!, sessionA, execute!.operation, execute!.arguments.map((argument) => argument.token), environment));
+	assert.equal(started.action, "created");
+	assert.equal(started.state, "reviewing");
+	const lineage = started.lineageId;
 
 	const collecting = candidateStatus(RELAY_DEV_BINARY!, sessionA, canonicalB, environment, lineage);
 	const slots = reviewHostRelaySlots(collecting.nextTransition?.collect?.inputs ?? []);
@@ -454,7 +451,7 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 	const environment = reviewEnvironment(isolatedHome);
 	assert.ok(RELAY_DEV_BINARY, "GENTLE_PI_GENTLE_AI_DEV_BINARY is required for this devtest");
 	const isolatedModeBefore = record(candidateJson(RELAY_DEV_BINARY!, sessionA, ["review", "mode", "status", "--cwd", canonicalB, "--json"], environment), "isolated mode before setup");
-	assert.equal(record(isolatedModeBefore.status, "isolated mode before setup status").effective, "off", "the sandbox must start with its own RDD mode disabled");
+	assert.equal(record(isolatedModeBefore.status, "isolated mode before setup status").effective, "on", "the sandbox must inherit default-on RDD");
 	enableGlobalReview(RELAY_DEV_BINARY!, sessionA, canonicalB, environment);
 	const isolatedModeAfterSetup = candidateJson(RELAY_DEV_BINARY!, sessionA, ["review", "mode", "status", "--cwd", canonicalB, "--json"], environment);
 
@@ -487,25 +484,16 @@ test("dev-binary: Pi controller keeps an explicit B root and selected-untracked 
 	assert.equal(record(inspected.details, "combined inspect").workspace_root, canonicalB, "the A-session controller must expose B's canonical root");
 
 	const selectionBoundCallOffset = nativeCalls.length;
-	const startedPrompt = await controller.execute(
+	const started = await controller.execute(
 		"combined-start-target-b",
 		{ operation: "start", workspaceRoot: nestedTarget, input: JSON.stringify({ mode: "ordinary", ...selection }) },
 		undefined,
 		undefined,
 		sessionContext(sessionA),
 	);
-	const prompted = record(startedPrompt.details, "combined start consent");
-	assert.equal(prompted.outcome, "native-review-consent-required");
-	const consentBinding = stringValue(prompted.consent_binding, "combined consent binding");
-	const started = await controller.execute(
-		"combined-answer-consent",
-		{ operation: "answer-consent", workspaceRoot: nestedTarget, input: JSON.stringify({ consentBinding, answer: "granted" }) },
-		undefined,
-		undefined,
-		sessionContext(sessionA),
-	);
-	const startedDetails = record(started.details, "combined granted start");
+	const startedDetails = record(started.details, "combined automatic start");
 	assert.equal(startedDetails.workspace_root, canonicalB);
+	assert.equal(record(startedDetails.result, "combined start result").action, "created");
 	const lineage = stringValue(record(startedDetails.result, "combined start result").lineage_id, "combined lineage");
 
 	const fakePiDirectory = join(sessionA, "fake-pi-bin");
