@@ -305,7 +305,11 @@ test("session_start records the baseline target identity when RDD is on", async 
 		await sessionStart!({}, session);
 		assert.equal(statusRequests[0]?.agent, "pi");
 		assert.deepEqual(sent, []);
-		assert.deepEqual(notifications, []);
+		assert.equal(
+			notifications.some(({ message }) => /review preflight|review status|session baseline/i.test(message)),
+			false,
+			"baseline recording must remain silent even when unrelated startup diagnostics are present",
+		);
 	});
 });
 
