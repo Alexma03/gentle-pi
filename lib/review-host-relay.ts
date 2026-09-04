@@ -374,6 +374,7 @@ function collectGentleAiProcess(
 		const stderr: Buffer[] = [];
 		let timedOut = false;
 		let settled = false;
+		let processError: Error | undefined;
 		const timer = options.timeoutMs > 0
 			? setTimeout(() => {
 				timedOut = true;
@@ -385,14 +386,17 @@ function collectGentleAiProcess(
 		child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
 		child.on("error", (error) => {
 			if (settled) return;
-			settled = true;
+			processError = error;
 			if (timer !== undefined) clearTimeout(timer);
-			reject(error);
 		});
 		child.on("close", (code) => {
 			if (settled) return;
 			settled = true;
 			if (timer !== undefined) clearTimeout(timer);
+			if (processError !== undefined) {
+				reject(processError);
+				return;
+			}
 			resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode: code, timedOut, elapsedMs: Date.now() - startedAt });
 		});
 		if (options.stdin === undefined) {
