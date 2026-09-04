@@ -587,13 +587,13 @@ Use it when you want skills available normally but do not want Gentle AI to refr
 ## Included skills
 
 - `gentle-ai` — harness discipline for controlled Pi work.
-- `branch-pr` — reviewable PR preparation with optional issue linkage.
+- `gentle-ai-branch-pr` — reviewable PR preparation with optional issue linkage.
 - `gentle-ai-chained-pr` — split oversized changes into reviewable PR chains.
 - `work-unit-commits` — commits as reviewable work units.
 - `gentle-ai-judgment-day` — blind dual review, fixes, and re-judgment.
 - `cognitive-doc-design` — documentation that reduces cognitive load.
 - `comment-writer` — concise, warm, postable collaboration comments.
-- `gentle-ai-issue-creation` — issue workflow with checks before creation.
+- `gentle-ai-issue-creation` — explicit issue operations only; never a development prerequisite.
 - `gentle-ai-skill-creator` — create LLM-first skills with valid frontmatter.
 - `gentle-ai-skill-improver` — audit and upgrade existing LLM-first skills.
 
