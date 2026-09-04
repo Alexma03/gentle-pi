@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import {
 	existsSync,
 	lstatSync,
@@ -74,7 +74,12 @@ import {
 	ReviewHostRelayError,
 	reviewHostRelaySlots,
 	reviewProviderRoleVectorSlots,
+	resolveReviewHostRelaySubmission,
+	runReviewHostRelayReviewerGroup,
 	runReviewHostRelaySlot,
+	submitReviewHostRelayPreparedResult,
+	type ReviewHostRelayPreparedResult,
+	type ReviewHostRelayRequest,
 	type ReviewHostRelayRunner,
 	type ReviewHostRelaySlot,
 	type ReviewProviderRoleVectorSlot,
@@ -264,6 +269,64 @@ function renderOrchestratorPrompt(assetsDir: string): string {
 	return readFileSync(join(assetsDir, "orchestrator.md"), "utf8")
 		.replaceAll("{{GENTLE_PI_ASSETS_ROOT}}", assetsDir)
 		.trim();
+}
+
+// gentle-pi#560 / gentle-ai#4056, #4057: Gentle AI stopped writing a
+// runtime-specific review execution contract into Pi's generated
+// APPEND_SYSTEM composition on 2026-08-01. This package now injects the
+// mirrored provider contract bundle's own `orchestration/pi.md` text
+// instead, read once from the package-local mirror
+// (contracts/review-provider-contract-mirror/) and cached as the fully
+// rendered fragment for the process lifetime. It is deliberately NOT folded
+// into getOrchestratorPrompt/orchestratorPromptCache: that core prompt is
+// pinned at an 8192-byte budget (tests/orchestrator-budget.test.ts).
+const PROVIDER_CONTRACT_MIRROR_ROOT = join(PACKAGE_ROOT, "contracts", "review-provider-contract-mirror");
+const PROVIDER_CONTRACT_LOCK_FILE = "provider-contract.lock.json";
+const PI_ORCHESTRATION_RUNTIME = "pi";
+
+let reviewContractPromptFragmentCache: string | null | undefined;
+let reviewContractPromptMissingWarned = false;
+
+// Verifies the mirrored orchestration/pi.md bytes against the lock's digest before injection (gentle-ai R1/R3).
+function readMirroredReviewContractFragment(mirrorRoot: string = PROVIDER_CONTRACT_MIRROR_ROOT): string | null {
+	try {
+		const lockPath = join(mirrorRoot, PROVIDER_CONTRACT_LOCK_FILE);
+		const lock = JSON.parse(readFileSync(lockPath, "utf8")) as {
+			contract_semver?: unknown;
+			entries?: Record<string, unknown>;
+		};
+		if (typeof lock.contract_semver !== "string" || lock.contract_semver === "") return null;
+		const expectedSha256 = lock.entries?.[`orchestration/${PI_ORCHESTRATION_RUNTIME}.md`];
+		if (typeof expectedSha256 !== "string" || !/^[0-9a-f]{64}$/.test(expectedSha256)) return null;
+		const contractPath = join(mirrorRoot, `v${lock.contract_semver}`, "bundle", "orchestration", `${PI_ORCHESTRATION_RUNTIME}.md`);
+		const rawBytes = readFileSync(contractPath);
+		const actualSha256 = createHash("sha256").update(rawBytes).digest("hex");
+		if (!timingSafeEqual(Buffer.from(expectedSha256, "hex"), Buffer.from(actualSha256, "hex"))) return null;
+		const text = rawBytes.toString("utf8").trim();
+		if (text.length === 0) return null;
+		return `## Gentle AI review execution contract (mirrored provider bundle ${lock.contract_semver})\n\n${text}`;
+	} catch {
+		return null;
+	}
+}
+
+function loadReviewContractPromptFragment(
+	ctx: Pick<ExtensionContext, "hasUI" | "ui">,
+	mirrorRoot: string = PROVIDER_CONTRACT_MIRROR_ROOT,
+): string | null {
+	if (reviewContractPromptFragmentCache === undefined) {
+		reviewContractPromptFragmentCache = readMirroredReviewContractFragment(mirrorRoot);
+	}
+	if (reviewContractPromptFragmentCache === null && !reviewContractPromptMissingWarned) {
+		reviewContractPromptMissingWarned = true;
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				"Gentle AI review execution contract is unavailable: the mirrored provider bundle is missing, unreadable, or fails digest verification. Review preflight instructions will not be injected this session.",
+				"warning",
+			);
+		}
+	}
+	return reviewContractPromptFragmentCache;
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -2233,6 +2296,25 @@ interface ReviewCaptureParameters {
 	workspaceRoot?: string;
 }
 
+const REVIEW_CAPTURE_GROUP_PARAMETERS = {
+	type: "object",
+	additionalProperties: false,
+	required: ["lineageId", "collectBindings"],
+	properties: {
+		lineageId: { type: "string", minLength: 1, description: "Exact lineage from the current provider-issued collect transition." },
+		collectBindings: { type: "array", minItems: 1, items: { type: "string", minLength: 1 }, description: "Ordered JSON-serialized exact copies of the complete current materialize reviewer collect set." },
+		reviewerRunAcknowledged: { type: "boolean", description: "Required after the one group forecast; authorizes exactly the forecast reviewer runs." },
+		workspaceRoot: { type: "string", description: "Optional explicit existing Git worktree root, resolved with the controller's worktree confinement semantics." },
+	},
+} as const;
+
+interface ReviewCaptureGroupParameters {
+	lineageId: string;
+	collectBindings: readonly string[];
+	reviewerRunAcknowledged?: boolean;
+	workspaceRoot?: string;
+}
+
 const REVIEW_SCOPE_PARAMETERS = {
 	type: "object",
 	additionalProperties: false,
@@ -2323,6 +2405,23 @@ function parseReviewCaptureParameters(value: unknown): ReviewCaptureParameters {
 		collectBinding: value.collectBinding,
 		...(value.reviewerRunAcknowledged === undefined ? {} : { reviewerRunAcknowledged: value.reviewerRunAcknowledged }),
 		...(value.correctionLines === undefined ? {} : { correctionLines: value.correctionLines }),
+		...(value.workspaceRoot === undefined ? {} : { workspaceRoot: value.workspaceRoot }),
+	};
+}
+
+function parseReviewCaptureGroupParameters(value: unknown): ReviewCaptureGroupParameters {
+	if (!isRecord(value)) throw new Error("Review capture group parameters must be an object");
+	const allowed = new Set(["lineageId", "collectBindings", "reviewerRunAcknowledged", "workspaceRoot"]);
+	const unexpected = Object.keys(value).find((key) => !allowed.has(key));
+	if (unexpected !== undefined) throw new Error(`Review capture group does not accept ${unexpected}`);
+	if (!isCanonicalProcessString(value.lineageId)) throw new Error("Review capture group requires an exact non-empty lineageId");
+	if (!Array.isArray(value.collectBindings) || value.collectBindings.length === 0 || value.collectBindings.some((binding) => typeof binding !== "string" || binding.length === 0)) throw new Error("Review capture group requires one or more JSON-serialized collectBindings");
+	if (value.reviewerRunAcknowledged !== undefined && typeof value.reviewerRunAcknowledged !== "boolean") throw new Error("Review capture group reviewerRunAcknowledged must be boolean");
+	if (value.workspaceRoot !== undefined && typeof value.workspaceRoot !== "string") throw new Error("Review capture group workspaceRoot must be a string");
+	return {
+		lineageId: value.lineageId,
+		collectBindings: [...value.collectBindings],
+		...(value.reviewerRunAcknowledged === undefined ? {} : { reviewerRunAcknowledged: value.reviewerRunAcknowledged }),
 		...(value.workspaceRoot === undefined ? {} : { workspaceRoot: value.workspaceRoot }),
 	};
 }
@@ -2863,6 +2962,18 @@ function requiredStatusActionText(lineageId?: string): string {
 	return `Run target-scoped review.status${lineageId === undefined ? "" : ` for lineage ${lineageId}`} and follow only its declared action.`;
 }
 
+// The public collect projection is collectBindings: each provider collect
+// input serialized once as the opaque binding gentle_review_capture consumes.
+// The raw next_transition.collect.inputs carry the same bytes, so a four-lens
+// collect state used to cost about 28k characters per STATUS, INSPECT, or
+// START answer and again on every blocked retry (#465). The raw transition
+// keeps its kind and reason so the orchestrator still sees the collect state.
+function withoutRawCollectInputs(raw: Record<string, unknown>): Record<string, unknown> {
+	if (!isRecord(raw.next_transition)) return raw;
+	const { collect: _collect, ...transition } = raw.next_transition;
+	return { ...raw, next_transition: transition };
+}
+
 function mapNativeTargetStatus(operation: ReviewControllerOperation, status: ReviewStatusV3, requestedLineageId?: string): Record<string, unknown> {
 	if (
 		status.nextTransition?.kind === "collect" &&
@@ -2871,7 +2982,7 @@ function mapNativeTargetStatus(operation: ReviewControllerOperation, status: Rev
 		return {
 			operation,
 			status: "blocked",
-			result: status.raw,
+			result: withoutRawCollectInputs(status.raw),
 			collectBindings: publicReviewCaptureBindings(status),
 		};
 	}
@@ -3110,6 +3221,25 @@ export class PendingReviewConsentRegistry {
 
 const processPendingReviewConsentRegistry = new PendingReviewConsentRegistry();
 const processRetainedNativeStatusSelections = new Map<PendingReviewConsentSessionKey, Map<string, RetainedNativeStatusSelection>>();
+
+// gentle-pi#556 / gentle-ai#4051: nesting depth of named-agent (SDD phase
+// executor or other subagent) starts vs. ends for a session. Starts and
+// ends are paired so a subagent's own loop end never leaves the primary
+// loop's `agent_end` preflight suppressed for the rest of the session: a
+// named-agent start increments the depth, a matching end decrements it,
+// and a fresh primary-loop start resets it to 0.
+const processAgentEndSubagentDepth = new Map<PendingReviewConsentSessionKey, number>();
+
+// Target identities already nudged once per session, so the read-only
+// `agent_end` preflight reminder fires at most once per unreviewed candidate.
+const processAgentEndPreflightNudgedTargets = new Map<PendingReviewConsentSessionKey, Set<string>>();
+
+// gentle-pi#568: the target identity negotiated STATUS reported at
+// `session_start`, before this session touched the worktree. A candidate
+// already present at that point is the user's own pre-session work, not
+// something this session produced, so `agent_end` must not treat it as an
+// unreviewed candidate this session should be reminded about.
+const processAgentEndSessionBaseline = new Map<PendingReviewConsentSessionKey, string>();
 
 function pendingReviewConsentSessionKey(context: ExtensionContext | undefined, fallbackKey: symbol): PendingReviewConsentSessionKey {
 	try {
@@ -3489,8 +3619,14 @@ function requiresExplicitTargetLifecycleRoot(requested: string | undefined, sess
 // The runner is injectable for tests only; production always uses the real
 // relay in lib/review-host-relay.ts.
 let activeReviewHostRelayRunner: ReviewHostRelayRunner = runReviewHostRelaySlot;
+let activeReviewHostRelayReviewerGroupRunner = runReviewHostRelayReviewerGroup;
+let activeReviewHostRelaySubmissionRunner = submitReviewHostRelayPreparedResult;
 function setReviewHostRelayRunnerForTesting(runner?: ReviewHostRelayRunner): void {
 	activeReviewHostRelayRunner = runner ?? runReviewHostRelaySlot;
+}
+function setReviewHostRelayGroupRunnersForTesting(reviewerGroup?: typeof runReviewHostRelayReviewerGroup, submission?: typeof submitReviewHostRelayPreparedResult): void {
+	activeReviewHostRelayReviewerGroupRunner = reviewerGroup ?? runReviewHostRelayReviewerGroup;
+	activeReviewHostRelaySubmissionRunner = submission ?? submitReviewHostRelayPreparedResult;
 }
 
 const REVIEW_HOST_RELAY_RETRY_ACTION =
@@ -3574,23 +3710,25 @@ function decodeRelayLastEventClosure(submission: string): ReviewLastEventClosure
 }
 
 async function reconcileUnknownReviewCaptureFailure(
-	error: unknown,
+	error: unknown | undefined,
 	nativeReviewCli: NativeReviewCli,
 	cwd: string,
 	binding: ReviewLastEventClosureBinding,
 	selections: Map<string, RetainedNativeStatusSelection>,
 	route: RetainedNativeCaptureRoute | undefined,
+	expectedReviewCaptureSuffix?: readonly string[],
 ): Promise<Record<string, unknown>> {
-	const failure = nativeOperationFailure("gentle_review_capture", error);
-	if (!nativeMutationRequiresStatus(error)) return failure;
+	const failure = error === undefined ? undefined : nativeOperationFailure("gentle_review_capture", error);
+	if (error !== undefined && !nativeMutationRequiresStatus(error)) return failure;
 	try {
 		const status = await reconcileUnknownReviewLastEventCapture(nativeReviewCli, cwd, binding, route);
 		syncRetainedNativeStatusSelections(selections, cwd, status, route?.baseRef);
+		if (expectedReviewCaptureSuffix !== undefined && !hasExactReviewCaptureSuffix(status, expectedReviewCaptureSuffix)) return captureGroupAuthorityDrift(status);
 		return {
 			tool: "gentle_review_capture",
 			status: "reconciled",
 			outcome: "native-capture-outcome-unknown",
-			native_failure: failure,
+			...(failure === undefined ? {} : { native_failure: failure }),
 			lineage_id: binding.lineageId,
 			target_identity: status.targetIdentity,
 			provider_action: status.action,
@@ -3598,11 +3736,8 @@ async function reconcileUnknownReviewCaptureFailure(
 			result: status.raw,
 		};
 	} catch (statusError) {
-		return {
-			...failure,
-			outcome: "native-capture-status-reconciliation-failed",
-			reconciliation_failure: nativeOperationFailure("gentle_review_capture", statusError),
-		};
+		const reconciliationFailure = nativeOperationFailure("gentle_review_capture", statusError);
+		return { ...(failure ?? reconciliationFailure), outcome: "native-capture-status-reconciliation-failed", reconciliation_failure: reconciliationFailure };
 	}
 }
 
@@ -3797,9 +3932,16 @@ function clearReviewTransportProbeForTesting(nativeReviewCli: NativeReviewCli | 
 }
 
 function hostTransportUnavailable(
-	operation: ReviewControllerOperation | "gentle_review_capture",
+	operation: ReviewControllerOperation | "gentle_review_capture" | "gentle_review_capture_group",
 	transport: ReviewTransportRefusal,
 ): Record<string, unknown> {
+	// #535: a provider-printed raw `gentle-ai review ...` continuation is a dead
+	// end in this runtime — Pi is not in the provider's immutable review runtime
+	// list, so every CLI-only exit refuses with this same transport code. The
+	// refusal therefore names the continuation that runs in this surface (the
+	// gentle_review / gentle_review_capture wrapper tools) while the provider's
+	// own diagnostic stays intact in relay_transport as evidence.
+	const isCapture = operation === "gentle_review_capture" || operation === "gentle_review_capture_group";
 	return {
 		...(operation === "gentle_review_capture" ? { tool: operation } : { operation }),
 		status: "blocked",
@@ -3808,7 +3950,12 @@ function hostTransportUnavailable(
 		relay_transport: transport,
 		mutation_performed: false,
 		mutation_outcome: "none",
-		next_action: "Install a native gentle-ai provider that supports `review status --agent pi`, then call fresh STATUS and submit its exact one-slot capture binding. Pi never falls back to an agent-less lifecycle route.",
+		wrapper_continuation: {
+			tool: "gentle_review",
+			operation: REVIEW_CONTROLLER_OPERATION.INSPECT,
+			...(isCapture ? { then: operation } : {}),
+		},
+		next_action: `Install a native gentle-ai provider that supports \`review status --agent pi\`, then re-enter negotiated STATUS with gentle_review {"operation":"inspect"}${!isCapture ? " and follow the transition it returns" : operation === "gentle_review_capture_group" ? " and resubmit gentle_review_capture_group with the complete exact ordered collectBindings that fresh STATUS returns" : " and resubmit gentle_review_capture with the exact one-slot collectBinding that fresh STATUS returns"}. A provider-printed raw CLI continuation does not run in this runtime, and Pi never falls back to an agent-less lifecycle route.`,
 	};
 }
 
@@ -3839,6 +3986,45 @@ async function negotiatedStatusForHostTransport(
 		reviewTransportRefusalByProvider.set(provider, transport);
 		return { transport };
 	}
+}
+
+// gentle-pi#568: resolves the current negotiated review STATUS for a session,
+// under the exact guards `agent_end` uses to decide whether to nudge: a
+// native review CLI with both `reviewMode` and `targetStatus`, a UI-bearing
+// context, and RDD effectively on. Returns `undefined` on any missing guard,
+// an effective-off mode, or any STATUS error or transport refusal, so both
+// `session_start` (recording a baseline) and `agent_end` (deciding whether to
+// nudge) resolve the same target identity through the same path.
+async function resolveNegotiatedReviewStatusForSession(
+	nativeReviewCli: NativeReviewCli | null,
+	ctx: ExtensionContext,
+	sessionKey: PendingReviewConsentSessionKey,
+): Promise<ReviewStatusV3 | undefined> {
+	if (nativeReviewCli?.reviewMode === undefined || nativeReviewCli.targetStatus === undefined) return undefined;
+	if (ctx.hasUI !== true) return undefined;
+	let modeEffective: "on" | "off";
+	try {
+		const mode = await nativeReviewCli.reviewMode({ cwd: ctx.cwd, operation: NATIVE_REVIEW_MODE_OPERATION.STATUS });
+		modeEffective = mode.status.effective;
+	} catch {
+		return undefined;
+	}
+	if (modeEffective === "off") return undefined;
+	try {
+		const retainedSelections = ((key: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(key) ?? processRetainedNativeStatusSelections.set(key, new Map()).get(key)!)(sessionKey);
+		const negotiated = await negotiatedStatusForHostTransport(nativeReviewCli, { cwd: ctx.cwd }, retainedSelections, ctx.cwd);
+		return negotiated.status;
+	} catch {
+		return undefined;
+	}
+}
+
+// gentle-pi#556 / gentle-ai#4051: the exact once-per-candidate reminder sent
+// through `agent_end`. It never runs START itself, so it names the one
+// supported continuation (gentle_review inspect). The globally enabled RDD
+// switch is already the user's authorization, so no candidate consent exists.
+function renderAgentEndReviewPreflightMessage(targetIdentity: string): string {
+	return `Receipt-driven development is enabled, and this worktree holds an unreviewed candidate (target ${targetIdentity}). By the review contract entry rule, run the review preflight before reporting completion.\n\nCall the gentle_review tool with {"operation":"inspect"} and follow the transition it returns; it currently offers review.start for this target. The enabled RDD switch is complete authorization, so continue the returned lifecycle without asking for candidate consent.\n\nThis extension never starts review itself. This reminder is sent once per candidate.`;
 }
 
 function canonicalReviewCaptureBinding(value: unknown): string {
@@ -3875,11 +4061,11 @@ function publicReviewCaptureBindings(status: ReviewStatusV3): readonly PublicRev
 	}));
 }
 
-function captureBindingRejected(reason: string): Record<string, unknown> {
+function captureBindingRejected(reason: string, group = false): Record<string, unknown> {
 	return {
-		tool: "gentle_review_capture",
+		tool: group ? "gentle_review_capture_group" : "gentle_review_capture",
 		status: "blocked",
-		outcome: "capture-binding-rejected",
+		outcome: group ? "capture-group-rejected" : "capture-binding-rejected",
 		reason,
 		mutation_performed: false,
 		mutation_outcome: "none",
@@ -3939,6 +4125,89 @@ function selectExactReviewCapture(
 
 function isSelectedReviewCapture(value: SelectedReviewCapture | Record<string, unknown>): value is SelectedReviewCapture {
 	return "input" in value && "binding" in value;
+}
+
+function captureGroupRejected(reason: string): Record<string, unknown> { return captureBindingRejected(reason, true); }
+
+function hasExactReviewCaptureSuffix(status: ReviewStatusV3, expected: readonly string[]): boolean {
+	const current = status.nextTransition?.kind === "collect"
+		? (status.nextTransition.collect?.inputs ?? []).filter((input) => input.captureOperation === "review.capture-result").map(canonicalReviewCaptureBinding)
+		: [];
+	return current.length === expected.length && current.every((binding, index) => binding === expected[index]);
+}
+
+function captureGroupAuthorityDrift(status: ReviewStatusV3): Record<string, unknown> {
+	return { ...captureGroupRejected("authoritative STATUS does not offer exactly the unsubmitted reviewer suffix"), outcome: "capture-group-authority-drift", reconciliation: status.raw, authority_applicability: status.applicability, provider_action: status.action, next_transition: status.nextTransition };
+}
+
+interface SelectedReviewCaptureGroup {
+	slots: readonly ReviewHostRelaySlot[];
+	binding: ReviewLastEventClosureBinding;
+}
+
+function selectExactReviewCaptureGroup(
+	status: ReviewStatusV3,
+	lineageId: string,
+	canonicalBindings: readonly string[],
+): SelectedReviewCaptureGroup | Record<string, unknown> {
+	const inputs = status.nextTransition?.kind === "collect" ? status.nextTransition.collect?.inputs ?? [] : [];
+	const slots = reviewHostRelaySlots(inputs);
+	if (inputs.length === 0 || slots.length !== inputs.length) {
+		return captureGroupRejected("current STATUS does not offer an exclusively materialize reviewer capture group");
+	}
+	const currentBindings = inputs.map((input) => canonicalReviewCaptureBinding(input));
+	if (new Set(currentBindings).size !== currentBindings.length || canonicalBindings.length !== currentBindings.length || canonicalBindings.some((binding, index) => binding !== currentBindings[index])) {
+		return captureGroupRejected("collectBindings must be the complete distinct current reviewer group in exact provider order");
+	}
+	const first = selectExactReviewCapture(status, lineageId, currentBindings[0]!);
+	if (!isSelectedReviewCapture(first)) return captureGroupRejected(String(first.reason ?? "current STATUS rejected a reviewer binding"));
+	const expectedRevision = exactCollectArgument(inputs[0]!, "expected-revision");
+	const repositoryContext = exactCollectArgument(inputs[0]!, "repository-context");
+	const statusTargetIdentity = status.targetIdentity;
+	const currentRepositoryContext = status.repositoryContext;
+	if (!isCanonicalProcessString(expectedRevision) || !isCanonicalProcessString(repositoryContext) || currentRepositoryContext === undefined || expectedRevision !== currentRepositoryContext.revision) {
+		return captureGroupRejected("current STATUS does not bind one matching expected revision and repository context for the reviewer group");
+	}
+	if (currentRepositoryContext.handle !== repositoryContext || currentRepositoryContext.targetIdentity !== statusTargetIdentity) {
+		return captureGroupRejected("current STATUS repository context does not match the reviewer group binding");
+	}
+	const lenses = new Set<string>(), orders = new Set<string>(), subjectHashes = new Set<string>();
+	for (let index = 0; index < inputs.length; index += 1) {
+		const input = inputs[index]!, slot = slots[index]!, subject = input.artifactSubject;
+		const slotLineage = exactCollectArgument(input, "lineage"), target = exactCollectArgument(input, "target");
+		const revision = exactCollectArgument(input, "expected-revision"), context = exactCollectArgument(input, "repository-context");
+		const subjectHash = exactCollectArgument(input, "subject-hash"), order = slot.order, lens = slot.lens;
+		if (
+			subject === undefined || slot.submission === undefined || slotLineage !== lineageId || target !== statusTargetIdentity
+			|| revision !== expectedRevision || context !== repositoryContext || subjectHash !== subject.subjectHash || order === undefined || lens === undefined
+			|| subject.lineageId !== lineageId || subject.authorityRevision !== expectedRevision || subject.targetIdentity !== statusTargetIdentity
+			|| lens !== subject.lens || String(subject.selectedOrder) !== order
+		) return captureGroupRejected("current STATUS carries an incomplete or mismatched materialize reviewer binding");
+		try { resolveReviewHostRelaySubmission(slot.submission); } catch { return captureGroupRejected("current STATUS carries an invalid provider reviewer submission descriptor"); }
+		const value = slot.submission.values[0];
+		if (slot.submission.operationToken !== "capture-result" || value?.slot !== "reviewer_result" || value.domain !== "artifact_path_or_stdin" || lenses.has(lens) || orders.has(order) || subjectHashes.has(subject.subjectHash)) {
+			return captureGroupRejected("current STATUS carries duplicate or invalid reviewer slot identities");
+		}
+		lenses.add(lens); orders.add(order); subjectHashes.add(subject.subjectHash);
+	}
+	return { slots, binding: first.binding };
+}
+
+function reviewHostRelayGroupFailure(
+	error: ReviewHostRelayError,
+	slots: readonly ReviewHostRelaySlot[],
+	prepared: readonly ReviewHostRelayPreparedResult[],
+	submitted: number,
+): Record<string, unknown> {
+	return {
+		tool: "gentle_review_capture_group",
+		status: "blocked",
+		outcome: error.kind === REVIEW_HOST_RELAY_FAILURE.RELAY_UNAVAILABLE ? "pi-host-relay-unavailable" : error.kind === REVIEW_HOST_RELAY_FAILURE.HANDSHAKE_REFUSED ? "pi-host-relay-handshake-refused" : error.kind === REVIEW_HOST_RELAY_FAILURE.PI_TIMED_OUT ? "pi-host-relay-timeout" : "pi-host-relay-transport-failure",
+		reason: error.message,
+		failure: reviewHostRelayFailureReport(error),
+		...reviewHostRelayGroupProgress(slots, prepared, submitted),
+		next_action: error.kind === REVIEW_HOST_RELAY_FAILURE.SUBMISSION_REFUSED ? REVIEW_HOST_RELAY_REFUSED_ACTION : REVIEW_HOST_RELAY_RETRY_ACTION,
+	};
 }
 
 async function executeReviewCaptureOperation(
@@ -4044,6 +4313,118 @@ async function executeReviewCaptureOperation(
 		return await executeProviderRoleVectorCapture(providerRoleSlots[0]!, nativeReviewCli, cwd, selected.binding, retainedUntrackedSelections, route, signal);
 	}
 	return captureBindingRejected(`unsupported provider capture operation: ${selected.input.captureOperation}`);
+}
+
+function reviewHostRelayGroupDiagnostics(slots: readonly ReviewHostRelaySlot[], prepared: readonly ReviewHostRelayPreparedResult[], count: number): readonly Record<string, unknown>[] {
+	return slots.slice(0, count).map((slot, index) => ({
+		...(slot.lens === undefined ? {} : { lens: slot.lens }),
+		...(slot.order === undefined ? {} : { order: slot.order }),
+		...(slot.subjectHash === undefined ? {} : { subject_hash: slot.subjectHash }),
+		prompt_bytes: prepared[index]?.promptByteLength,
+		result_bytes: prepared[index]?.resultByteLength,
+	}));
+}
+
+function reviewHostRelayGroupProgress(
+	slots: readonly ReviewHostRelaySlot[],
+	prepared: readonly ReviewHostRelayPreparedResult[],
+	submitted: number,
+	uncertain = false,
+): Record<string, unknown> {
+	const outcome = submitted === 0 ? uncertain ? "unknown" : "none" : uncertain ? "partial_unknown" : submitted === slots.length ? "completed" : "partial";
+	return {
+		prepared_reviewers: prepared.length,
+		submitted_reviewers: submitted,
+		host_relay: { transport: "pi_host_relay", reviewers: reviewHostRelayGroupDiagnostics(slots, prepared, submitted) },
+		...(submitted === 0 && uncertain ? { mutation_outcome: outcome } : { mutation_performed: submitted > 0, mutation_outcome: outcome }),
+	};
+}
+
+async function executeReviewCaptureGroupOperation(
+	parametersValue: unknown,
+	sessionCwd: string,
+	nativeReviewCli: NativeReviewCli | null,
+	signal?: AbortSignal,
+	candidateViews: CandidateViewRegistry | null = new CandidateViewRegistry(),
+	retainedUntrackedSelections: Map<string, RetainedNativeStatusSelection> = new Map(),
+	requireRegisteredRoute = false,
+): Promise<Record<string, unknown>> {
+	const parameters = parseReviewCaptureGroupParameters(parametersValue);
+	if (nativeReviewCli === null || nativeReviewCli.targetStatus === undefined) return { ...captureGroupRejected("native target STATUS is unavailable"), outcome: "native-status-unsupported" };
+	const canonicalBindings = parameters.collectBindings.map((binding) => parseCanonicalReviewCaptureBinding(binding));
+	const cwd = resolveReviewControllerWorkspaceRoot(parameters.workspaceRoot, sessionCwd, candidateViews, parameters.lineageId);
+	const routes = canonicalBindings.map((binding) => readRetainedNativeCaptureRoute(retainedUntrackedSelections, binding));
+	const route = routes[0];
+	if (requireRegisteredRoute && (route === undefined || routes.some((candidate) => candidate === undefined || candidate.workspaceRoot !== cwd || candidate.lineageId !== parameters.lineageId || candidate.baseRef !== route.baseRef))) {
+		return captureGroupRejected("collectBindings are unknown, expired, or belong to different session routes");
+	}
+	const freshStatus = () => negotiatedStatusForHostTransport(nativeReviewCli, {
+		cwd, lineageId: parameters.lineageId,
+		...(route?.baseRef === undefined ? {} : { baseRef: route.baseRef, committedOnly: true }),
+		...readRetainedNativeUntrackedSelection(retainedUntrackedSelections, cwd, parameters.lineageId),
+		...(signal === undefined ? {} : { signal }),
+	}, retainedUntrackedSelections, cwd);
+	let status: ReviewStatusV3;
+	try {
+		const negotiated = await freshStatus();
+		if (negotiated.transport !== undefined) return hostTransportUnavailable("gentle_review_capture_group", negotiated.transport);
+		status = negotiated.status!;
+	} catch (error) {
+		return { ...captureGroupRejected(error instanceof Error ? error.message : String(error)), outcome: "native-status-failed" };
+	}
+	const group = selectExactReviewCaptureGroup(status, parameters.lineageId, canonicalBindings);
+	if (!("slots" in group && "binding" in group)) return group;
+	if (parameters.reviewerRunAcknowledged !== true) {
+		return {
+			tool: "gentle_review_capture_group",
+			status: "blocked",
+			outcome: "reviewer-model-run-forecast",
+			cost_forecast: { transport: "pi_host_relay", model_runs: group.slots.length, lenses: group.slots.map((slot) => slot.lens).filter((lens): lens is string => lens !== undefined) },
+			mutation_performed: false,
+			mutation_outcome: "none",
+		};
+	}
+	const requests: readonly ReviewHostRelayRequest[] = group.slots.map((slot) => ({
+		captureArgumentTokens: slot.captureArgumentTokens,
+		targetCwd: cwd,
+		submission: slot.submission!,
+		...(signal === undefined ? {} : { signal }),
+	}));
+	let prepared: readonly ReviewHostRelayPreparedResult[];
+	try {
+		prepared = await activeReviewHostRelayReviewerGroupRunner(requests);
+		if (prepared.length !== requests.length) throw new Error("Pi host relay reviewer group returned a different number of prepared results");
+	} catch (error) {
+		return error instanceof ReviewHostRelayError
+			? reviewHostRelayGroupFailure(error, group.slots, [], 0)
+			: { ...captureGroupRejected(error instanceof Error ? error.message : String(error)), outcome: "pi-host-relay-reviewer-group-failed" };
+	}
+	for (let index = 0; index < prepared.length; index += 1) {
+		let current: SelectedReviewCapture | Record<string, unknown>;
+		try {
+			const negotiated = await freshStatus();
+			if (negotiated.transport !== undefined) return { ...hostTransportUnavailable("gentle_review_capture_group", negotiated.transport), ...reviewHostRelayGroupProgress(group.slots, prepared, index) };
+			if (!hasExactReviewCaptureSuffix(negotiated.status!, canonicalBindings.slice(index))) return { ...captureGroupAuthorityDrift(negotiated.status!), ...reviewHostRelayGroupProgress(group.slots, prepared, index) };
+			current = selectExactReviewCapture(negotiated.status!, parameters.lineageId, canonicalBindings[index]!);
+		} catch (error) {
+			return { ...captureGroupRejected(error instanceof Error ? error.message : String(error)), outcome: "native-status-failed", ...reviewHostRelayGroupProgress(group.slots, prepared, index) };
+		}
+		if (!isSelectedReviewCapture(current)) return { ...captureGroupRejected(String(current.reason ?? "current STATUS rejected a reviewer binding")), ...reviewHostRelayGroupProgress(group.slots, prepared, index) };
+		try {
+			const result = await activeReviewHostRelaySubmissionRunner(prepared[index]!);
+			const closure = decodeRelayLastEventClosure(result.submission);
+			if (closure !== undefined) {
+				const closed = mapAndClearLastEventClosure(closure, current.binding, retainedUntrackedSelections, cwd);
+				return { ...closed, tool: "gentle_review_capture_group", ...reviewHostRelayGroupProgress(group.slots, prepared, index + 1) };
+			}
+		} catch (error) {
+			if (error instanceof ReviewHostRelayError && error.mutationOutcome !== "unknown") return reviewHostRelayGroupFailure(error, group.slots, prepared, index);
+			const reconciled = await reconcileUnknownReviewCaptureFailure(error, nativeReviewCli, cwd, current.binding, retainedUntrackedSelections, route);
+			return { ...reconciled, tool: "gentle_review_capture_group", ...reviewHostRelayGroupProgress(group.slots, prepared, index, true), ...(error instanceof ReviewHostRelayError ? { failure: reviewHostRelayFailureReport(error), reason: error.message } : {}) };
+		}
+	}
+	const reconciled = await reconcileUnknownReviewCaptureFailure(undefined, nativeReviewCli, cwd, group.binding, retainedUntrackedSelections, route, canonicalBindings.slice(prepared.length));
+	return { ...reconciled, tool: "gentle_review_capture_group", outcome: reconciled.outcome === "capture-group-authority-drift" ? reconciled.outcome : reconciled.status === "reconciled" ? "native-reviewer-group-status-reconciled" : "native-reviewer-group-status-reconciliation-failed", ...reviewHostRelayGroupProgress(group.slots, prepared, prepared.length) };
 }
 
 type DispatchHydrationOutcome =
@@ -4740,11 +5121,15 @@ export const __testing = {
 	nativeStatusUnsupported,
 	executeReviewControllerOperation,
 	executeReviewCaptureOperation,
+	executeReviewCaptureGroupOperation,
 	setReviewHostRelayRunnerForTesting,
+	setReviewHostRelayGroupRunnersForTesting,
 	clearReviewTransportProbeForTesting,
 	renderSddModelPanel: renderSddModelPanelForTesting,
 	getOrchestratorPrompt,
 	renderOrchestratorPrompt,
+	loadReviewContractPromptFragment,
+	readMirroredReviewContractFragment,
 	resolveControllerSddStatus,
 	resolveControllerSddStatusRouting,
 	resolveStartupControllerSddStatus,
@@ -4959,6 +5344,9 @@ function createGentleAiExtensionForTesting(
 			const sessionKey = pendingReviewConsentSessionKey(context, pendingReviewConsentFallbackKey);
 			cleanupAllPendingReviewConsents(pendingReviewConsentRegistry, sessionKey);
 			processRetainedNativeStatusSelections.delete(sessionKey);
+			processAgentEndSubagentDepth.delete(sessionKey);
+			processAgentEndPreflightNudgedTargets.delete(sessionKey);
+			processAgentEndSessionBaseline.delete(sessionKey);
 			if (dependencies.subagentRuntime === undefined) subagentRuntime?.dispose();
 		});
 
@@ -4981,6 +5369,38 @@ function createGentleAiExtensionForTesting(
 		async execute(_toolCallId, parameters) {
 			const input = parameters as ReviewScopeParameters;
 			const details = readCandidateContextManifestPage(input.manifest, input.sha256, input.cursor ?? 0);
+			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
+		},
+	});
+
+	pi.registerTool({
+		name: "gentle_review_capture_group",
+		label: "Gentle Review Capture Group",
+		description: "Capture one complete provider-issued materialize reviewer group. It validates the exact ordered current collect set, forecasts its bounded model cost, runs reviewers concurrently, and admits outputs one at a time in provider order.",
+		promptSnippet: "Use one complete exact current STATUS materialize reviewer group; acknowledge its forecast before the grouped run.",
+		promptGuidelines: [
+			"Pass only lineageId, the complete ordered collectBindings array from one current STATUS result, and reviewerRunAcknowledged after its forecast. Never mix, reorder, duplicate, or partially select bindings.",
+			"The group materializes and runs independent reviewers concurrently, but rechecks STATUS before every provider-ordered submission. It stops on a closure, correction, drift, or uncertain capture outcome; it never follows another transition or replays a prepared output.",
+		],
+		parameters: REVIEW_CAPTURE_GROUP_PARAMETERS,
+		executionMode: "sequential",
+		renderCall(_args, theme, context) {
+			return renderGentleAiLifecycleCall("review capture group", theme, context as GentleAiRenderContext | undefined);
+		},
+		renderResult(result, options) {
+			return renderGentleAiResult(result, options);
+		},
+		async execute(_toolCallId, parameters, signal, _onUpdate, ctx) {
+			if (signal?.aborted) throw new Error("Review capture group was cancelled");
+			const details = await executeReviewCaptureGroupOperation(
+				parameters,
+				ctx.cwd,
+				nativeReviewCli,
+				signal,
+				candidateViews,
+				((sessionKey: PendingReviewConsentSessionKey) => processRetainedNativeStatusSelections.get(sessionKey) ?? processRetainedNativeStatusSelections.set(sessionKey, new Map()).get(sessionKey)!)(pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey)),
+				true,
+			);
 			return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 		},
 	});
@@ -5117,6 +5537,19 @@ function createGentleAiExtensionForTesting(
 				);
 			}
 		}
+		// gentle-pi#568: record the target identity STATUS reports right now,
+		// before this session does anything, as the baseline `agent_end` skips
+		// later. Best-effort and silent: it never notifies and never lets a
+		// STATUS failure fail session start.
+		try {
+			const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
+			const status = await resolveNegotiatedReviewStatusForSession(nativeReviewCli, ctx, sessionKey);
+			if (status?.targetIdentity !== undefined) {
+				processAgentEndSessionBaseline.set(sessionKey, status.targetIdentity);
+			}
+		} catch {
+			// Baseline recording is best-effort only; never surface or throw.
+		}
 	});
 
 	pi.on("input", async (event, ctx) => {
@@ -5130,6 +5563,12 @@ function createGentleAiExtensionForTesting(
 	pi.on("before_agent_start", async (event, ctx) => {
 		const isSddAgent = isSddAgentStartEvent(event);
 		const isNamedAgent = isNamedAgentStartEvent(event);
+		const subagentDepthKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
+		if (isSddAgent || isNamedAgent) {
+			processAgentEndSubagentDepth.set(subagentDepthKey, (processAgentEndSubagentDepth.get(subagentDepthKey) ?? 0) + 1);
+		} else {
+			processAgentEndSubagentDepth.set(subagentDepthKey, 0);
+		}
 		if (isSddAgent && !getSddPreflightPreferences(ctx)) {
 			await runSddPreflight(ctx);
 		}
@@ -5150,9 +5589,59 @@ function createGentleAiExtensionForTesting(
 		const gentlePrompt = isNamedAgent || isSddAgent
 			? ""
 			: `\n\n${buildGentlePrompt(readPersonaMode(ctx.cwd), ctx.cwd)}`;
+		// gentle-pi#560 / gentle-ai#4056, #4057: inject the mirrored provider
+		// contract bundle's review execution contract for the primary session
+		// only, and only when a native review CLI is actually present.
+		const reviewContractPrompt =
+			!isNamedAgent && !isSddAgent && nativeReviewCli !== null
+				? (() => {
+					const fragment = loadReviewContractPromptFragment(ctx);
+					return fragment === null ? "" : `\n\n${fragment}`;
+				})()
+				: "";
 		return {
-			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}${nativeStatusPrompt}`,
+			systemPrompt: `${event.systemPrompt}${gentlePrompt}${sddPrompt}${nativeStatusPrompt}${reviewContractPrompt}`,
 		};
+	});
+
+	// gentle-pi#556 / gentle-ai#4051: with RDD enabled, the agent could finish
+	// an authorized implementation and report completion without ever running
+	// the review STATUS preflight. This handler is read-only and idempotent: it
+	// never runs START and never writes a file. It only sends one turn-triggering
+	// reminder, at most once per unreviewed target identity per session.
+	// gentle-pi#568: a candidate matching the baseline `session_start`
+	// recorded predates this session's own work and is skipped rather than
+	// nudged, so a worktree already dirty from the user's own edits does not
+	// draw a reminder about work this session never produced.
+	pi.on("agent_end", async (_event, ctx) => {
+		if (nativeReviewCli?.reviewMode === undefined || nativeReviewCli.targetStatus === undefined) return;
+		if (ctx.hasUI !== true) return;
+		const sessionKey = pendingReviewConsentSessionKey(ctx, pendingReviewConsentFallbackKey);
+		const subagentDepth = processAgentEndSubagentDepth.get(sessionKey) ?? 0;
+		if (subagentDepth > 0) {
+			processAgentEndSubagentDepth.set(sessionKey, subagentDepth - 1);
+			return;
+		}
+		const status = await resolveNegotiatedReviewStatusForSession(nativeReviewCli, ctx, sessionKey);
+		if (status === undefined) return;
+		if (status.nextTransition?.kind !== "execute" || status.nextTransition.execute.operation !== "review.start") return;
+		const targetIdentity = status.targetIdentity;
+		if (processAgentEndSessionBaseline.get(sessionKey) === targetIdentity) return;
+		let nudged = processAgentEndPreflightNudgedTargets.get(sessionKey);
+		if (nudged === undefined) {
+			nudged = new Set<string>();
+			processAgentEndPreflightNudgedTargets.set(sessionKey, nudged);
+		}
+		if (nudged.has(targetIdentity)) return;
+		nudged.add(targetIdentity);
+		pi.sendMessage(
+			{
+				customType: "gentle-pi.review-preflight",
+				content: renderAgentEndReviewPreflightMessage(targetIdentity),
+				display: true,
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
 	});
 
 	pi.on("tool_call", async (event, ctx) => {

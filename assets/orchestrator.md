@@ -85,7 +85,7 @@ For skill-shaped requests, do not treat injected `<available_skills>` as complet
 
 ## Gentle AI RDD ownership
 
-Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. The personal Gentle AI fork defaults RDD on; respect any explicit global or clone-local disable and never reactivate it automatically. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.
+This package injects the verified mirrored provider-bundle review execution contract into the primary session's system prompt at start. The personal Gentle AI fork defaults RDD on; respect any explicit global or clone-local disable and never reactivate it automatically. An enabled switch is complete authorization without candidate-scoped consent. Follow only that exact mirrored contract; if absent or unsupported, this package does not invent or fall back.
 
 ## Safety
 
