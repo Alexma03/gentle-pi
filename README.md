@@ -87,7 +87,7 @@ The latest RDD package installs Gentle AI only into its private `.gentle-ai/` di
 Required subagent runtime and recommended memory integration:
 
 ```bash
-pi install npm:pi-subagents@0.63.0
+pi install npm:pi-subagents@0.65.0
 pi install npm:gentle-engram
 ```
 

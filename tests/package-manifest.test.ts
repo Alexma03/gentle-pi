@@ -265,8 +265,8 @@ test("package manifest ships and runs the checked-in package-local Gentle AI ins
 	assert.match(verifier, /"scripts\/install-gentle-ai\.mjs"/);
 	assert.match(verifier, /"scripts\/gentle-ai-installer\.mjs"/);
 	assert.match(verifier, /"lib\/gentle-ai-binary\.ts"/);
-	assert.match(readme, /pi install npm:pi-subagents@0\.63\.0/);
-	assert.doesNotMatch(readme, /pi-subagents@0\.64\.0/);
+	assert.match(readme, /pi install npm:pi-subagents@0\.65\.0/);
+	assert.doesNotMatch(readme, /pi-subagents@0\.63\.0/);
 });
 
 test("package manifest keeps package-owned UI extensions without retired wrappers", () => {
