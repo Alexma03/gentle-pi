@@ -6,7 +6,7 @@ import test from "node:test";
 const ROOT = join(import.meta.dirname, "..");
 const ASSETS = join(ROOT, "assets");
 const BOUNDARY =
-	"Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.";
+	"Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. The personal Gentle AI fork defaults RDD on; respect any explicit global or clone-local disable and never reactivate it automatically. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.";
 
 function read(relativePath: string): string {
 	return readFileSync(join(ROOT, relativePath), "utf8");

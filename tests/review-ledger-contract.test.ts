@@ -311,7 +311,7 @@ test("Judgment Day skill and prompts preserve bounded fix and re-judgment author
 });
 
 test("orchestrator, injected skill, and README defer RDD lifecycle ownership to Gentle AI", () => {
-	const boundary = "Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.";
+	const boundary = "Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. The personal Gentle AI fork defaults RDD on; respect any explicit global or clone-local disable and never reactivate it automatically. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.";
 	const orchestrator = union(ORCHESTRATOR);
 	assert.ok(orchestrator.includes(boundary), "orchestrator must carry the sole static ownership boundary");
 

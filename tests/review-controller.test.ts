@@ -421,7 +421,7 @@ test("shipped controller fails closed while static prompts defer RDD lifecycle o
 	assert.match(toolContract, /ambiguous START output.*target-scoped native status.*declared action.*ambiguous gentle_review_capture.*never replays/is);
 	assert.doesNotMatch(toolContract, /START throws.*lineage does not exist/is);
 
-	const boundary = "Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.";
+	const boundary = "Gentle AI dynamically supplies runtime-specific RDD instructions via generated Pi APPEND_SYSTEM composition. The personal Gentle AI fork defaults RDD on; respect any explicit global or clone-local disable and never reactivate it automatically. Follow only those exact native instructions; if absent or unsupported, this package does not invent or fall back.";
 	const core = readFileSync("assets/orchestrator.md", "utf8");
 	assert.match(core, new RegExp(boundary.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 

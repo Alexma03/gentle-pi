@@ -176,10 +176,9 @@ export const NATIVE_REVIEW_MODE_SCOPE = {
 // stream while still succeeding. That last qualifier is what keeps this list
 // honest: v2.4.0 deleted reviewConsentSkippedDefaultProvenance ("Reviews are
 // on by default; this was never explicitly chosen. ..."), which used to ride
-// with the skip notice whenever the resolved mode source was `default`. Under
-// opt-in receipt-driven development a default-source clone is refused long
-// before the consent ceremony runs, so the pinned binary can no longer emit
-// that line and it is removed here rather than left as dead tolerance. Multi-
+// with the skip notice whenever the resolved mode source was `default`. The
+// personal fork defaults on without restoring that retired extra line, so the
+// exact current notice below remains the only tolerated success output. Multi-
 // line stderr is still expected in principle — these are separate Fprintln
 // calls, never one joined string — which is why membership is per line.
 export const REVIEW_CONSENT_NOTICES = Object.freeze([
