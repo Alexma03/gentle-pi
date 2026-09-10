@@ -39,8 +39,28 @@ const COLLAPSED_COUNT_LABELS: Partial<Record<QuietToolName, string>> = {
 	ls: "entries",
 };
 
-const COLLAPSED_TAIL_LINE_LIMIT = 10;
+const COLLAPSED_TAIL_LINE_LIMIT = 15;
 const PREVIEW_LINE_LIMIT = 3;
+const BASH_PREVIEW_LINE_LIMIT = 15;
+
+export function formatDuration(ms: number): string {
+	if (!Number.isFinite(ms) || ms <= 0) return "0ms";
+	if (ms < 1000) return `${Math.round(ms)}ms`;
+	const totalSeconds = ms / 1000;
+	if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+	const mins = Math.floor(totalSeconds / 60);
+	const secs = Math.floor(totalSeconds % 60);
+	return `${mins}m ${secs}s`;
+}
+
+export function formatRunningDuration(ms: number): string {
+	if (!Number.isFinite(ms) || ms <= 0) return "0.0s";
+	const totalSeconds = ms / 1000;
+	if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+	const mins = Math.floor(totalSeconds / 60);
+	const secs = Math.floor(totalSeconds % 60);
+	return `${mins}m ${secs}s`;
+}
 
 const EMPTY_RESULT_MESSAGES: Partial<Record<QuietToolName, string[]>> = {
 	grep: ["No matches found"],
@@ -447,7 +467,8 @@ export function formatToolResultOutput(
 		return detail ? `\n${detail}` : "";
 	}
 	if (isError) {
-		const tail = lastMeaningfulOutputLines(text, PREVIEW_LINE_LIMIT);
+		const limit = toolName === "bash" ? BASH_PREVIEW_LINE_LIMIT : PREVIEW_LINE_LIMIT;
+		const tail = lastMeaningfulOutputLines(text, limit);
 		return tail ? `\n${tail}` : "";
 	}
 	const summaryLabel = COLLAPSED_COUNT_LABELS[toolName];
@@ -466,7 +487,7 @@ export function formatToolResultOutput(
 	}
 	if (toolName === "bash") {
 		const preview = semanticJsonPreview(text);
-		const tail = preview ?? lastOutputLines(text, PREVIEW_LINE_LIMIT);
+		const tail = preview ?? lastOutputLines(text, BASH_PREVIEW_LINE_LIMIT);
 		return tail ? `\n${tail}` : "";
 	}
 	if (toolName === "edit") return `\n${editSummary(result)}`;
@@ -493,7 +514,7 @@ interface ToolRenderContextLike {
 	[key: string]: unknown;
 }
 
-function formatToolCall(toolName: QuietToolName, args: Record<string, unknown>, theme: ThemeLike): string {
+function formatToolCall(toolName: QuietToolName, args: Record<string, unknown>, theme: ThemeLike, timingSuffix = ""): string {
 	switch (toolName) {
 		case "read": {
 			const path = safeText(shortenPath(args.path) || "...");
@@ -502,7 +523,7 @@ function formatToolCall(toolName: QuietToolName, args: Record<string, unknown>, 
 		case "bash": {
 			const command = safeText(asString(args.command, "..."));
 			const timeout = typeof args.timeout === "number" ? theme.fg("muted", ` (timeout ${args.timeout}s)`) : "";
-			return `${theme.fg("toolTitle", theme.bold(`$ ${command}`))}${timeout}`;
+			return `${theme.fg("toolTitle", theme.bold(`$ ${command}`))}${timeout}${timingSuffix}`;
 		}
 		case "grep": {
 			let text = `${theme.fg("toolTitle", theme.bold("grep"))} ${theme.fg("accent", `/${safeText(asString(args.pattern))}/`)} in ${safeText(shortenPath(args.path) || ".")}`;
@@ -628,7 +649,21 @@ function registerQuietTool(pi: ExtensionAPI, toolName: QuietToolName, commandArg
 		renderShell: "self",
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			const runtimeTool = getBuiltInTools(ctx.cwd)[toolName];
-			return runtimeTool.execute(toolCallId, params, signal, onUpdate, ctx);
+			const start = Date.now();
+			try {
+				const result = await runtimeTool.execute(toolCallId, params, signal, onUpdate, ctx);
+				const durationMs = Date.now() - start;
+				if (result && typeof result === "object") {
+					const details = (result.details && typeof result.details === "object" && !Array.isArray(result.details))
+						? result.details as Record<string, unknown>
+						: {};
+					details._executionDurationMs = durationMs;
+					result.details = details;
+				}
+				return result;
+			} catch (error) {
+				throw error;
+			}
 		},
 		renderCall(args, theme, context) {
 			const callArgs = args as Record<string, unknown>;
@@ -640,7 +675,50 @@ function registerQuietTool(pi: ExtensionAPI, toolName: QuietToolName, commandArg
 				const detail = renderContext.expanded === true && typeof callArgs.command === "string" ? `$ ${callArgs.command}` : undefined;
 				return renderGentleAiLifecycleCall(operationPath, theme, renderContext as GentleAiRenderContext, detail);
 			}
-			return new Text(formatToolCall(toolName, callArgs, theme), 0, 0);
+
+			let timingSuffix = "";
+			if (toolName === "bash") {
+				const state = (context as any)?.state as Record<string, unknown> | undefined;
+				if (state) {
+					if (renderContext.executionStarted && state.startedAt === undefined) {
+						state.startedAt = Date.now();
+					}
+					if (renderContext.executionStarted && renderContext.isPartial === false) {
+						state.endedAt ??= Date.now();
+						if (state.interval) {
+							clearInterval(state.interval as any);
+							state.interval = undefined;
+						}
+					}
+					if (state.startedAt !== undefined) {
+						if (state.endedAt !== undefined) {
+							const duration = (state.endedAt as number) - (state.startedAt as number);
+							timingSuffix = ` ${theme.fg("muted", `(took ${formatDuration(duration)})`)}`;
+						} else if (renderContext.executionStarted) {
+							const elapsed = Date.now() - (state.startedAt as number);
+							timingSuffix = ` ${theme.fg("muted", `(running ${formatRunningDuration(elapsed)})`)}`;
+							if (!state.interval && typeof renderContext.invalidate === "function") {
+								const timer = setInterval(() => {
+									if (state.endedAt !== undefined) {
+										if (state.interval) {
+											clearInterval(state.interval as any);
+											state.interval = undefined;
+										}
+										return;
+									}
+									try {
+										(renderContext.invalidate as () => void)();
+									} catch {}
+								}, 100);
+								timer.unref?.();
+								state.interval = timer;
+							}
+						}
+					}
+				}
+			}
+
+			return new Text(formatToolCall(toolName, callArgs, theme, timingSuffix), 0, 0);
 		},
 		renderResult(result, options, theme, context) {
 			const renderContext = context as ToolRenderContextLike | undefined;
@@ -656,12 +734,35 @@ function registerQuietTool(pi: ExtensionAPI, toolName: QuietToolName, commandArg
 			if (directResult) {
 				return renderGentleAiResult(safeResult, { expanded: options.expanded, isPartial: options.isPartial, isError }, theme, renderContext as GentleAiRenderContext | undefined);
 			}
+
+			const state = (context as any)?.state as Record<string, unknown> | undefined;
+			if (toolName === "bash" && state) {
+				if (!options.isPartial || isError) {
+					state.endedAt ??= Date.now();
+					if (state.interval) {
+						clearInterval(state.interval as any);
+						state.interval = undefined;
+					}
+					const details = detailsRecord(safeResult);
+					if (typeof details._executionDurationMs === "number" && state.startedAt !== undefined) {
+						state.endedAt = (state.startedAt as number) + details._executionDurationMs;
+					}
+				}
+			}
+
 			if (options.isPartial) {
-				if (options.expanded) return new Text(`${theme.fg("warning", partialLabel(toolName, text))}\n${theme.fg("muted", text)}`, 0, 0);
-				const visible = lastOutputLines(text, PREVIEW_LINE_LIMIT);
+				let partialTiming = "";
+				if (toolName === "bash" && state?.startedAt !== undefined) {
+					const elapsed = Date.now() - (state.startedAt as number);
+					partialTiming = ` · ${formatRunningDuration(elapsed)}`;
+				}
+				const label = `${partialLabel(toolName, text)}${partialTiming}`;
+				if (options.expanded) return new Text(`${theme.fg("warning", label)}\n${theme.fg("muted", text)}`, 0, 0);
+				const limit = toolName === "bash" ? BASH_PREVIEW_LINE_LIMIT : PREVIEW_LINE_LIMIT;
+				const visible = lastOutputLines(text, limit);
 				return new BoundedRows([
-					{ text: theme.fg("warning", partialLabel(toolName, text)), rows: 1 },
-					...(visible ? [{ text: theme.fg("muted", visible), rows: PREVIEW_LINE_LIMIT, tail: true }] : []),
+					{ text: theme.fg("warning", label), rows: 1 },
+					...(visible ? [{ text: theme.fg("muted", visible), rows: limit, tail: true }] : []),
 				]);
 			}
 			if (options.expanded && toolName === "read" && hasImageContent(safeResult) && officialRenderResult) {
@@ -684,8 +785,9 @@ function registerQuietTool(pi: ExtensionAPI, toolName: QuietToolName, commandArg
 			if (options.expanded) return new Text(output ? theme.fg(color, output) : "", 0, 0);
 			if (output) {
 				const tail = shouldRenderPreviewTail(toolName, text, isError, renderContext?.args);
+				const rowsLimit = toolName === "bash" ? BASH_PREVIEW_LINE_LIMIT : PREVIEW_LINE_LIMIT;
 				return new BoundedRows([
-					{ text: theme.fg(color, output.replace(/^\n/, "")), rows: PREVIEW_LINE_LIMIT, tail },
+					{ text: theme.fg(color, output.replace(/^\n/, "")), rows: rowsLimit, tail },
 					...(hint ? [{ text: theme.fg(color, hint.slice(1)), rows: 1 }] : []),
 				]);
 			}

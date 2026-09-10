@@ -8,6 +8,8 @@ import piPretty from "../extensions/pi-pretty.ts";
 import quietTools, {
 	countNonEmptyLines,
 	extractTextContent,
+	formatDuration,
+	formatRunningDuration,
 	formatToolResultOutput,
 	gentleAiRoutineCommand,
 	tailLines,
@@ -940,12 +942,12 @@ test("quiet Bash previews semantic lines for generic JSON output", () => {
 	const cases = [
 		[object, '  "schema": "gentle-ai.review-integration/v2",\n  "contract": "review",\n  "protocol": {'],
 		[json(["alpha", "beta", { entry: true }]), '  "alpha",\n  "beta",\n    "entry": true'],
-		['{\n  "schema": "broken",\n  "contract": "partial",\n  "payload": [\n    "value"\n  ]', '  "payload": [\n    "value"\n  ]'],
+		['{\n  "schema": "broken",\n  "contract": "partial",\n  "payload": [\n    "value"\n  ]', '{\n  "schema": "broken",\n  "contract": "partial",\n  "payload": [\n    "value"\n  ]'],
 	] as const;
 	for (const [text, expected] of cases) {
 		assert.equal(formatToolResultOutput("bash", textResult(text) as any, { expanded: false, args: { command } }), `\n${expected}`);
 	}
-	assert.equal(formatToolResultOutput("bash", textResult(error) as any, { expanded: false, isError: true, args: { command } }), `\n${tailLines(error, 3)}`);
+	assert.equal(formatToolResultOutput("bash", textResult(error) as any, { expanded: false, isError: true, args: { command } }), `\n${tailLines(error, 15)}`);
 	const call = renderToString(tool.renderCall({ command }, passthroughTheme, { args: { command } }));
 	const collapsed = renderToolResult(tool, textResult(object), { expanded: false, isPartial: false }, { args: { command } });
 	const expanded = renderToolResult(tool, textResult(object), { expanded: true, isPartial: false }, { args: { command } });
@@ -959,10 +961,10 @@ test("quiet Bash previews semantic lines for generic JSON output", () => {
 });
 
 test("quiet tool rendering keeps collapsed git bash result tails", () => {
-	const text = Array.from({ length: 12 }, (_, index) => `git line ${index + 1}`).join("\n");
+	const text = Array.from({ length: 20 }, (_, index) => `git line ${index + 1}`).join("\n");
 
-	assert.equal(formatToolResultOutput("bash", textResult(text) as any, { expanded: false, args: { command: "git diff" } }), `\n${tailLines(text, 10)}`);
-	assert.equal(formatToolResultOutput("bash", textResult(text) as any, { expanded: false, args: { command: "git status --short" } }), `\n${tailLines(text, 10)}`);
+	assert.equal(formatToolResultOutput("bash", textResult(text) as any, { expanded: false, args: { command: "git diff" } }), `\n${tailLines(text, 15)}`);
+	assert.equal(formatToolResultOutput("bash", textResult(text) as any, { expanded: false, args: { command: "git status --short" } }), `\n${tailLines(text, 15)}`);
 });
 
 test("quiet tool rendering keeps concise collapsed edit and write summaries", () => {
@@ -1019,9 +1021,9 @@ test("quiet tool rendering limits collapsed visual rows at the actual width", ()
 	const hint = keyHint("app.tools.expand", "to expand");
 	const narrowWidth = 12;
 	const cases = [
-		[textResult("x".repeat(80)), { expanded: false, isPartial: true }, { args: { command: "printf output" } }, 4],
-		[textResult("界".repeat(40)), { expanded: false, isPartial: false }, { args: { command: "printf output" } }, 4],
-		[textResult("e\u0301".repeat(40)), { expanded: false, isPartial: false, isError: true }, { args: { command: "false" }, isError: true }, 4],
+		[textResult("x".repeat(80)), { expanded: false, isPartial: true }, { args: { command: "printf output" } }, 16],
+		[textResult("界".repeat(40)), { expanded: false, isPartial: false }, { args: { command: "printf output" } }, 16],
+		[textResult("e\u0301".repeat(40)), { expanded: false, isPartial: false, isError: true }, { args: { command: "false" }, isError: true }, 16],
 	] as const;
 	for (const [result, options, context, maxRows] of cases) {
 		const lines = renderLines(bash.renderResult(result, options, passthroughTheme, context), narrowWidth);
@@ -1082,15 +1084,16 @@ test("quiet tool rendering recognizes a quoted exact dev override path containin
 
 test("quiet tool rendering bounds and sanitizes partial text without a completion hint", () => {
 	const tool = registeredQuietTools().get("bash");
-	const result = textResult("first\nsecond\nthird\nfourth");
+	const lines = ["first", ...Array.from({ length: 15 }, (_, i) => `line ${i + 2}`)];
+	const result = textResult(lines.join("\n"));
 	const collapsed = renderToolResult(tool, result, { expanded: false, isPartial: true }, { args: { command: "printf output" } });
 	const expanded = renderToolResult(tool, result, { expanded: true, isPartial: true }, { args: { command: "printf output" } });
 
-	assert.match(collapsed, /… bash · 4 lines/);
+	assert.match(collapsed, /… bash · 16 lines/);
 	assert.doesNotMatch(collapsed, /first/);
-	assert.match(collapsed, /second\nthird\nfourth/);
+	assert.match(collapsed, /line 2\nline 3/);
 	assert.doesNotMatch(collapsed, /to expand|Ctrl\+O/);
-	assert.match(expanded, /first\nsecond\nthird\nfourth/);
+	assert.match(expanded, /first\nline 2/);
 	assert.doesNotMatch(expanded, /to expand|Ctrl\+O/);
 	assert.match(renderToolResult(tool, textResult("first\n\nsecond\n\n"), { expanded: false, isPartial: true }, { args: { command: "printf output" } }), /… bash · 2 lines/);
 
@@ -1108,9 +1111,10 @@ test("quiet tool rendering bounds and sanitizes partial text without a completio
 
 test("quiet tool rendering bounds completed previews, errors, and edit/write summaries", () => {
 	const tools = registeredQuietTools();
+	const bash16 = ["bash one", ...Array.from({ length: 15 }, (_, i) => `bash ${i + 2}`)].join("\n");
 	for (const [toolName, text, hidden, visible, context] of [
 		["read", "read one\nread two\nread three\nread four", "read four", "read one\nread two\nread three", {}],
-		["bash", "bash one\nbash two\nbash three\nbash four", "bash one", "bash two\nbash three\nbash four", { args: { command: "printf output" } }],
+		["bash", bash16, "bash one", "bash 2\nbash 3", { args: { command: "printf output" } }],
 	] as const) {
 		const rendered = renderToolResult(tools.get(toolName), textResult(text), { expanded: false, isPartial: false }, context);
 		assert.doesNotMatch(rendered, new RegExp(hidden));
@@ -1119,9 +1123,12 @@ test("quiet tool rendering bounds completed previews, errors, and edit/write sum
 	}
 
 	for (const toolName of ["read", "bash", "grep", "find", "ls", "edit", "write"] as const) {
-		const rendered = renderToolResult(tools.get(toolName), textResult("error one\nerror two\nerror three\nerror four"), { expanded: false, isPartial: false, isError: true }, { args: toolName === "bash" ? { command: "false" } : {} });
+		const text = toolName === "bash"
+			? ["error one", ...Array.from({ length: 15 }, (_, i) => `error ${i + 2}`)].join("\n")
+			: "error one\nerror two\nerror three\nerror four";
+		const rendered = renderToolResult(tools.get(toolName), textResult(text), { expanded: false, isPartial: false, isError: true }, { args: toolName === "bash" ? { command: "false" } : {} });
 		assert.doesNotMatch(rendered, /error one/);
-		assert.match(rendered, /error two\nerror three\nerror four/);
+		assert.match(rendered, toolName === "bash" ? /error 2\nerror 3/ : /error two\nerror three\nerror four/);
 		assert.match(rendered, /to expand/);
 	}
 
@@ -1182,7 +1189,7 @@ test("quiet tool rendering preserves directional visual preview rows at narrow w
 		[error, "ERROR-NEW"],
 		[git, "GIT-NEW"],
 	] as const) {
-		assert.ok(lines.length <= 4, `expected fixed preview budget, got ${lines.length}`);
+		assert.ok(lines.length <= 16, `expected fixed preview budget, got ${lines.length}`);
 		assert.match(lines.join("\n"), new RegExp(marker));
 	}
 	assert.match(partial[0] ?? "", /… bash/);
@@ -1190,7 +1197,7 @@ test("quiet tool rendering preserves directional visual preview rows at narrow w
 
 	const read = renderRead(`READ-FIRST\n${oldText}\nREAD-NEW`);
 	const semanticJson = renderCollapsed(
-		JSON.stringify({ first: "x".repeat(80), newest: "JSON-NEW" }, null, 2),
+		JSON.stringify({ first: "x".repeat(240), newest: "JSON-NEW" }, null, 2),
 		{ expanded: false, isPartial: false },
 		{ args: { command: "printf output" } },
 	);
@@ -1334,3 +1341,84 @@ test("quiet tool rendering puts the expand key in the finished call card's top r
 	assert.equal(cardBody(renderToolResult(tool, textResult("a\nb\nc"), { expanded: false, isPartial: false }, { args: { command } })), "3 lines");
 	assert.match(collapsedResult.split("\n").pop() ?? "", /╰─+╯$/);
 });
+
+test("quiet tool timing formats duration correctly", () => {
+	assert.equal(formatDuration(0), "0ms");
+	assert.equal(formatDuration(45), "45ms");
+	assert.equal(formatDuration(999), "999ms");
+	assert.equal(formatDuration(1000), "1.0s");
+	assert.equal(formatDuration(1234), "1.2s");
+	assert.equal(formatDuration(65000), "1m 5s");
+	assert.equal(formatDuration(125000), "2m 5s");
+	assert.equal(formatDuration(-10), "0ms");
+	assert.equal(formatDuration(Number.NaN), "0ms");
+
+	assert.equal(formatRunningDuration(0), "0.0s");
+	assert.equal(formatRunningDuration(45), "0.0s");
+	assert.equal(formatRunningDuration(1200), "1.2s");
+	assert.equal(formatRunningDuration(65000), "1m 5s");
+	assert.equal(formatRunningDuration(-5), "0.0s");
+});
+
+test("quiet bash call rendering displays running elapsed time while executing", () => {
+	const tools = registeredQuietTools();
+	const bash = tools.get("bash");
+	const state = { startedAt: Date.now() - 2500 };
+	const call = renderToString(bash.renderCall(
+		{ command: "sleep 5" },
+		passthroughTheme,
+		{ args: { command: "sleep 5" }, state, executionStarted: true, isPartial: true },
+	));
+	assert.match(call, /\$ sleep 5 \(running 2\.[4-6]s\)/);
+});
+
+test("quiet bash call rendering displays execution duration when complete", () => {
+	const tools = registeredQuietTools();
+	const bash = tools.get("bash");
+	const state = { startedAt: 1000, endedAt: 2400 };
+	const call = renderToString(bash.renderCall(
+		{ command: "ls -la" },
+		passthroughTheme,
+		{ args: { command: "ls -la" }, state, executionStarted: true, isPartial: false },
+	));
+	assert.match(call, /\$ ls -la \(took 1\.4s\)/);
+});
+
+test("quiet bash renderResult captures execution duration and updates renderCall", () => {
+	const tools = registeredQuietTools();
+	const bash = tools.get("bash");
+	const state = { startedAt: 1000 };
+	const result = {
+		content: [{ type: "text", text: "done" }],
+		details: { _executionDurationMs: 350 },
+	};
+	bash.renderResult(
+		result,
+		{ expanded: false, isPartial: false },
+		passthroughTheme,
+		{ args: { command: "echo done" }, state },
+	);
+	assert.equal(state.endedAt, 1350);
+
+	const call = renderToString(bash.renderCall(
+		{ command: "echo done" },
+		passthroughTheme,
+		{ args: { command: "echo done" }, state, executionStarted: true, isPartial: false },
+	));
+	assert.match(call, /\$ echo done \(took 350ms\)/);
+});
+
+test("quiet bash partial result shows running elapsed time in banner", () => {
+	const tools = registeredQuietTools();
+	const bash = tools.get("bash");
+	const state = { startedAt: Date.now() - 1500 };
+	const result = textResult("some output line");
+	const rendered = renderToolResult(
+		bash,
+		result,
+		{ expanded: false, isPartial: true },
+		{ args: { command: "npm test" }, state },
+	);
+	assert.match(rendered, /… bash · 1 line · 1\.[4-6]s/);
+});
+
