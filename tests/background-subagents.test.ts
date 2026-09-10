@@ -128,15 +128,15 @@ test("strict decode rejects malformed shapes", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Cascade: project > global > env > default off
+// Cascade: project > global > env > default on
 // ---------------------------------------------------------------------------
 
-test("default is off with no file and no env", () => {
+test("default is on with no file and no env", () => {
 	const cwd = makeScratch("gp-bg-none-");
 	const configHome = join(makeScratch("gp-bg-home-"), "gentle-ai");
 	assert.equal(
 		loadBackgroundSubagentsPolicy(cwd, { gentlePiConfigHome: configHome, env: EMPTY_ENV }),
-		"off",
+		"on",
 	);
 });
 
@@ -173,9 +173,9 @@ test("env var applies only when no policy file exists, and only exact on|off", (
 	assert.equal(
 		loadBackgroundSubagentsPolicy(cwd, {
 			gentlePiConfigHome: configHome,
-			env: { GENTLE_PI_BACKGROUND_SUBAGENTS: "on" },
+			env: { GENTLE_PI_BACKGROUND_SUBAGENTS: "off" },
 		}),
-		"on",
+		"off",
 	);
 	for (const invalid of ["1", "true", "ON", "yes", ""]) {
 		assert.equal(
@@ -183,8 +183,8 @@ test("env var applies only when no policy file exists, and only exact on|off", (
 				gentlePiConfigHome: configHome,
 				env: { GENTLE_PI_BACKGROUND_SUBAGENTS: invalid },
 			}),
-			"off",
-			`env value "${invalid}" must fail closed to off`,
+			"on",
+			`env value "${invalid}" is ignored and falls back to default on`,
 		);
 	}
 });
@@ -330,10 +330,10 @@ test("renderOrchestratorPrompt substitutes the background policy token", () => {
 	assert.doesNotMatch(rendered, /\{\{GENTLE_PI_BACKGROUND_POLICY\}\}/);
 });
 
-test("renderOrchestratorPrompt defaults to the fail-closed off/absent rendering", () => {
+test("renderOrchestratorPrompt defaults to the on/absent rendering", () => {
 	const assetsDir = join(process.cwd(), "assets");
 	const rendered = renderOrchestratorPrompt(assetsDir);
-	assert.match(rendered, /Background subagent policy: off \(capability: absent\)/);
+	assert.match(rendered, /Background subagent policy: on \(capability: absent\)/);
 });
 
 // The project policy file pins the policy half of the status line so these
@@ -432,7 +432,7 @@ test("the resolver attributes the built-in default when nothing else decides", (
 		gentlePiConfigHome: configHome,
 		env: { GENTLE_PI_BACKGROUND_SUBAGENTS: "yes" },
 	});
-	assert.equal(resolution.policy, "off");
+	assert.equal(resolution.policy, "on");
 	assert.equal(resolution.source, "default");
 	assert.equal(
 		resolution.envValue,
@@ -584,8 +584,8 @@ test("no argument reports the effective policy, the deciding default, and the ca
 	assert.equal(
 		notice.message,
 		[
-			"background subagents: off (decided by built-in default; capability: absent)",
-			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default off.",
+			"background subagents: on (decided by built-in default; capability: absent)",
+			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default on.",
 		].join("\n"),
 	);
 });
@@ -603,7 +603,7 @@ test("status names the project file that decided and the global file it shadows"
 		[
 			`background subagents: on (decided by project file ${join(cwd, ".pi", "gentle-ai", "background-subagents.json")}; capability: ready)`,
 			`The global file ${join(configHome, "background-subagents.json")} exists but is outranked by that project file.`,
-			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default off.",
+			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default on.",
 		].join("\n"),
 	);
 });
@@ -640,7 +640,7 @@ test("status calls an unrecognized environment value inert instead of silently i
 	});
 	assert.equal(
 		notice.message.split("\n")[0],
-		"background subagents: off (decided by built-in default; capability: absent)",
+		"background subagents: on (decided by built-in default; capability: absent)",
 	);
 	assert.ok(
 		notice.message.includes(
@@ -655,19 +655,16 @@ test("status reports a malformed deciding file as fail-closed, not as a real off
 	const configHome = join(makeScratch("gp-bg-home-"), "gentle-ai");
 	const projectFile = join(cwd, ".pi", "gentle-ai", "background-subagents.json");
 	mkdirSync(join(cwd, ".pi", "gentle-ai"), { recursive: true });
-	writeFileSync(projectFile, "{malformed");
-	writePolicyFile(configHome, "on");
+	writeFileSync(projectFile, "{not valid json");
 	const notice = await runBackgroundSubagents(t, "status", cwd, configHome);
 	assert.equal(notice.type, "warning");
 	assert.equal(
-		notice.message.split("\n")[0],
-		`background subagents: off (decided by project file ${projectFile}; capability: absent)`,
-	);
-	assert.ok(
-		notice.message.includes(
-			`${projectFile} is present but malformed, so the policy fails closed to off and no lower-priority source is consulted.`,
-		),
 		notice.message,
+		[
+			`background subagents: off (decided by project file ${projectFile}; capability: absent)`,
+			`${projectFile} is present but malformed, so the policy fails closed to off and no lower-priority source is consulted.`,
+			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default on.",
+		].join("\n"),
 	);
 });
 
@@ -686,7 +683,7 @@ test("enable writes the global file and reports that it decides", async (t) => {
 		[
 			`background subagents: on (decided by global file ${globalFile}; capability: absent)`,
 			`Wrote on to the global file ${globalFile}.`,
-			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default off.",
+			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default on.",
 		].join("\n"),
 	);
 });
@@ -730,7 +727,7 @@ test("enable under an outranking project file writes the global file and says it
 			`background subagents: off (decided by project file ${projectFile}; capability: absent)`,
 			`Wrote on to the global file ${globalFile}.`,
 			`That global write does not take effect here: the project file ${projectFile} outranks it. Edit or remove that project file to let the global setting decide.`,
-			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default off.",
+			"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default on.",
 		].join("\n"),
 	);
 });

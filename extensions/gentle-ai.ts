@@ -23,7 +23,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
 	ExtensionAPI,
@@ -311,7 +311,7 @@ const BACKGROUND_SUBAGENTS_SCHEMA = "gentle-pi.background-subagents/v1";
 const BACKGROUND_SUBAGENTS_FILE = "background-subagents.json";
 
 const DEFAULT_BACKGROUND_SUBAGENTS_RENDERING: BackgroundSubagentsRendering = {
-	policy: "off",
+	policy: "on",
 	capability: "absent",
 };
 
@@ -344,7 +344,7 @@ function parseBackgroundSubagentsPolicyFile(
  *   2. Global file `${configHome}/background-subagents.json`
  *      (configHome honors GENTLE_PI_CONFIG_HOME, default ~/.pi/gentle-ai)
  *   3. Env var GENTLE_PI_BACKGROUND_SUBAGENTS ("on" | "off")
- *   4. Default "off"
+ *   4. Default "on"
  *
  * A present-but-malformed file fails closed to "off" instead of falling
  * through to a lower-priority source, and it stays attributed to that file:
@@ -390,10 +390,10 @@ function resolveBackgroundSubagentsPolicy(
 		if (envValue === "on" || envValue === "off") {
 			return { policy: envValue, source: "environment", malformed: false, ...locations };
 		}
-		return { policy: "off", source: "default", malformed: false, ...locations };
+		return { policy: "on", source: "default", malformed: false, ...locations };
 	} catch {
 		return {
-			policy: "off",
+			policy: "on",
 			source: "default",
 			malformed: false,
 			projectFile,
@@ -492,7 +492,7 @@ function renderBackgroundSubagentsReport(
 		);
 	}
 	lines.push(
-		"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default off.",
+		"Resolution order (first hit wins): project file, global file, GENTLE_PI_BACKGROUND_SUBAGENTS, built-in default on.",
 	);
 	return {
 		message: lines.join("\n"),
@@ -631,8 +631,9 @@ function rejectUnscopedBoundedWriterDispatch(input: unknown): { block: true; rea
  * "absent" on every real install and leaves the background policy inert.
  */
 function subagentsPackageRoots(cwd: string): string[] {
+	const inNodeModules = basename(dirname(PACKAGE_ROOT)) === "node_modules";
 	return SUBAGENTS_PACKAGE_NAMES.flatMap((packageName) => [
-		join(PACKAGE_ROOT, "..", packageName),
+		...(inNodeModules ? [join(PACKAGE_ROOT, "..", packageName)] : []),
 		join(cwd, ".pi", "npm", "node_modules", packageName),
 		join(homedir(), ".local", "lib", "node_modules", packageName),
 	]);
@@ -1911,11 +1912,12 @@ async function listAgentsFromDirAsync(
 }
 
 function builtinAgentDirs(cwd: string): string[] {
+	const inNodeModules = basename(dirname(PACKAGE_ROOT)) === "node_modules";
 	return [
-		join(PACKAGE_ROOT, "..", "pi-subagents-j0k3r", "agents"),
+		...(inNodeModules ? [join(PACKAGE_ROOT, "..", "pi-subagents-j0k3r", "agents")] : []),
 		join(cwd, ".pi", "npm", "node_modules", "pi-subagents-j0k3r", "agents"),
 		join(homedir(), ".local", "lib", "node_modules", "pi-subagents-j0k3r", "agents"),
-		join(PACKAGE_ROOT, "..", "pi-subagents", "agents"),
+		...(inNodeModules ? [join(PACKAGE_ROOT, "..", "pi-subagents", "agents")] : []),
 		join(cwd, ".pi", "npm", "node_modules", "pi-subagents", "agents"),
 		join(homedir(), ".local", "lib", "node_modules", "pi-subagents", "agents"),
 	];

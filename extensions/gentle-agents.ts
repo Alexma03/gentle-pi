@@ -655,7 +655,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 				label: { type: "string", description: "Three to six words naming the work, shown on the agents card, e.g. 'map footer data sources'." },
 				context: { type: "string", description: "Optional extra context appended to the task." },
 				workspace_root: { type: "string", description: "Optional worktree in the same Git clone. Validated before queueing; the child runs at its canonical root and registers it on actual launch." },
-				mode: { type: "string", enum: ["task", "background"], description: "task waits for the result (default); background returns immediately." },
+				mode: { type: "string", enum: ["task", "background"], description: "background returns immediately (default); task waits for the result." },
 			},
 		},
 		async (params, ctx) => {
