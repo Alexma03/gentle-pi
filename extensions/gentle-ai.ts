@@ -5723,7 +5723,9 @@ async function reconcileNativeMutationFailure(
 	try {
 		const status = await nativeReviewCli.targetStatus(target);
 		syncRetainedNativeStatusSelections(retainedSelections, canonicalRetentionRoot, status, target.baseRef);
-		const { required_status_action: staleStatusDirective, ...reconciledBase } = failure;
+		const projectedStatus = mapNativeTargetStatus(operation, status, target.lineageId);
+		const { next_action: staleNextAction, required_status_action: staleStatusDirective, ...reconciledBase } = failure;
+		void staleNextAction;
 		void staleStatusDirective;
 		// Field defect (fambig, 2026-08-16): an envelope-less mutating failure
 		// is stamped mutationOutcome "unknown", but a reconciled authority
@@ -5737,6 +5739,8 @@ async function reconcileNativeMutationFailure(
 			void staleReplayability;
 			return {
 				...provenBase,
+				...projectedStatus,
+				status: "blocked",
 				outcome: "native-mutation-status-reconciled",
 				reconciliation: status.raw,
 				authority_applicability: status.applicability,
@@ -5744,17 +5748,17 @@ async function reconcileNativeMutationFailure(
 				mutation_performed: false,
 				mutation_outcome: "none",
 				mutation_outcome_reason: `authority revision unchanged across reconciliation (${preOperationRevision}); the failed operation provably did not mutate`,
-				next_action: status.action,
 			};
 		}
 		return {
 			...reconciledBase,
+			...projectedStatus,
+			status: "blocked",
 			outcome: "native-mutation-status-reconciled",
 			reconciliation: status.raw,
 			authority_applicability: status.applicability,
 			provider_action: status.action,
 			replayability: status.replayability,
-			next_action: status.action,
 		};
 	} catch (statusError) {
 		return {

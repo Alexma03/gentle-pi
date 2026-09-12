@@ -1846,13 +1846,17 @@ test("START and consent ambiguity reconciliation register their returned committ
 	const lineageId = "reconciled-collect", input = correctionPlanInput(lineageId), unknown = () => { throw new NativeReviewCliError(NATIVE_REVIEW_ERROR_CODE.NON_ZERO, "review/start", true, true, "unknown mutation"); };
 	const selectors = (requests: readonly Record<string, unknown>[]) => requests.map(({ baseRef: base, committedOnly }) => ({ baseRef: base, committedOnly }));
 	const directRequests: Array<Record<string, unknown>> = [], directRoutes = new Map();
+	let directStartCalls = 0;
 	const directNative = {
 		targetStatus: async (request: Record<string, unknown>) => { directRequests.push(request); return directRequests.length === 1 ? startStatus(cwd, baseRef) : status(lineageId, [input]); },
-		start: unknown,
+		start: () => { directStartCalls += 1; return unknown(); },
 		captureCorrectionPlan: async () => ({ schema: "gentle-ai.review-last-event-closure/v1", operation: "review.capture-correction-plan", lineageId, state: "correction_required", storeRevision: SHA }),
 	} as unknown as NativeReviewCli;
-	await __testing.executeReviewControllerOperation({ operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef, committedOnly: true }) }, cwd, directNative, undefined, undefined, undefined, directRoutes);
-	const directCapture = await __testing.executeReviewCaptureOperation({ lineageId, collectBinding: JSON.stringify(input), correctionLines: 1 }, cwd, directNative, undefined, undefined, directRoutes, true);
+	const directStart = await __testing.executeReviewControllerOperation({ operation: "start", input: JSON.stringify({ mode: "ordinary", baseRef, committedOnly: true }) }, cwd, directNative, undefined, undefined, undefined, directRoutes);
+	assert.deepEqual({ outcome: directStart.outcome, status: directStart.status, mutationOutcome: directStart.mutation_outcome, startCalls: directStartCalls, statusCalls: directRequests.length }, { outcome: "native-mutation-status-reconciled", status: "blocked", mutationOutcome: "unknown", startCalls: 1, statusCalls: 2 });
+	assert.equal((directStart.diagnostics as { error_code?: string }).error_code, NATIVE_REVIEW_ERROR_CODE.NON_ZERO);
+	assert.equal("next_action" in directStart, false);
+	const directCapture = await __testing.executeReviewCaptureOperation({ lineageId, collectBinding: bindingOf(directStart), correctionLines: 1 }, cwd, directNative, undefined, undefined, directRoutes, true);
 	const consent = decodeReviewConsentV3(JSON.parse(readFileSync(join(process.cwd(), "tests", "fixtures", "devbinary", "consent-v3.captured.json"), "utf8")));
 	const consentRequests: Array<Record<string, unknown>> = [], consentRoutes = new Map(), registry = new PendingReviewConsentRegistry(), session = Symbol("consent-session");
 	const consentNative = {
@@ -1867,9 +1871,11 @@ test("START and consent ambiguity reconciliation register their returned committ
 	const consentCapture = await __testing.executeReviewCaptureOperation({ lineageId, collectBinding: JSON.stringify(input), correctionLines: 1 }, cwd, consentNative, undefined, undefined, consentRoutes, true);
 	assert.deepEqual({
 		outcomes: [directCapture.outcome, consentCapture.outcome],
+		directStartCalls,
 		selectors: [selectors(directRequests), selectors(consentRequests)],
 	}, {
 		outcomes: ["native-last-event-closure", "native-last-event-closure"],
+		directStartCalls: 1,
 		selectors: [Array.from({ length: 3 }, () => ({ baseRef, committedOnly: true })), Array.from({ length: 3 }, () => ({ baseRef, committedOnly: true }))],
 	});
 });
