@@ -9,7 +9,7 @@ export interface FakeChild {
 	child: ChildLike;
 	written: Array<Record<string, unknown>>;
 	emit(event: Record<string, unknown>): void;
-	exit(code: number): void;
+	exit(code: number | null, signal?: NodeJS.Signals): void;
 	fail(message: string): void;
 	killed: string[];
 	sent: Array<Record<string, unknown>>;
@@ -38,14 +38,19 @@ export function fakeChild(options: { exitOnKill?: boolean; pid?: number } = {}):
 			stdout.write(`${JSON.stringify({ type: "response", id: command.id, command: command.type, success: true, data })}\n`);
 		}
 	});
+	const stderr = new PassThrough();
+	const exit = (code: number | null, signal: NodeJS.Signals | null = null) => {
+		stderr.end();
+		emitter.emit("exit", code, signal);
+	};
 	const child: ChildLike = {
 		pid: options.pid,
 		stdin,
 		stdout,
-		stderr: new PassThrough(),
+		stderr,
 		kill: (signal) => {
 			killed.push(String(signal ?? "SIGTERM"));
-			if (options.exitOnKill !== false) queueMicrotask(() => emitter.emit("exit", 0, signal ?? "SIGTERM"));
+			if (options.exitOnKill !== false) queueMicrotask(() => exit(null, signal ?? "SIGTERM"));
 			return true;
 		},
 		send: (message, callback) => {
@@ -62,5 +67,5 @@ export function fakeChild(options: { exitOnKill?: boolean; pid?: number } = {}):
 			return child;
 		},
 	};
-	return { child, written, killed, sent, get disconnects() { return disconnects; }, message: (event) => emitter.emit("message", event), emit: (event) => stdout.write(`${JSON.stringify(event)}\n`), exit: (code) => emitter.emit("exit", code, null), fail: (message) => emitter.emit("error", new Error(message)) };
+	return { child, written, killed, sent, get disconnects() { return disconnects; }, message: (event) => emitter.emit("message", event), emit: (event) => stdout.write(`${JSON.stringify(event)}\n`), exit, fail: (message) => emitter.emit("error", new Error(message)) };
 }

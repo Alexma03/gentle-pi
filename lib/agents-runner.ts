@@ -1,4 +1,6 @@
+import { realpathSync } from "node:fs";
 import type { Duplex, Readable, Writable } from "node:stream";
+import { stripVTControlCharacters } from "node:util";
 import { AGENT_MODE, formatModelRef, type AgentDefinition, type AgentMode, type ModelRef } from "./agents-config.ts";
 import { CHILD_QUERY_MAX_INFLIGHT, CHILD_QUERY_TIMEOUT_MS, parseChildFrame, validChildMessage, validChildQueryId } from "./agents-messaging.ts";
 import { ParentStandingReviewPermissionBroker } from "./review-session-standing-permission-ipc.ts";
@@ -126,6 +128,8 @@ interface LiveTask {
 	processGroup: number | undefined;
 	terminal: { status: TaskRecord["status"]; error: string | null } | undefined;
 	childExit: number | null | undefined;
+	childSignal?: NodeJS.Signals | null;
+	diagnostics: StderrTail;
 	cleanupDeadlineAt: number | undefined;
 	quarantined: boolean;
 	nextId: number;
@@ -143,6 +147,49 @@ const DEFAULT_TOOLS: readonly string[] = [];
 const TERMINATION_GRACE_MS = 250;
 const GROUP_CONFIRM_MS = 25;
 const GROUP_CONFIRM_DEADLINE_MS = 1_000;
+const STDERR_DRAIN_MS = 100;
+const STDERR_LIMIT = 4096;
+
+// Redact whole sensitive lines before retaining them. Never retain a suffix of
+// an oversized raw line: truncating away a credential's label could expose it.
+class StderrTail {
+	private line = "";
+	private tail = "";
+	private oversized = false;
+	private privateKey = false;
+	private closed = false;
+
+	push(chunk: string): void {
+		if (this.closed) return;
+		for (const [index, part] of chunk.split("\n").entries()) {
+			if (index > 0) this.flushLine();
+			if (this.oversized) continue;
+			if (this.line.length + part.length > STDERR_LIMIT) {
+				this.line = "";
+				this.oversized = true;
+			} else this.line += part;
+		}
+	}
+
+	private flushLine(): void {
+		let line = stripVTControlCharacters(this.line).replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
+		if (/-----BEGIN .*PRIVATE KEY-----/.test(line)) this.privateKey = true;
+		const sensitive = this.privateKey || /authorization|cookie|token|secret|password|passwd|credential|api[_-]?key|private[_-]?key|\bbearer\b|\bbasic\b|\bsk-[\w-]|\bgh[pousr]_|https?:\/\/|\beyJ[\w-]+\./i.test(line);
+		if (/-----END .*PRIVATE KEY-----/.test(line)) this.privateKey = false;
+		if (this.oversized) line = "[stderr line omitted: too long]";
+		else if (sensitive) line = "[REDACTED]";
+		if (line) this.tail = `${this.tail}${line}\n`.slice(-STDERR_LIMIT);
+		this.line = "";
+		this.oversized = false;
+	}
+
+	finish(): string {
+		if (!this.closed) this.flushLine();
+		this.closed = true;
+		return this.tail.trim();
+	}
+}
+
 const QUERY_REJECTION_ERRORS = new Set([
 	"invalid child IPC frame",
 	"invalid child IPC correlation",
@@ -191,7 +238,13 @@ export function piCommand(proc: ProcessLike = process): PiCommand {
 		const [command, ...args] = override.split(/\s+/);
 		return { command, args };
 	}
-	const entry = proc.argv[1];
+	let entry = proc.argv[1];
+	// npm exposes bin/pi as a symlink. Resolve it before checking the entry:
+	// a workspace's Node manager may not provide Pi on its own PATH.
+	if (entry) {
+		try { entry = realpathSync(entry); }
+		catch { /* Keep the direct CLI path or legacy fallback when it cannot be resolved. */ }
+	}
 	if (entry && /(^|[\\/])cli\.js$/.test(entry)) return { command: proc.execPath, args: [entry] };
 	return { command: "pi", args: [] };
 }
@@ -374,7 +427,7 @@ export class AgentRunner {
 			return;
 		}
 		const processGroup = detached && typeof child.pid === "number" && child.pid > 0 ? child.pid : undefined;
-		const live: LiveTask = { child, mutationStarts: new Map(), pending: new Map(), queries: new Map(), replies: new Map(), cancelStall: () => {}, cancelGrace: () => {}, processGroup, terminal: undefined, childExit: undefined, cleanupDeadlineAt: undefined, quarantined: false, nextId: 0, ipcClosed: false, acknowledgedIpcIds: new Set(), acknowledgedIpcOrder: [] };
+		const live: LiveTask = { child, mutationStarts: new Map(), pending: new Map(), queries: new Map(), replies: new Map(), cancelStall: () => {}, cancelGrace: () => {}, processGroup, terminal: undefined, childExit: undefined, diagnostics: new StderrTail(), cleanupDeadlineAt: undefined, quarantined: false, nextId: 0, ipcClosed: false, acknowledgedIpcIds: new Set(), acknowledgedIpcOrder: [] };
 		this.live.set(id, live);
 		const permissionPipe = child.stdio?.[3];
 		if (hasParentPermissionChannel && permissionPipe !== undefined && permissionPipe !== null) {
@@ -400,8 +453,9 @@ export class AgentRunner {
 		const lines = new JsonLines((value) => this.receive(id, request, value));
 		child.stdout.setEncoding("utf8");
 		child.stdout.on("data", (chunk: string) => lines.push(chunk));
-		child.stderr?.on("data", () => {});
-		child.on("exit", (code) => this.exited(id, code));
+		child.stderr?.setEncoding("utf8");
+		child.stderr?.on("data", (chunk: string) => live.diagnostics.push(chunk));
+		child.on("exit", (code, signal) => this.exited(id, code, signal));
 		void this.send(id, { type: "get_state" }).then((response) => {
 			const data = response.data as { sessionFile?: unknown; model?: { provider?: unknown; id?: unknown } | null; thinkingLevel?: unknown } | undefined;
 			if (response.success !== true || live.terminal || this.live.get(id) !== live || !data) return;
@@ -676,10 +730,11 @@ export class AgentRunner {
 		this.finish(id, TASK_STATUS.FAILED, `could not start pi: ${error.message}`);
 	}
 
-	private exited(id: string, code: number | null): void {
+	private exited(id: string, code: number | null, signal: NodeJS.Signals | null): void {
 		const live = this.live.get(id);
 		if (!live) return;
 		live.childExit = code;
+		live.childSignal = signal;
 		if (this.groupExists(live)) {
 			if (!live.terminal) this.requestStop(id, TASK_STATUS.FAILED, `pi exited with code ${code ?? "unknown"} before agent_settled`);
 			return;
@@ -699,7 +754,34 @@ export class AgentRunner {
 			return;
 		}
 		const terminal = live.terminal;
-		this.finish(id, terminal ? terminal.status : TASK_STATUS.FAILED, terminal ? terminal.error : `pi exited with code ${live.childExit ?? "unknown"} before agent_settled`);
+		const status = terminal?.status ?? TASK_STATUS.FAILED;
+		const error = terminal ? terminal.error : `pi exited with code ${live.childExit ?? "unknown"} before agent_settled`;
+		if (status !== TASK_STATUS.FAILED) {
+			live.diagnostics.finish();
+			this.finish(id, status, error);
+			return;
+		}
+		// Node's exit can precede the final stderr data. Drain briefly, but never
+		// let an inherited pipe hold completion indefinitely after group cleanup.
+		const stderr = live.child.stderr;
+		let finished = false;
+		let cancelDrain = () => {};
+		const finish = () => {
+			if (finished) return;
+			finished = true;
+			cancelDrain();
+			stderr?.off("end", finish);
+			stderr?.off("close", finish);
+			const tail = live.diagnostics.finish();
+			const exit = `exit code: ${live.childExit ?? "unknown"}${live.childSignal ? `; signal: ${live.childSignal}` : ""}`;
+			this.finish(id, status, `${error ?? "pi failed"} (${exit})${tail ? `\nstderr tail:\n${tail}` : ""}`);
+		};
+		if (!stderr || stderr.readableEnded || stderr.destroyed) finish();
+		else {
+			stderr.once("end", finish);
+			stderr.once("close", finish);
+			cancelDrain = this.deps.schedule(finish, STDERR_DRAIN_MS);
+		}
 	}
 
 	private finish(id: string, status: TaskRecord["status"], error: string | null): void {

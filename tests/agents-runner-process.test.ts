@@ -18,6 +18,39 @@ const waitFor = async (predicate: () => boolean, timeoutMs = 10_000): Promise<vo
 	}
 };
 
+test("real startup exits preserve the last stderr line without a session or RPC response", { timeout: 10_000 }, async () => {
+	const store = new TaskStore();
+	const children: ReturnType<typeof nodeSpawn>[] = [];
+	const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 5_000 }, {
+		spawn: (_command, _args, options) => {
+			const child = nodeSpawn(process.execPath, ["--eval", `
+				process.stderr.write("initial diagnostic\\n" + "warning\\n".repeat(10_000));
+				process.stderr.write("Authorization: Bearer fixture-secret\\nBootstrap failed: café", () => process.exit(17));
+			`], options);
+			children.push(child);
+			return child;
+		},
+		now: Date.now,
+		schedule: (fn, ms) => {
+			const timer = setTimeout(fn, ms);
+			return () => clearTimeout(timer);
+		},
+		pi: { command: process.execPath, args: [] },
+	}, { askUser: async () => ({ cancelled: true }) });
+	try {
+		const finished = await runner.waitFor(runner.run(request("startup fixture")).id);
+		assert.equal(finished.status, TASK_STATUS.FAILED);
+		assert.equal(finished.sessionPath, null);
+		assert.match(finished.error ?? "", /exit code: 17/);
+		assert.match(finished.error ?? "", /Bootstrap failed: café/);
+		assert.doesNotMatch(finished.error ?? "", /initial diagnostic|fixture-secret/);
+		assert.ok((finished.error?.length ?? 0) < 4600);
+	} finally {
+		runner.cancelAll();
+		for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+	}
+});
+
 test("POSIX cleanup retains queue slots when a leader exits but its TERM-resisting descendant remains", { skip: process.platform === "win32" }, async () => {
 	const store = new TaskStore();
 	let launches = 0;

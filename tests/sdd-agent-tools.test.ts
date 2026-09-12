@@ -6,7 +6,7 @@ import test from "node:test";
 const repoRoot = process.cwd();
 const assetsAgentsDir = join(repoRoot, "assets", "agents");
 const GENERIC_ROLE_TOOLS: Record<string, string[]> = {
-	"gentle-ai-explore.md": ["read", "grep", "find", "codegraph"],
+	"gentle-ai-explore.md": ["read", "grep", "find", "codegraph", "bash", "web_search", "source_check", "fetch_content", "get_search_content"],
 	"gentle-ai-worker.md": ["read", "grep", "find", "edit", "write", "bash", "mem_save"],
 	"gentle-ai-verify.md": ["read", "grep", "find", "bash"],
 };

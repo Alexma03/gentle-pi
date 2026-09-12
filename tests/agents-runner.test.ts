@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { AGENT_MODE, type AgentDefinition } from "../lib/agents-config.ts";
 import { TASK_STATUS, TaskStore } from "../lib/agents-protocol.ts";
@@ -248,6 +251,29 @@ test("piCommand reuses the running pi entry point and honors the override", () =
 	assert.deepEqual(piCommand({ execPath: "/bin/node", argv: ["/bin/node", "/x/dist/cli.js"], env: {} }), { command: "/bin/node", args: ["/x/dist/cli.js"] });
 	assert.deepEqual(piCommand({ execPath: "/bin/node", argv: ["/bin/node", "/x/other.js"], env: {} }), { command: "pi", args: [] });
 	assert.deepEqual(piCommand({ execPath: "/bin/node", argv: [], env: { GENTLE_PI_AGENTS_PI: "/opt/pi --flag" } }), { command: "/opt/pi", args: ["--flag"] });
+});
+
+test("piCommand resolves an npm bin symlink instead of searching the workspace PATH", { skip: process.platform === "win32" }, (t) => {
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "gentle cli resolution ")));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const bin = join(root, "bin");
+	const bundle = join(root, "package", "dist", "bundle");
+	mkdirSync(bin, { recursive: true });
+	mkdirSync(bundle, { recursive: true });
+	const cli = join(bundle, "cli.js");
+	const alias = join(bin, "pi");
+	writeFileSync(cli, "// Pi CLI fixture\n");
+	symlinkSync(cli, alias);
+	const proc = { execPath: "/workspace-node/bin/node", argv: ["node", alias], env: { PATH: "/workspace-node/bin:/mise/shims" } };
+	assert.deepEqual(piCommand(proc), { command: proc.execPath, args: [cli] });
+	assert.deepEqual(piCommand({ ...proc, env: { ...proc.env, GENTLE_PI_AGENTS_PI: "/custom/pi --flag" } }), { command: "/custom/pi", args: ["--flag"] }, "explicit user override still wins");
+	symlinkSync(alias, join(bin, "pi-alias"));
+	assert.deepEqual(piCommand({ ...proc, argv: ["node", join(bin, "pi-alias")] }), { command: proc.execPath, args: [cli] });
+	writeFileSync(join(bundle, "other.js"), "// not Pi\n");
+	symlinkSync(join(bundle, "other.js"), join(bin, "other"));
+	assert.deepEqual(piCommand({ ...proc, argv: ["node", join(bin, "other")] }), { command: "pi", args: [] });
+	symlinkSync(join(bundle, "missing.js"), join(bin, "broken"));
+	assert.deepEqual(piCommand({ ...proc, argv: ["node", join(bin, "broken")] }), { command: "pi", args: [] });
 });
 
 test("JsonLines splits on LF only, tolerates CRLF, and skips lines that are not JSON", () => {
@@ -510,6 +536,119 @@ test("AgentRunner fails only the task when the child cannot start, and the queue
 	assert.equal(children.length, 2, "the next queued task starts");
 	assert.equal(store.get(next.id)?.status, TASK_STATUS.RUNNING);
 	assert.ok(timers.filter((timer) => timer.ms === 10_000).some((timer) => timer.cancelled), "the failed task's inactivity watchdog is cancelled");
+});
+
+test("AgentRunner retains sanitized stderr and exit evidence after an early IPC error", async () => {
+	const h = harness({ exitOnKill: false, maxConcurrency: 1 });
+	const task = h.runner.run(request());
+	const next = h.runner.run(request());
+	await tick();
+	const fake = h.children[0];
+	fake.child.pid = 123;
+	fake.child.stderr!.emit("data", "\u001b[31mBootstrap failed\u001b[0m\nAuthor");
+	fake.child.stderr!.emit("data", "ization: Bearer private-credential\n{\"api_key\":\"private-api-key\"}\n");
+	fake.child.stderr!.emit("data", "https://user:private-password@example.test/?token=private-query\n");
+	fake.fail("IPC channel is already disconnected");
+	assert.equal(h.store.get(task.id)?.status, TASK_STATUS.RUNNING);
+	assert.equal(h.store.get(next.id)?.status, TASK_STATUS.QUEUED);
+	fake.child.stderr!.emit("data", "Cannot load extension\u0007");
+	fake.exit(1);
+	fake.child.stderr!.emit("data", "\nFinal pipe diagnostic\n");
+	const finished = await h.runner.waitFor(task.id);
+	assert.equal(finished.status, TASK_STATUS.FAILED);
+	assert.match(finished.error ?? "", /IPC channel is already disconnected/);
+	assert.match(finished.error ?? "", /exit code: 1/);
+	assert.match(finished.error ?? "", /stderr tail:[\s\S]*Bootstrap failed[\s\S]*Cannot load extension/);
+	assert.match(finished.error ?? "", /Final pipe diagnostic/);
+	assert.doesNotMatch(finished.error ?? "", /private-|\u001b|\u0007/);
+	await tick();
+	assert.deepEqual(h.finishes, [task.id]);
+	assert.equal(h.store.get(next.id)?.status, TASK_STATUS.RUNNING);
+	h.runner.cancel(next.id);
+	h.children[1].exit(0);
+});
+
+test("AgentRunner bounds stderr without leaking fragments of an oversized secret line", async () => {
+	const h = harness();
+	const task = h.runner.run(request());
+	await tick();
+	const fake = h.children[0];
+	fake.child.stderr!.emit("data", "OLD-DIAGNOSTIC\n");
+	for (let i = 0; i < 1000; i += 1) fake.child.stderr!.emit("data", "startup warning\n");
+	fake.child.stderr!.emit("data", "token=");
+	for (let i = 0; i < 100; i += 1) fake.child.stderr!.emit("data", "private-fragment".repeat(100));
+	fake.child.stderr!.emit("data", "\nLast startup error\n");
+	fake.exit(2);
+	const error = (await h.runner.waitFor(task.id)).error ?? "";
+	assert.match(error, /Last startup error/);
+	assert.doesNotMatch(error, /OLD-DIAGNOSTIC|private-fragment/);
+	assert.ok(error.length < 4600, "persisted stderr tail stays bounded");
+});
+
+test("AgentRunner redacts multiline keys and credential lines even across single-character chunks", async () => {
+	const h = harness();
+	const task = h.runner.run(request());
+	await tick();
+	const fake = h.children[0];
+	const input = [
+		"-----BEGIN PRIVATE KEY-----", "private-material", "-----END PRIVATE KEY-----",
+		"Cookie: private-cookie", "password=private-password", '"access_token": "private-token"',
+		"sk-private-api", "Bearer private-bearer", "https://example.test/?anything=private-query",
+		"Last readable error: café",
+	].join("\n");
+	for (const char of input) fake.child.stderr!.emit("data", char);
+	fake.exit(1);
+	const error = (await h.runner.waitFor(task.id)).error ?? "";
+	assert.match(error, /Last readable error: café/);
+	assert.match(error, /\[REDACTED\]/);
+	assert.doesNotMatch(error, /private-/);
+});
+
+test("AgentRunner bounds the stderr drain and ignores output after finalization", async () => {
+	const h = harness();
+	const task = h.runner.run(request());
+	await tick();
+	const fake = h.children[0];
+	fake.child.stderr!.emit("data", "before drain deadline");
+	fake.exit(1);
+	assert.equal(h.store.get(task.id)?.status, TASK_STATUS.RUNNING);
+	const drain = h.timers.find((timer) => timer.ms === 100 && !timer.cancelled);
+	assert.ok(drain, "a failed exit must not wait indefinitely for an inherited stderr pipe");
+	drain.fn();
+	const finished = await h.runner.waitFor(task.id);
+	assert.match(finished.error ?? "", /before drain deadline/);
+	const snapshot = structuredClone(finished);
+	fake.child.stderr!.emit("data", "too late");
+	await tick();
+	assert.deepEqual(h.store.get(task.id), snapshot);
+	assert.deepEqual(h.finishes, [task.id]);
+});
+
+test("AgentRunner reports a signal exit without inventing an exit code", async () => {
+	const h = harness();
+	const task = h.runner.run(request());
+	await tick();
+	h.children[0].exit(null, "SIGKILL");
+	const error = (await h.runner.waitFor(task.id)).error ?? "";
+	assert.match(error, /signal: SIGKILL/);
+	assert.match(error, /exit code: unknown/);
+	assert.doesNotMatch(error, /stderr tail/);
+});
+
+for (const outcome of ["success", "cancel"] as const) test(`AgentRunner does not attach stderr to ${outcome}`, async () => {
+	const h = harness();
+	const task = h.runner.run(request());
+	await tick();
+	const fake = h.children[0];
+	fake.child.stderr!.emit("data", "nonfatal warning\n");
+	if (outcome === "cancel") h.runner.cancel(task.id);
+	else {
+		fake.emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] }] });
+		fake.emit({ type: "agent_settled" });
+	}
+	const finished = await h.runner.waitFor(task.id);
+	assert.equal(finished.status, outcome === "cancel" ? TASK_STATUS.CANCELLED : TASK_STATUS.COMPLETED);
+	assert.equal(finished.error, outcome === "cancel" ? "cancelled" : null);
 });
 
 test("AgentRunner turns a synchronous spawn exception into a failed task", async () => {

@@ -20,6 +20,7 @@ export const THINKING_LEVEL = {
 	MEDIUM: "medium",
 	HIGH: "high",
 	XHIGH: "xhigh",
+	MAX: "max",
 } as const;
 
 export type ThinkingLevel = (typeof THINKING_LEVEL)[keyof typeof THINKING_LEVEL];
