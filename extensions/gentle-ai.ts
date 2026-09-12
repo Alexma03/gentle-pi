@@ -5760,7 +5760,7 @@ async function reconcileNativeMutationFailure(
 			provider_action: status.action,
 			replayability: status.replayability,
 			...(status.action === "start" && projectedStatus.next_action === undefined ? { next_action: "start" } : {}),
-			required_status_action: requiredStatusActionText(target.lineageId),
+			required_status_action: projectedStatus.required_status_action ?? requiredStatusActionText(target.lineageId),
 		};
 	} catch (statusError) {
 		return {
