@@ -4672,8 +4672,8 @@ function nativeStatusUnsupported(operation: ReviewControllerOperation): Record<s
 // Bundled and source module instances can coexist, making instanceof insufficient.
 function asNativeReviewCliError(error: unknown): { code: string; diagnostics: NativeReviewProcessDiagnostics } | undefined {
 	if (error instanceof NativeReviewCliError) return error;
-	if (!(error instanceof Error) || error.name !== "NativeReviewCliError") return undefined;
-	const value = error as unknown as { code?: unknown; diagnostics?: unknown };
+	if (!isRecord(error) || error.name !== "NativeReviewCliError") return undefined;
+	const value = error as { code?: unknown; diagnostics?: unknown };
 	if (typeof value.code !== "string") return undefined;
 	const diagnostics = sanitizeForeignNativeReviewDiagnostics(value.diagnostics);
 	return diagnostics === undefined || value.code !== diagnostics.error_code ? undefined : { code: value.code, diagnostics };
@@ -5755,6 +5755,8 @@ async function reconcileNativeMutationFailure(
 			authority_applicability: status.applicability,
 			provider_action: status.action,
 			replayability: status.replayability,
+			...(status.action === "start" && projectedStatus.next_action === undefined ? { next_action: "start" } : {}),
+			required_status_action: projectedStatus.required_status_action ?? requiredStatusActionText(target.lineageId),
 		};
 	} catch (statusError) {
 		return {
@@ -7718,16 +7720,21 @@ async function executeReviewControllerOperation(
 				if (error instanceof CandidateViewError && (error.reason === "base-ref-ambiguous" || error.reason === "base-ref-unresolvable" || error.reason === "base-ref-moved")) return nativeStartRejection(error.reason);
 				const value = error as { mutationOutcome?: unknown; nextAction?: unknown };
 				const provenNoMutation = value.mutationOutcome === "none";
-				const preNativeCandidateFailure = !nativeStartAttempted && error instanceof CandidateViewError;
-				if (candidateView && candidateViews && (provenNoMutation || preNativeCandidateFailure)) candidateViews.cleanup(candidateView.token);
+				const preNativeFailure = !nativeStartAttempted;
+				if (candidateView && candidateViews && (provenNoMutation || preNativeFailure)) candidateViews.cleanup(candidateView.token);
+				const nativeCliError = asNativeReviewCliError(error);
 				const failure = provenNoMutation
 					? error
-					: preNativeCandidateFailure
-						? Object.assign(error, { candidateViewPreNative: true })
-						: Object.assign(error instanceof Error ? error : new Error(String(error)), {
-							mutationOutcome: "unknown",
-							nextAction: "review.status",
-						});
+					: preNativeFailure
+						? error instanceof CandidateViewError ? Object.assign(error, { candidateViewPreNative: true }) : error
+						: Object.assign(
+							error instanceof Error
+								? error
+								: nativeCliError === undefined
+									? new Error(String(error))
+									: { name: "NativeReviewCliError", code: nativeCliError.code, diagnostics: nativeCliError.diagnostics },
+							{ mutationOutcome: "unknown", nextAction: "review.status" },
+						);
 				return reconcileNativeMutationFailure(parameters.operation, failure, nativeReviewCli, {
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
