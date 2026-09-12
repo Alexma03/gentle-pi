@@ -7724,13 +7724,13 @@ async function executeReviewControllerOperation(
 				if (error instanceof CandidateViewError && (error.reason === "base-ref-ambiguous" || error.reason === "base-ref-unresolvable" || error.reason === "base-ref-moved")) return nativeStartRejection(error.reason);
 				const value = error as { mutationOutcome?: unknown; nextAction?: unknown };
 				const provenNoMutation = value.mutationOutcome === "none";
-				const preNativeCandidateFailure = !nativeStartAttempted && error instanceof CandidateViewError;
-				if (candidateView && candidateViews && (provenNoMutation || preNativeCandidateFailure)) candidateViews.cleanup(candidateView.token);
+				const preNativeFailure = !nativeStartAttempted;
+				if (candidateView && candidateViews && (provenNoMutation || preNativeFailure)) candidateViews.cleanup(candidateView.token);
 				const nativeCliError = asNativeReviewCliError(error);
 				const failure = provenNoMutation
 					? error
-					: preNativeCandidateFailure
-						? Object.assign(error, { candidateViewPreNative: true })
+					: preNativeFailure
+						? error instanceof CandidateViewError ? Object.assign(error, { candidateViewPreNative: true }) : error
 						: Object.assign(
 							error instanceof Error
 								? error

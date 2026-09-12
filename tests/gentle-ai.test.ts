@@ -1007,6 +1007,23 @@ test("ordinary START reports candidate-owner preparation failure as pre-native n
 		message: "candidate view rejected before native START",
 	});
 
+	let materializationStatusCalls = 0;
+	const rawMaterializationFailure = await __testing.executeReviewControllerOperation(
+		{ operation: "start", input: JSON.stringify({ mode: "ordinary" }) },
+		process.cwd(),
+		{
+			targetStatus: async () => { materializationStatusCalls += 1; return target; },
+			start: async () => { nativeStarts += 1; throw new Error("native START must not run"); },
+		} as unknown as NativeReviewCli,
+		undefined,
+		{ createOrReuse: () => { throw new Error("candidate materialization failed"); } } as unknown as CandidateViewRegistry,
+	);
+	assert.equal(nativeStarts, 0);
+	assert.equal(materializationStatusCalls, 1, "a pre-START materialization failure never triggers reconciliation STATUS");
+	assert.equal(rawMaterializationFailure.outcome, "native-operation-failed");
+	assert.equal(rawMaterializationFailure.mutation_outcome, "none");
+	assert.equal(rawMaterializationFailure.next_action, "resolve-native-operation-failure");
+
 	let statusCalls = 0;
 	const afterNative = await __testing.executeReviewControllerOperation(
 		{ operation: "start", input: JSON.stringify({ mode: "ordinary" }) },
