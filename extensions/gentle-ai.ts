@@ -1500,6 +1500,22 @@ function loadReviewAutograntConfig(
 	}
 }
 
+type ReviewConsentSelectionKind = "none" | "host-session" | "autogrant" | "ask-ui";
+
+// Pure decision table for the consent UI step (FORK-DIVERGENCE, issue #944).
+// Priority: no epoch → none; active session grant wins over file opt-in;
+// file opt-in answers through the normal provider "granted" path.
+function resolveReviewConsentSelectionKind(options: {
+	epochDefined: boolean;
+	permissionAlreadyActive: boolean;
+	standingAutogrant: boolean;
+}): ReviewConsentSelectionKind {
+	if (!options.epochDefined) return "none";
+	if (options.permissionAlreadyActive) return "host-session";
+	if (options.standingAutogrant) return "autogrant";
+	return "ask-ui";
+}
+
 /**
  * Load the runtime guardrails config.
  *
@@ -7798,6 +7814,7 @@ export const __testing = {
 	loadRuntimeGuardrailsConfig,
 	loadReviewAutograntConfig,
 	parseReviewAutograntConfigFile,
+	resolveReviewConsentSelectionKind,
 	buildGentlePrompt,
 	nativeStatusUnsupported,
 	executeReviewControllerOperation,
@@ -8205,13 +8222,18 @@ function createGentleAiExtensionForTesting(
 					const standingAutogrant = !permissionAlreadyActive &&
 						permissionWorkspaceRoot !== undefined &&
 						loadReviewAutograntConfig(permissionWorkspaceRoot).autoGrant;
-					const selection = initialEpoch === undefined
-						? undefined
-						: permissionAlreadyActive
-							? { kind: "host-session" as const }
-							: standingAutogrant
-								? { kind: "provider" as const, answer: "granted" as const }
-								: await presentReviewConsentUi(ctx, eligiblePending.consent);
+					const selectionKind = resolveReviewConsentSelectionKind({
+						epochDefined: initialEpoch !== undefined,
+						permissionAlreadyActive,
+						standingAutogrant,
+					});
+					const selection = selectionKind === "host-session"
+						? { kind: "host-session" as const }
+						: selectionKind === "autogrant"
+							? { kind: "provider" as const, answer: "granted" as const }
+							: selectionKind === "ask-ui"
+								? await presentReviewConsentUi(ctx, eligiblePending.consent)
+								: undefined;
 					if (selection !== undefined) {
 						const confirmedIdentity = await capturePermissionIdentity(ctx, permissionWorkspaceRoot);
 						if (initialEpoch !== undefined && confirmedIdentity !== undefined && sameReviewSessionIdentity(initialIdentity, confirmedIdentity) && reviewSessionPermissionEpoch(confirmedIdentity) === initialEpoch) {

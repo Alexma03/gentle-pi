@@ -8,7 +8,7 @@ import { __testing } from "../extensions/gentle-ai.ts";
 // FORK-DIVERGENCE (Alexma03/gentle-pi, upstream issue #944): standing review
 // auto-grant config. Mirrors the runtime-guardrails loading contract.
 
-const { loadReviewAutograntConfig, parseReviewAutograntConfigFile } = __testing;
+const { loadReviewAutograntConfig, parseReviewAutograntConfigFile, resolveReviewConsentSelectionKind } = __testing;
 
 function makeTmpDir(): string {
 	return mkdtempSync(join(tmpdir(), "gentle-pi-autogrant-"));
@@ -87,4 +87,32 @@ test("loadReviewAutograntConfig: invalid global JSON fails safe (autoGrant=false
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("resolveReviewConsentSelectionKind: no epoch → none (never asks, never grants)", () => {
+	assert.equal(
+		resolveReviewConsentSelectionKind({ epochDefined: false, permissionAlreadyActive: false, standingAutogrant: true }),
+		"none",
+	);
+});
+
+test("resolveReviewConsentSelectionKind: active session grant wins over file opt-in", () => {
+	assert.equal(
+		resolveReviewConsentSelectionKind({ epochDefined: true, permissionAlreadyActive: true, standingAutogrant: true }),
+		"host-session",
+	);
+});
+
+test("resolveReviewConsentSelectionKind: file opt-in without session grant → autogrant", () => {
+	assert.equal(
+		resolveReviewConsentSelectionKind({ epochDefined: true, permissionAlreadyActive: false, standingAutogrant: true }),
+		"autogrant",
+	);
+});
+
+test("resolveReviewConsentSelectionKind: default off without session grant → ask-ui", () => {
+	assert.equal(
+		resolveReviewConsentSelectionKind({ epochDefined: true, permissionAlreadyActive: false, standingAutogrant: false }),
+		"ask-ui",
+	);
 });
