@@ -910,6 +910,52 @@ test("ordinary START binds the native workspace candidate and returns the native
 	assert.equal(startCalls, 1);
 });
 
+test("ordinary START preserves sanitized foreign diagnostics through one ambiguous reconciliation", async (t) => {
+	const cwd = repository(t);
+	const target = startStatus(cwd);
+	let targetCalls = 0;
+	let startCalls = 0;
+	const native = {
+		targetStatus: async () => {
+			targetCalls += 1;
+			return target;
+		},
+		start: async () => {
+			startCalls += 1;
+			throw {
+				name: "NativeReviewCliError",
+				code: NATIVE_REVIEW_ERROR_CODE.NON_ZERO,
+				mutationOutcome: "unknown",
+				nextAction: "review.status",
+				diagnostics: {
+					operation: "review/start",
+					error_code: NATIVE_REVIEW_ERROR_CODE.NON_ZERO,
+					exit_code: 1,
+					timed_out: false,
+					output_limit_exceeded: false,
+					stderr: "token=secret",
+				},
+			};
+		},
+	} as unknown as NativeReviewCli;
+
+	const result = await __testing.executeReviewControllerOperation({ operation: "start", input: JSON.stringify({ mode: "ordinary" }) }, cwd, native);
+	assert.equal(result.outcome, "native-mutation-status-reconciled");
+	assert.equal(result.mutation_outcome, "unknown");
+	assert.deepEqual(result.diagnostics, {
+		operation: "review/start",
+		error_code: NATIVE_REVIEW_ERROR_CODE.NON_ZERO,
+		exit_code: 1,
+		timed_out: false,
+		output_limit_exceeded: false,
+		stderr: "token=[REDACTED]",
+	});
+	assert.match(String(result.required_status_action), /Run target-scoped review\.status/);
+	assert.equal(result.next_action, "start");
+	assert.equal(targetCalls, 2, "START failure reconciles STATUS exactly once");
+	assert.equal(startCalls, 1, "reconciliation never replays START");
+});
+
 for (const statusSchema of ["gentle-ai.review-integration.status/v6", "gentle-ai.review-integration.status/v7"]) test(`pre-lineage intended-untracked selection revalidates and starts at an explicit workspace root (${statusSchema})`, async (t) => {
 	const cwd = realpathSync(repository(t)), sessionCwd = repository(t), eligible = "selected.md";
 	writeFileSync(join(cwd, eligible), "selected\n");
@@ -1465,6 +1511,24 @@ test("STATUS preserves a native process failure without inventing authority reco
 	assert.equal(result.status, "blocked");
 	assert.equal(result.outcome, "native-operation-failed");
 	assert.equal(result.mutation_outcome, "none");
+});
+
+test("foreign native errors with malformed diagnostics remain untrusted", async () => {
+	const native = {
+		targetStatus: async () => { throw {
+			name: "NativeReviewCliError",
+			code: NATIVE_REVIEW_ERROR_CODE.NON_ZERO,
+			diagnostics: {
+				operation: "review/status",
+				error_code: "forged-code",
+				timed_out: false,
+				output_limit_exceeded: false,
+			},
+		}; },
+	} as unknown as NativeReviewCli;
+	const result = await __testing.executeReviewControllerOperation({ operation: "status" }, process.cwd(), native);
+	assert.equal(result.outcome, "native-operation-failed");
+	assert.equal("diagnostics" in result, false);
 });
 
 test("STATUS preserves ambiguous native status as read-only provider-owned state", async () => {
