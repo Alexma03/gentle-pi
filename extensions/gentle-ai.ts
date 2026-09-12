@@ -1424,6 +1424,82 @@ function parseGuardrailsConfigFile(
 	return { autonomousMode, guardedCommands };
 }
 
+// ---------------------------------------------------------------------------
+// FORK-DIVERGENCE (Alexma03/gentle-pi, upstream issue #944): standing review
+// auto-grant. When the user explicitly opts in via review-autogrant.json
+// (global or per-repo, default off), each fresh validated provider consent
+// envelope is answered "granted" through the normal answer-consent path with
+// an audit notice. This never approves verdicts, acknowledgements,
+// maintenance, or delivery; it only automates the per-candidate START
+// consent answer for always-RDD flows.
+// ---------------------------------------------------------------------------
+
+const REVIEW_AUTOGRANT_CONFIG_FILE = "review-autogrant.json";
+
+interface ReviewAutograntConfig {
+	autoGrant: boolean;
+}
+
+const REVIEW_AUTOGRANT_SAFE_CONFIG: ReviewAutograntConfig = { autoGrant: false };
+
+function parseReviewAutograntConfigFile(raw: string): ReviewAutograntConfig | undefined {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return undefined;
+	}
+	if (!isRecord(parsed)) return undefined;
+	return { autoGrant: parsed.autoGrant === true };
+}
+
+/**
+ * Load the fork-local standing review auto-grant config.
+ *
+ * Resolution order (project overrides global):
+ *   1. Check GENTLE_PI_REVIEW_AUTOGRANT env var — if "1", forces autoGrant=true.
+ *   2. Read global config from ${gentlePiConfigHome}/review-autogrant.json
+ *   3. Read project config from ${cwd}/.pi/gentle-ai/review-autogrant.json
+ *      (project value overrides global)
+ *   4. Any parse/read error anywhere → fail safe (return autoGrant=false)
+ */
+function loadReviewAutograntConfig(
+	cwd: string,
+	options: LoadGuardrailsOptions = {},
+): ReviewAutograntConfig {
+	try {
+		if (process.env.GENTLE_PI_REVIEW_AUTOGRANT === "1") {
+			return { autoGrant: true };
+		}
+
+		const configHome = options.gentlePiConfigHome ?? gentleAiConfigHome();
+		const globalConfigPath = join(configHome, REVIEW_AUTOGRANT_CONFIG_FILE);
+		const projectConfigPath = join(cwd, ".pi", "gentle-ai", REVIEW_AUTOGRANT_CONFIG_FILE);
+
+		let merged: ReviewAutograntConfig = { autoGrant: false };
+
+		if (existsSync(globalConfigPath)) {
+			const globalParsed = parseReviewAutograntConfigFile(
+				readFileSync(globalConfigPath, "utf8"),
+			);
+			if (!globalParsed) return REVIEW_AUTOGRANT_SAFE_CONFIG;
+			merged = globalParsed;
+		}
+
+		if (existsSync(projectConfigPath)) {
+			const projectParsed = parseReviewAutograntConfigFile(
+				readFileSync(projectConfigPath, "utf8"),
+			);
+			if (!projectParsed) return REVIEW_AUTOGRANT_SAFE_CONFIG;
+			merged = { autoGrant: projectParsed.autoGrant };
+		}
+
+		return merged;
+	} catch {
+		return REVIEW_AUTOGRANT_SAFE_CONFIG;
+	}
+}
+
 /**
  * Load the runtime guardrails config.
  *
@@ -7720,6 +7796,8 @@ export const __testing = {
 	guardedCommandPreview,
 	guardedCommandTitle,
 	loadRuntimeGuardrailsConfig,
+	loadReviewAutograntConfig,
+	parseReviewAutograntConfigFile,
 	buildGentlePrompt,
 	nativeStatusUnsupported,
 	executeReviewControllerOperation,
@@ -8122,16 +8200,26 @@ function createGentleAiExtensionForTesting(
 				} else if (eligiblePending !== undefined && initialIdentity !== undefined) {
 					const initialEpoch = reviewSessionPermissionEpoch(initialIdentity);
 					const permissionAlreadyActive = hasReviewSessionPermission(initialIdentity);
+					// FORK-DIVERGENCE (upstream issue #944): explicit file opt-in.
+					// Answers "granted" through the normal provider path, never inventing consent.
+					const standingAutogrant = !permissionAlreadyActive &&
+						permissionWorkspaceRoot !== undefined &&
+						loadReviewAutograntConfig(permissionWorkspaceRoot).autoGrant;
 					const selection = initialEpoch === undefined
 						? undefined
 						: permissionAlreadyActive
 							? { kind: "host-session" as const }
-							: await presentReviewConsentUi(ctx, eligiblePending.consent);
+							: standingAutogrant
+								? { kind: "provider" as const, answer: "granted" as const }
+								: await presentReviewConsentUi(ctx, eligiblePending.consent);
 					if (selection !== undefined) {
 						const confirmedIdentity = await capturePermissionIdentity(ctx, permissionWorkspaceRoot);
 						if (initialEpoch !== undefined && confirmedIdentity !== undefined && sameReviewSessionIdentity(initialIdentity, confirmedIdentity) && reviewSessionPermissionEpoch(confirmedIdentity) === initialEpoch) {
 							const answer = selection.kind === "provider" ? selection.answer : "granted";
 							details = await answerPendingConsent(answer);
+							if (standingAutogrant && completedGrantedReviewConsent(details)) {
+								try { ctx.ui.notify("Review auto-granted by fork-local standing policy (review-autogrant.json, see upstream issue #944).", "info"); } catch { /* Nonblocking indication only. */ }
+							}
 							if (!permissionAlreadyActive && selection.kind === "host-session" && completedGrantedReviewConsent(details)) {
 								if (grantReviewSessionPermission(confirmedIdentity, initialEpoch)) {
 									setReviewSessionPermissionStatus(ctx, true);
