@@ -1,12 +1,12 @@
 <a id="top"></a>
 
 <div align="center">
-  <img src="docs/assets/brand/gentle-pi-banner.png" width="1200" alt="Gentle Shell — The Gentle AI agent for Pi">
+  <img src="docs/assets/brand/gentle-pi-banner.png" width="1200" alt="gentle-shell — Ecosystem, Agent, One shell">
 </div>
 
-<h1 align="center">Gentle-PI™</h1>
+<h1 align="center">gentle-shell™</h1>
 
-<p align="center"><strong>Turn Pi from a powerful coding agent into a controlled development harness.</strong></p>
+<p align="center"><strong>Your coding agent for controlled development in the workspace you lead.</strong></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/gentle-pi"><img src="https://img.shields.io/npm/v/gentle-pi?style=for-the-badge&labelColor=1A1218&color=F095C8" alt="npm"></a>
@@ -30,14 +30,14 @@
 
 <br>
 
-<p align="center">Your terminal can run an agent. Your workspace should help you lead it.<br><strong>gentle-pi brings your agents, changes, tasks, and engineering workflow together—inside Pi.</strong></p>
+<p align="center">Your terminal can run an agent. Your workspace should help you lead it.<br><strong>gentle-shell is your coding agent, bringing your changes, tasks, and engineering workflow together—built for Pi.</strong></p>
 
-<p align="center"><sub>One workspace. Focused agents. A workflow you can inspect.</sub></p>
+<p align="center"><sub>One workspace. A coding agent you direct. A workflow you can inspect.</sub></p>
 
-<p align="center"><strong>BUILT FOR PI</strong> &nbsp;·&nbsp; Native workspace &nbsp;·&nbsp; Focused agents &nbsp;·&nbsp; Optional SDD</p>
+<p align="center"><strong>BUILT FOR PI</strong> &nbsp;·&nbsp; Coding-agent workspace &nbsp;·&nbsp; Focused agents &nbsp;·&nbsp; Optional SDD</p>
 
 <p align="center">
-  <a href="https://github.com/Gentleman-Programming/gentle-pi/stargazers"><strong>★ Star gentle-pi on GitHub</strong></a>
+  <a href="https://github.com/Gentleman-Programming/gentle-pi/stargazers"><strong>★ Star gentle-shell on GitHub</strong></a>
 </p>
 
 <div align="center">
@@ -72,19 +72,19 @@
 
 ---
 
-### Gentle Shell — The way Gentle-AI was intended
+### gentle-shell — Your coding agent, in the workspace you lead
 
 <p align="center">
-  <img src="docs/assets/features/gentle-shell.png" width="1200" alt="Gentle Shell showing an SDD agent task, todo list, changes summary, status bar, and usage footer in Pi">
+  <img src="docs/assets/features/gentle-shell.png" width="1200" alt="gentle-shell showing an SDD agent task, todo list, changes summary, status bar, and usage footer in Pi">
 </p>
 
-<strong>A complete workspace built for you.</strong> Gentle Shell transforms Pi into a full development environment with native plugins for agent orchestration, usage monitoring for supported provider accounts, and built-in diff views—all in one integrated layout.
+<strong>A complete workspace for the agent you direct.</strong> gentle-shell is your coding agent, built for Pi, with native workspace features for agent orchestration, usage monitoring for supported provider accounts, and built-in diff views—all in one integrated layout.
 
 See active tasks, session changes, and runtime status without leaving the work you are leading.
 
-<p align="center"><sub>Gentle Shell in action. Screenshot from <a href="https://raw.githubusercontent.com/Gentleman-Programming/gentle-ai/main/docs/assets/features/gentle-shell.png">Gentle-AI</a>.</sub></p>
+<p align="center"><sub>gentle-shell in action. Screenshot from <a href="https://raw.githubusercontent.com/Gentleman-Programming/gentle-ai/main/docs/assets/features/gentle-shell.png">Gentle-AI</a>.</sub></p>
 
-**[→ Read the Gentle Shell reference](docs/gentle-shell.md)**
+**[→ Read the gentle-shell reference](docs/gentle-shell.md)**
 
 ---
 
@@ -140,7 +140,7 @@ Review the exact change, not a moving target. Native review keeps one candidate 
 
 | Capability | What it brings to the workspace |
 | --- | --- |
-| Startup and runtime panel | A configurable Gentle entry point and visible runtime state for Pi. |
+| Startup and runtime panel | A configurable gentle-shell entry point and visible runtime state for Pi. |
 | Skills and delivery guidance | Package skills for documentation, issue work, PRs, reviews, and reviewable work units. |
 | Model, effort, persona, and profile controls | Explicit knobs for how Pi routes and presents work. |
 | Safety boundaries | Guards around destructive operations and sensitive-path handling. |
@@ -172,6 +172,8 @@ These are companions, not hidden prerequisites or a claim that every Pi installa
 ## Get started
 
 Install the stable release, then open Pi in the project you want to work on.
+
+> **Naming transition:** The product is called `gentle-shell`; the current npm package and repository remain `gentle-pi` until migration.
 
 ```bash
 # Stable release
@@ -206,7 +208,7 @@ Start with the product-facing destination, then move into the operational refere
 
 | Destination | Purpose |
 | --- | --- |
-| [Gentle Shell reference](docs/gentle-shell.md) | Workspace layout, changes, usage, agents, and todo interactions. |
+| [gentle-shell reference](docs/gentle-shell.md) | Workspace layout, changes, usage, agents, and todo interactions. |
 | [README technical reference](docs/readme-reference.md) | Preserved installation, release policy, configuration, SDD/OpenSpec, commands, skills, and contributor detail. |
 | [Review integration](docs/review-integration.md) | The provider/consumer boundary for native review. |
 | [Native authority architecture](docs/native-authority-architecture.md) | Ownership boundaries and review architecture. |
@@ -231,7 +233,7 @@ This project is built in public. Bring a real workflow, a sharp question, a bug 
 </p>
 
 <p align="center">
-  <a href="https://github.com/Gentleman-Programming/gentle-pi/graphs/contributors"><img src="https://contrib.rocks/image?repo=Gentleman-Programming/gentle-pi" alt="gentle-pi contributors"></a>
+  <a href="https://github.com/Gentleman-Programming/gentle-pi/graphs/contributors"><img src="https://contrib.rocks/image?repo=Gentleman-Programming/gentle-pi" alt="gentle-shell contributors"></a>
 </p>
 
 - Open an [issue](https://github.com/Gentleman-Programming/gentle-pi/issues) with the context needed to reproduce or understand the idea.
@@ -246,7 +248,7 @@ This project is built in public. Bring a real workflow, a sharp question, a bug 
 
 ## About the author
 
-`gentle-pi` is built by [Alan Buscaglia](https://github.com/Gentleman-Programming), the maker behind Gentleman Programming. It grew from a practical belief: capable agents are more useful when the human’s intent, review load, and delivery judgment stay visible all the way through the work.
+`gentle-shell` is built by [Alan Buscaglia](https://github.com/Gentleman-Programming), the maker behind Gentleman Programming. It grew from a practical belief: capable agents are more useful when the human’s intent, review load, and delivery judgment stay visible all the way through the work.
 
 Startup intro collaboration: thanks to [@aporcelli](https://github.com/aporcelli) and [`pi-gentle-startup`](https://github.com/aporcelli/pi-gentle-startup), which inspired the clean-screen startup animation, compact runtime panel, and pink visual treatment.
 
