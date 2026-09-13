@@ -4,7 +4,7 @@
   <img src="docs/assets/brand/gentle-pi-banner.svg" width="1200" alt="gentle-pi — Pi-native development environment">
 </div>
 
-<h1 align="center">gentle-pi™</h1>
+<h1 align="center">Gentle-Pi™</h1>
 
 <p align="center"><strong>Turn Pi from a powerful coding agent into a controlled development harness.</strong></p>
 
