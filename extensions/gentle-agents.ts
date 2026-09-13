@@ -197,9 +197,12 @@ export async function admitManagedRemediation(request: TaskRequest, input: unkno
 				task.error = "Managed remediation lacks complete passing planned-command evidence";
 			}
 			if (payload.outcome === "passed" && state.settlement && state.settlement.state !== "blocked") task.status = TASK_STATUS.COMPLETED;
-			if (!state.settlement || state.settlement.state === "blocked") {
+			if (!state.settlement) {
 				task.status = TASK_STATUS.FAILED;
 				task.error = "Native remediation settlement unresolved; retain exact history for reconciliation";
+			} else if (state.settlement.state === "blocked") {
+				task.status = TASK_STATUS.FAILED;
+				task.error = `Native remediation settlement blocked(${state.settlement.reason ?? "unspecified"}); current native admission decides any later attempt`;
 			}
 			await persist(task);
 		},
