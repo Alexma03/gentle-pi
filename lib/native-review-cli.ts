@@ -959,6 +959,13 @@ export const NATIVE_CLI_CONTRACTS = Object.freeze({
 	// negotiated START path Pi reads. The closed fields Pi consumes did not
 	// change between 2.6.0 and 2.7.0, so the columns match the 2.6.0 row.
 	"2.7.0": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
+	// Ground-truthed against the published v2.8.0 linux/amd64 binary from its
+	// signed release archive. The v2 lane still advertises capabilities/v2.5
+	// (protocol minor 5) with status/v7, consent/v3, and start/v4 schemas.
+	// The closed fields Pi consumes did not change between 2.7.0 and 2.8.0,
+	// so this row repeats 2.7.0. riskEvidence and hint remain dark because
+	// neither is proven to reach the negotiated START path Pi consumes.
+	"2.8.0": Object.freeze({ start: true, finalize: true, validate: true, bindSdd: true, status: true, inventory: true, reclaim: true, recover: true, abandon: true, quarantineLegacy: true, reconcileAuthority: true, repairLegacyAlias: true, mode: true, riskEvidence: false, hint: false, delivery: true }),
 });
 
 export interface NativeReviewProcessDiagnostics {
