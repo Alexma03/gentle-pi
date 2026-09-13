@@ -101,13 +101,14 @@ function readPackageJson(): PackageJson {
 	}
 }
 
-test("package declares the tested Pi minimum required for agent_settled", () => {
+test("technical reference declares the tested Pi minimum required for agent_settled", () => {
 	const manifest = readPackageJson();
 	assert.equal(manifest.peerDependencies?.["@earendil-works/pi-coding-agent"], ">=0.85.1");
 	assert.equal(manifest.devDependencies?.["@earendil-works/pi-coding-agent"], "0.85.1");
-	const readme = readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8");
-	assert.match(readme, /Pi 0\.85\.1 or newer/);
-	assert.match(readme, /agent_settled/);
+	const reference = readFileSync(join(PACKAGE_ROOT, "docs", "readme-reference.md"), "utf8");
+	assert.match(reference, /Pi 0\.85\.1 or newer/);
+	assert.match(reference, /agent_settled/);
+	assert.match(readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8"), /\]\(docs\/readme-reference\.md(?:#[^)]+)?\)/);
 });
 
 test("package manifest has no obsolete native activation build surface", () => {
@@ -229,12 +230,12 @@ test("generated runtime modules and packed-package checks are deterministic", ()
 test("package manifest ships and runs the checked-in package-local Gentle AI installer", () => {
 	const packageJson = readPackageJson();
 	const verifier = readFileSync(join(PACKAGE_ROOT, "scripts", "verify-package-files.mjs"), "utf8");
-	const readme = readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8");
+	const reference = readFileSync(join(PACKAGE_ROOT, "docs", "readme-reference.md"), "utf8");
 
 	assert.equal(packageJson.scripts?.postinstall, "node scripts/install-gentle-ai.mjs");
-	assert.match(readme, /run `node scripts\/install-gentle-ai\.mjs`/, "missing-binary recovery documentation must use the package postinstall entrypoint");
-	assert.match(readme, /installed `gentle-pi` package directory/, "recovery documentation must name the package working directory");
-	assert.match(readme, /if `GENTLE_PI_SKIP_GENTLE_AI_INSTALL` is set, remove or unset it before/i, "recovery documentation must prevent the installer skip from repeating");
+	assert.match(reference, /run `node scripts\/install-gentle-ai\.mjs`/, "missing-binary recovery documentation must use the package postinstall entrypoint");
+	assert.match(reference, /installed `gentle-pi` package directory/, "recovery documentation must name the package working directory");
+	assert.match(reference, /if `GENTLE_PI_SKIP_GENTLE_AI_INSTALL` is set, remove or unset it before/i, "recovery documentation must prevent the installer skip from repeating");
 	assert.ok(packageJson.files?.includes("scripts/"));
 	assert.match(verifier, /"scripts\/install-gentle-ai\.mjs"/);
 	assert.match(verifier, /"scripts\/gentle-ai-installer\.mjs"/);
@@ -1540,8 +1541,8 @@ test("bounded review keeps the Judgment Day skill contract at canon metadata ver
 	assert.doesNotMatch(frontmatter, /^  version: "1\.4"$/m);
 });
 
-test("README documents dynamic Gentle AI RDD ownership and the installed permission boundary", () => {
-	const readme = readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8");
+test("technical reference documents dynamic Gentle AI RDD ownership and the installed permission boundary", () => {
+	const reference = readFileSync(join(PACKAGE_ROOT, "docs", "readme-reference.md"), "utf8");
 	for (const clause of [
 		"Gentle AI dynamically supplies runtime-specific RDD instructions",
 		"does not define an RDD lifecycle",
@@ -1549,9 +1550,9 @@ test("README documents dynamic Gentle AI RDD ownership and the installed permiss
 		"package-managed isolated installation",
 		"Project and user overrides may shadow a package asset",
 	]) {
-		assert.ok(readme.includes(clause), `README missing dynamic RDD clause: ${clause}`);
+		assert.ok(reference.includes(clause), `technical reference missing dynamic RDD clause: ${clause}`);
 	}
-	assert.doesNotMatch(readme, /New ordinary review uses compact `gentle_review` `start -> finalize -> validate`\./);
+	assert.doesNotMatch(reference, /New ordinary review uses compact `gentle_review` `start -> finalize -> validate`\./);
 });
 
 
