@@ -101,13 +101,14 @@ function readPackageJson(): PackageJson {
 	}
 }
 
-test("package declares the tested Pi minimum required for agent_settled", () => {
+test("technical reference declares the tested Pi minimum required for agent_settled", () => {
 	const manifest = readPackageJson();
 	assert.equal(manifest.peerDependencies?.["@earendil-works/pi-coding-agent"], ">=0.85.1");
 	assert.equal(manifest.devDependencies?.["@earendil-works/pi-coding-agent"], "0.85.1");
-	const readme = readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8");
-	assert.match(readme, /Pi 0\.85\.1 or newer/);
-	assert.match(readme, /agent_settled/);
+	const reference = readFileSync(join(PACKAGE_ROOT, "docs", "readme-reference.md"), "utf8");
+	assert.match(reference, /Pi 0\.85\.1 or newer/);
+	assert.match(reference, /agent_settled/);
+	assert.match(readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8"), /docs\/readme-reference\.md/);
 });
 
 test("package manifest has no obsolete native activation build surface", () => {
@@ -229,12 +230,12 @@ test("generated runtime modules and packed-package checks are deterministic", ()
 test("package manifest ships and runs the checked-in package-local Gentle AI installer", () => {
 	const packageJson = readPackageJson();
 	const verifier = readFileSync(join(PACKAGE_ROOT, "scripts", "verify-package-files.mjs"), "utf8");
-	const readme = readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8");
+	const reference = readFileSync(join(PACKAGE_ROOT, "docs", "readme-reference.md"), "utf8");
 
 	assert.equal(packageJson.scripts?.postinstall, "node scripts/install-gentle-ai.mjs");
-	assert.match(readme, /run `node scripts\/install-gentle-ai\.mjs`/, "missing-binary recovery documentation must use the package postinstall entrypoint");
-	assert.match(readme, /installed `gentle-pi` package directory/, "recovery documentation must name the package working directory");
-	assert.match(readme, /if `GENTLE_PI_SKIP_GENTLE_AI_INSTALL` is set, remove or unset it before/i, "recovery documentation must prevent the installer skip from repeating");
+	assert.match(reference, /run `node scripts\/install-gentle-ai\.mjs`/, "missing-binary recovery documentation must use the package postinstall entrypoint");
+	assert.match(reference, /installed `gentle-pi` package directory/, "recovery documentation must name the package working directory");
+	assert.match(reference, /if `GENTLE_PI_SKIP_GENTLE_AI_INSTALL` is set, remove or unset it before/i, "recovery documentation must prevent the installer skip from repeating");
 	assert.ok(packageJson.files?.includes("scripts/"));
 	assert.match(verifier, /"scripts\/install-gentle-ai\.mjs"/);
 	assert.match(verifier, /"scripts\/gentle-ai-installer\.mjs"/);
@@ -277,20 +278,20 @@ test("package manifest installs pi-pretty through a wrapper without bundling nat
 	);
 });
 
-test("package verification binds the published Gentle AI v2.7.0 runtime pin", () => {
+test("package verification binds the published Gentle AI v2.8.1 runtime pin", () => {
 	const installer = readFileSync(join(PACKAGE_ROOT, "scripts", "gentle-ai-installer.mjs"), "utf8");
 	const binary = readFileSync(join(PACKAGE_ROOT, "lib", "gentle-ai-binary.ts"), "utf8");
 	const verifier = readFileSync(join(PACKAGE_ROOT, "scripts", "verify-package-files.mjs"), "utf8");
 
-	assert.match(installer, /INSTALLER_VERSION = "2\.7\.0"/);
+	assert.match(installer, /INSTALLER_VERSION = "2\.8\.1"/);
 	assert.match(installer, /GENTLE_AI_WINDOWS_SOURCE_PACKAGE.*GENTLE_AI_WINDOWS_SOURCE_MODULE/);
-	assert.match(installer, /GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM = "h1:SE4KCLo3y1qWaTq\+7HJKZ1DkAAAl\+w\+82YY0\+qQkFwM="/);
+	assert.match(installer, /GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM = "h1:EixFRy7P3JLVi1ovr18pMxQIrtjDib9i7VEH9g4XRVE="/);
 	assert.match(installer, /GOTOOLCHAIN: "local"/);
 	assert.match(installer, /GOSUMDB: "sum\.golang\.org"/);
 	assert.match(binary, /GENTLE_AI_VERSION = INSTALLER_VERSION/);
 	assert.match(binary, /GO_SUMDB_SOURCE_BUILD/);
 	assert.match(binary, /GENTLE_AI_WINDOWS_SOURCE_MODULE_CHECKSUM/);
-	assert.match(verifier, /v2\.7\.0/);
+	assert.match(verifier, /v2\.8\.1/);
 });
 
 
@@ -653,6 +654,7 @@ test("unowned legacy research migrates by exact normalized hash, preserving rout
 	const packaged = readFileSync(join(PACKAGE_ROOT, "assets", "agents", "sdd-research.md"), "utf8");
 	const oldAdmission = "- Evidence grants for this runtime are `documentation=[]; open-web=[]`. Never infer evidence capability from bash, persistence tools, or any inherited tool; persistence tools are not evidence grants. Unsupported or undeclared classes deny admission and emit no claims.\n- Because this runtime declares no evidence grants, retain the selected request, persist a `blocked` outcome with no claims, and stop.\n";
 	const legacy = packaged
+		.replace(/## Parent Preflight Transport\n[\s\S]*?(?=## Skill Resolution Contract)/, "")
 		.replace(/## Bounded artifact handoff\n[\s\S]*?(?=## Memory Contract)/, "")
 		.replace(/  - fetch_content\n  - web_search\n  - source_check\n  - get_search_content\n/, "")
 		.replace(/- Use the injected `## SDD Research Capabilities`[\s\S]*?(?=- Admission denial)/, oldAdmission)
@@ -1507,9 +1509,9 @@ test("pi-pretty wrapper uses real package path resolution for pnpm symlink insta
 	assert.match(wrapper, /quietToolsEnabled/);
 });
 
-test("v2.5.0 release package and runtime stop before publication", () => {
+test("v2.6.1 release package and runtime stop before publication", () => {
 	const packageJson = readPackageJson();
-	assert.equal(packageJson.version, "2.5.0", "the release manifest must remain explicitly pinned to v2.5.0");
+	assert.equal(packageJson.version, "2.6.1", "the release manifest must remain explicitly pinned to v2.6.1");
 	assert.equal(
 		packageJson.scripts?.test,
 		"node --experimental-strip-types --test tests/*.test.ts && pnpm run check:provider-contract && pnpm run test:harness",
@@ -1539,8 +1541,8 @@ test("bounded review keeps the Judgment Day skill contract at canon metadata ver
 	assert.doesNotMatch(frontmatter, /^  version: "1\.4"$/m);
 });
 
-test("README documents dynamic Gentle AI RDD ownership and the installed permission boundary", () => {
-	const readme = readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8");
+test("technical reference documents dynamic Gentle AI RDD ownership and the installed permission boundary", () => {
+	const reference = readFileSync(join(PACKAGE_ROOT, "docs", "readme-reference.md"), "utf8");
 	for (const clause of [
 		"Gentle AI dynamically supplies runtime-specific RDD instructions",
 		"does not define an RDD lifecycle",
@@ -1548,9 +1550,9 @@ test("README documents dynamic Gentle AI RDD ownership and the installed permiss
 		"package-managed isolated installation",
 		"Project and user overrides may shadow a package asset",
 	]) {
-		assert.ok(readme.includes(clause), `README missing dynamic RDD clause: ${clause}`);
+		assert.ok(reference.includes(clause), `technical reference missing dynamic RDD clause: ${clause}`);
 	}
-	assert.doesNotMatch(readme, /New ordinary review uses compact `gentle_review` `start -> finalize -> validate`\./);
+	assert.doesNotMatch(reference, /New ordinary review uses compact `gentle_review` `start -> finalize -> validate`\./);
 });
 
 

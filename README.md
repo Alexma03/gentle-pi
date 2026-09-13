@@ -136,6 +136,16 @@ Review the exact change, not a moving target. Native review keeps one candidate 
 
 ---
 
+### What's new in v2.6.0
+
+The [v2.6.0 release](https://github.com/Gentleman-Programming/gentle-pi/releases/tag/v2.6.0) brings a more persistent, inspectable Pi workspace:
+
+- **Shell:** registered worktrees survive reloads; `/gentle:changes` groups dirty roots with diffs, status, and line counts; fullscreen navigation, responsive sidebars, and cached frames stay live without unnecessary redraws.
+- **Agents and profiles:** the Agents view shows orchestrator/session hierarchy, retained completion, abort, and lost-exit history, parent-child handoff, and model, effort, and usage observability. Named `/gentle:profiles` atomically route the orchestrator independently from packaged and review roles.
+- **Control and recovery:** native SDD requires parent-confirmed preflight; native review supports intended-untracked selection, consent, and provider continuations. Subsystems install with explicit recovery guidance when npm lifecycle scripts were skipped; Pi Git installs are recognized globally; custom ask responses are opt-in. Windows keeps child consoles hidden and fixes ownership mode; Gentle Todo keeps the next pending task visible when collapsed.
+
+---
+
 ### Also in the box
 
 | Capability | What it brings to the workspace |
@@ -171,19 +181,22 @@ These are companions, not hidden prerequisites or a claim that every Pi installa
 
 ## Get started
 
-Install the stable release, then open Pi in the project you want to work on.
+Install the stable release, restart Pi, then synchronize the installed assets.
 
 > **Naming transition:** The product is called `gentle-shell`; the current npm package and repository remain `gentle-pi` until migration.
 
 ```bash
-# Stable release
-pi install npm:gentle-pi@2.5.0
+# Published stable release: v2.6.0
+pi install npm:gentle-pi@2.6.0
+
+# Restart Pi, then run:
+gentle-ai sync
 
 # Start Pi in your project
 pi
 ```
 
-See the [v2.5.0 release notes](https://github.com/Gentleman-Programming/gentle-pi/releases/tag/v2.5.0) for version-specific changes.
+See the [v2.6.0 release notes](https://github.com/Gentleman-Programming/gentle-pi/releases/tag/v2.6.0) for version-specific changes.
 
 ```text
 /gentle:status
@@ -194,7 +207,7 @@ See the [v2.5.0 release notes](https://github.com/Gentleman-Programming/gentle-p
 
 > **Fullscreen installation note:** a recognized global installation persists Pi’s `"tuiMode": "fullscreen"` setting. Project-local and other install paths do not receive that change.
 
-For prerequisites, full install behavior, and release policy, use the **[installation reference](docs/readme-reference.md#install)**. For substantial work, choose SDD/OpenSpec explicitly and review the phase artifacts before implementation.
+For prerequisites, source-checkout instructions, full install behavior, and release policy, use the **[installation reference](docs/readme-reference.md#install)**. For substantial work, choose SDD/OpenSpec explicitly and review the phase artifacts before implementation.
 
 <p align="right"><a href="#top">Back to top ↑</a></p>
 

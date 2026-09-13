@@ -44,6 +44,8 @@ import {
 	isPackageManagedSddAsset,
 	isSddPreflightTrigger,
 	renderSddPreflightPrompt,
+	isParentConfirmedSddPreflightContext,
+	SHIPPED_SDD_AGENT_NAMES,
 	SDD_PREFLIGHT_FIELDS,
 	type SddPreflightField,
 	type SddPreflightPreferences,
@@ -676,6 +678,15 @@ function hasTaskScopedAllowedEditSurfaces(...values: unknown[]): boolean {
 	}
 
 	return hasSection;
+}
+
+function sddDispatchAgentName(input: unknown): string | undefined {
+	if (!isRecord(input)) return undefined;
+	if (typeof input.agent === "string" && SDD_AGENT_NAME_SET.has(input.agent)) return input.agent;
+	if (Array.isArray(input.agent) && input.agent.some((agent) => typeof agent === "string" && SDD_AGENT_NAME_SET.has(agent))) {
+		return "invalid";
+	}
+	return undefined;
 }
 
 function rejectUnscopedBoundedWriterDispatch(input: unknown): { block: true; reason: string } | undefined {
@@ -1661,22 +1672,7 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
 	/\.(?:pem|key|p12|pfx)$/,
 ];
 
-const SDD_AGENT_NAMES = [
-	"sdd-init",
-	"sdd-onboard",
-	"sdd-explore",
-	"sdd-research",
-	"sdd-proposal",
-	"sdd-spec",
-	"sdd-design",
-	"sdd-tasks",
-	"sdd-status",
-	"sdd-apply",
-	"sdd-verify",
-	"sdd-sync",
-	"sdd-archive",
-] as const;
-const SDD_AGENT_NAME_SET = new Set<string>(SDD_AGENT_NAMES);
+const SDD_AGENT_NAME_SET = new Set<string>(SHIPPED_SDD_AGENT_NAMES);
 const SDD_CHANGE_FLAG = "gentle-sdd-change";
 const SDD_CHANGE_KEYS = ["changeName", "phase", "workspaceRoot"] as const;
 
@@ -1687,7 +1683,7 @@ const JUDGMENT_DAY_AGENT_NAMES = [
 ] as const;
 
 const CORE_MODEL_AGENT_NAMES = [
-	...SDD_AGENT_NAMES,
+	...SHIPPED_SDD_AGENT_NAMES,
 	...JUDGMENT_DAY_AGENT_NAMES,
 ] as const;
 const CORE_MODEL_AGENT_NAME_SET = new Set<string>(CORE_MODEL_AGENT_NAMES);
@@ -1732,7 +1728,7 @@ function isSddAgentStartEvent(event: unknown): boolean {
 	if (candidates.some((value) => SDD_AGENT_NAME_SET.has(value)) || sddPhaseFromAgentStartEvent(event) !== undefined) return true;
 
 	const systemPrompt = readStringPath(event, ["systemPrompt"]) ?? "";
-	return SDD_AGENT_NAMES.some((name) => {
+	return SHIPPED_SDD_AGENT_NAMES.some((name) => {
 		const phase = name.replace(/^sdd-/, "");
 		return new RegExp(`\\bSDD ${phase} executor\\b`, "i").test(systemPrompt);
 	});
@@ -1843,7 +1839,15 @@ async function resolveSelectedNativeSddChangeStartup(
 	}
 	if (selection.phase === "remediate") {
 		if (status.nextRecommended !== "remediate" || status.remediationState?.failedEvidenceRevision !== selection.failedEvidenceRevision) throw new Error("Stale remediation selection");
-	} else if (status.nextRecommended !== selection.phase || status.dependencies[selection.phase] !== "ready" || status.blockedReasons.length > 0) {
+	} else if (status.nextRecommended !== selection.phase || status.dependencies[selection.phase] !== "ready" || (status.blockedReasons.length > 0 && selection.phase !== "verify")) {
+		// Native's contract gates terminal, archive, and apply work on a
+		// non-empty `blockedReasons`, and it deliberately keeps the `verify`
+		// route runnable, because the blocker can name the evidence refresh
+		// that is its own remedy ("failed verification evidence is incomplete;
+		// rerun SDD verification", gentle-ai#3538). Vetoing that route made the
+		// native-recommended phase unreachable (gentle-pi#972). The other
+		// phases still fail closed, and every blocker stays in the injected
+		// status for reporting.
 		throw new Error(`SDD selection native status blocks phase ${selection.phase}; it cannot execute.`);
 	}
 	return { selection, status };
@@ -4676,8 +4680,8 @@ function nativeStatusUnsupported(operation: ReviewControllerOperation): Record<s
 // Bundled and source module instances can coexist, making instanceof insufficient.
 function asNativeReviewCliError(error: unknown): { code: string; diagnostics: NativeReviewProcessDiagnostics } | undefined {
 	if (error instanceof NativeReviewCliError) return error;
-	if (!(error instanceof Error) || error.name !== "NativeReviewCliError") return undefined;
-	const value = error as unknown as { code?: unknown; diagnostics?: unknown };
+	if (!isRecord(error) || error.name !== "NativeReviewCliError") return undefined;
+	const value = error as { code?: unknown; diagnostics?: unknown };
 	if (typeof value.code !== "string") return undefined;
 	const diagnostics = sanitizeForeignNativeReviewDiagnostics(value.diagnostics);
 	return diagnostics === undefined || value.code !== diagnostics.error_code ? undefined : { code: value.code, diagnostics };
@@ -5759,6 +5763,8 @@ async function reconcileNativeMutationFailure(
 			authority_applicability: status.applicability,
 			provider_action: status.action,
 			replayability: status.replayability,
+			...(status.action === "start" && projectedStatus.next_action === undefined ? { next_action: "start" } : {}),
+			required_status_action: projectedStatus.required_status_action ?? requiredStatusActionText(target.lineageId),
 		};
 	} catch (statusError) {
 		return {
@@ -7722,16 +7728,21 @@ async function executeReviewControllerOperation(
 				if (error instanceof CandidateViewError && (error.reason === "base-ref-ambiguous" || error.reason === "base-ref-unresolvable" || error.reason === "base-ref-moved")) return nativeStartRejection(error.reason);
 				const value = error as { mutationOutcome?: unknown; nextAction?: unknown };
 				const provenNoMutation = value.mutationOutcome === "none";
-				const preNativeCandidateFailure = !nativeStartAttempted && error instanceof CandidateViewError;
-				if (candidateView && candidateViews && (provenNoMutation || preNativeCandidateFailure)) candidateViews.cleanup(candidateView.token);
+				const preNativeFailure = !nativeStartAttempted;
+				if (candidateView && candidateViews && (provenNoMutation || preNativeFailure)) candidateViews.cleanup(candidateView.token);
+				const nativeCliError = asNativeReviewCliError(error);
 				const failure = provenNoMutation
 					? error
-					: preNativeCandidateFailure
-						? Object.assign(error, { candidateViewPreNative: true })
-						: Object.assign(error instanceof Error ? error : new Error(String(error)), {
-							mutationOutcome: "unknown",
-							nextAction: "review.status",
-						});
+					: preNativeFailure
+						? error instanceof CandidateViewError ? Object.assign(error, { candidateViewPreNative: true }) : error
+						: Object.assign(
+							error instanceof Error
+								? error
+								: nativeCliError === undefined
+									? new Error(String(error))
+									: { name: "NativeReviewCliError", code: nativeCliError.code, diagnostics: nativeCliError.diagnostics },
+							{ mutationOutcome: "unknown", nextAction: "review.status" },
+						);
 				return reconcileNativeMutationFailure(parameters.operation, failure, nativeReviewCli, {
 					cwd: defaultCwd,
 					...(parameters.lineageId === undefined ? {} : { lineageId: parameters.lineageId }),
@@ -8422,7 +8433,7 @@ function createGentleAiExtensionForTesting(
 			}
 		}
 		try {
-			if (isSddAgent && !getSddPreflightPreferences(ctx)) {
+			if (isSddAgent && !getSddPreflightPreferences(ctx) && ctx.mode !== "rpc") {
 				await runSddPreflight(ctx);
 			}
 		} catch (error) {
@@ -8431,6 +8442,9 @@ function createGentleAiExtensionForTesting(
 			return { systemPrompt: `${event.systemPrompt}\n\nSDD preflight unresolved: ${error instanceof Error ? error.message : String(error)}\nSTOP: Do not initialize the project, launch phases, write artifacts, or infer consent. Request session preflight confirmation before continuing.` };
 		}
 		const prefs = getSddPreflightPreferences(ctx);
+		// RPC children never resolve or persist defaults. The parent dispatch gate
+		// transports the rendered block in the existing task context, and Gentle
+		// Agents refuses a missing/malformed payload before spawning the child.
 		const sddPrompt =
 			prefs && (!isNamedAgent || isSddAgent)
 				? `\n\n${renderSddPreflightPrompt(prefs)}`
@@ -8555,6 +8569,48 @@ function createGentleAiExtensionForTesting(
 		);
 		if (sensitivePathDenied) return sensitivePathDenied;
 		if (event.toolName === "subagent_run") {
+			const sddAgent = sddDispatchAgentName(event.input);
+			if (sddAgent === "invalid") {
+				return { block: true, reason: "SDD dispatch requires exactly one shipped SDD agent name." };
+			}
+			if (sddAgent !== undefined) {
+				// An RPC child is a delegated actor, never an authority originator. It
+				// must receive the already-confirmed block from its interactive parent.
+				if (ctx.mode === "rpc") {
+					return { block: true, reason: "SDD dispatch refused: an RPC child cannot originate or persist SDD preflight defaults." };
+				}
+				try {
+					const prefs = getSddPreflightPreferences(ctx) ?? await runSddPreflight(ctx);
+					const rendered = renderSddPreflightPrompt(prefs);
+					if (!prefs.prompted && ctx.hasUI) {
+						return { block: true, reason: "SDD dispatch refused: interactive parent preflight lacks current-session confirmation." };
+					}
+					if (!isRecord(event.input)) {
+						return { block: true, reason: "SDD dispatch refused: child input is malformed." };
+					}
+					if (event.input.context !== undefined && typeof event.input.context !== "string") {
+						return { block: true, reason: "SDD dispatch refused: child context must be text." };
+					}
+					// The existing context payload is the sole parent-to-child transport.
+					// Refuse a caller-authored lookalike so the child receives one exact,
+					// parent-rendered authority block rather than an ambiguous mixture.
+					const context = typeof event.input.context === "string" ? event.input.context.trim() : "";
+					if (/^## SDD Session Preflight[ \t]*$/m.test(context)) {
+						return { block: true, reason: "SDD dispatch refused: child context already contains an untrusted preflight block." };
+					}
+					event.input.context = context.length === 0
+						? rendered
+						: `${rendered}\n\n${context}`;
+					if (!isParentConfirmedSddPreflightContext(event.input.context)) {
+						return { block: true, reason: "SDD dispatch refused: rendered preflight transport is malformed." };
+					}
+				} catch (error) {
+					return {
+						block: true,
+						reason: `SDD dispatch refused before child launch: ${error instanceof Error ? error.message : String(error)}`,
+					};
+				}
+			}
 			const judgmentDayFixDenied = rejectInvalidJudgmentDayFixDispatch(event.input);
 			if (judgmentDayFixDenied) return judgmentDayFixDenied;
 			const writerScopeDenied = rejectUnscopedBoundedWriterDispatch(event.input);
@@ -8599,7 +8655,11 @@ function createGentleAiExtensionForTesting(
 				ctx.ui.notify("Usage: /gentle:sdd-preflight [--edit]", "warning");
 				return;
 			}
-			await runSddPreflight(ctx, args.trim() === "--edit" ? SDD_PREFLIGHT_FIELDS : []);
+			try {
+				await runSddPreflight(ctx, args.trim() === "--edit" ? SDD_PREFLIGHT_FIELDS : []);
+			} catch (error) {
+				ctx.ui?.notify(error instanceof Error ? error.message : String(error), "warning");
+			}
 		},
 	});
 

@@ -218,6 +218,63 @@ test("selected native v2 failures fail closed without consulting the local resol
 	);
 });
 
+function nativeStartup(
+	serialized: unknown,
+	cwd: string,
+	agentName: string,
+	native: { sddStatus: (request: unknown) => Promise<unknown> },
+) {
+	return (__testing as unknown as {
+		resolveSelectedNativeSddChangeStartup(
+			serialized: unknown, cwd: string, agentName: string,
+			native: { sddStatus?: (request: unknown) => Promise<unknown> },
+		): Promise<{ selection: { changeName: string; workspaceRoot: string; phase: string }; status: NativeSddStatusV2 }>;
+	}).resolveSelectedNativeSddChangeStartup(serialized, cwd, agentName, native);
+}
+
+function verifyRefreshAuthority(root: string, blockedReasons: readonly string[]) {
+	return {
+		schemaName: "gentle-ai.sdd-status", schemaVersion: 2, changeName: "alpha", artifactStore: "openspec",
+		planningHome: { mode: "repo-local", path: join(root, "openspec") }, changeRoot: join(root, "openspec/changes/alpha"),
+		actionContext: { mode: "repo-local", workspaceRoot: root, allowedEditRoots: [root] },
+		dependencies: { proposal: "all_done", specs: "all_done", design: "all_done", tasks: "all_done", apply: "all_done", verify: "ready", archive: "blocked" },
+		phaseInstructions: { apply: ["done"], verify: ["rerun SDD verification"], remediate: ["failed evidence"], archive: ["blocked"] },
+		blockedReasons: [...blockedReasons], nextRecommended: "verify",
+	};
+}
+
+test("a native verify evidence-refresh route starts under its own blocker while every other phase stays closed", async (t) => {
+	const root = workspace(t);
+	const refreshReason = "failed verification evidence is incomplete; rerun SDD verification";
+	const authority = verifyRefreshAuthority(root, [refreshReason]);
+	const startup = await nativeStartup(
+		JSON.stringify({ changeName: "alpha", workspaceRoot: root, phase: "verify" }),
+		root,
+		"sdd-verify",
+		{ sddStatus: async () => authority },
+	);
+	assert.deepEqual(startup.selection, { changeName: "alpha", workspaceRoot: root, phase: "verify" });
+	assert.equal(startup.status, authority, "the validated native status is injected whole, blockers included");
+	assert.deepEqual(startup.status.blockedReasons, [refreshReason], "the blocking reason is preserved for reporting");
+
+	for (const phase of ["apply", "archive"] as const) {
+		const gated = {
+			...verifyRefreshAuthority(root, [refreshReason]),
+			nextRecommended: phase,
+			dependencies: { ...authority.dependencies, [phase]: "ready", verify: "all_done" },
+		};
+		await assert.rejects(
+			() => nativeStartup(
+				JSON.stringify({ changeName: "alpha", workspaceRoot: root, phase }),
+				root,
+				`sdd-${phase}`,
+				{ sddStatus: async () => gated },
+			),
+			/native status blocks phase/i,
+		);
+	}
+});
+
 test("a throwing SDD selection flag reader fails closed without resolving an unselected status", (t) => {
 	const root = workspace(t);
 	assert.equal(__testing.readSddChangeFlag({ getFlag: () => false } as never), undefined);
