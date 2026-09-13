@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { getPackageAssetOwner } from "../lib/sdd-preflight.ts";
+import { extractParentConfirmedSddPreflightContext, getPackageAssetOwner, isParentConfirmedSddPreflightContext, SHIPPED_SDD_AGENT_NAMES } from "../lib/sdd-preflight.ts";
 import { NativeReviewCliV216, NativeReviewCliError, createNodeExecFileAdapter, decodeNativeSddStatusV2, type NativeReviewCli, type NativeSddAcquireRequest, type NativeSddSettleRequest } from "../lib/native-review-cli.ts";
 import { spawn } from "node:child_process";
 import { recordReviewMutation } from "../lib/review-reminder-receipt.ts";
@@ -30,7 +30,6 @@ import { openInExternalEditor } from "./gentle-shell.ts";
 import { resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import { assertResearchCheckpoint, parseResearchPersistence, RESEARCH_PERSISTENCE_ENTRY, canonicalArtifactPath, researchAgent, renderResearchCapabilities, RESEARCH_CHILD_TOOLS_ENV, RESEARCH_SELECTION_ENV, RESEARCH_ARTIFACT_ENV, parseResearchArtifactIntent, researchArtifactCall, researchArtifactReadback, type ResearchArtifactIntent, type ResearchWriteIdentity } from "../lib/sdd-research-capabilities.ts";
 import { CHILD_METRICS_EVENT, CHILD_METRICS_REVOKED, childEvent, launchSelection, type LaunchSelection } from "../lib/runtime-metrics-children.ts";
-import { lookupPiCatalogName } from "../lib/runtime-metrics-pi-identity.ts";
 import { runtimeMetricsEnvAllows, type RuntimeMetricsPolicyDeps } from "../lib/runtime-metrics-policy.ts";
 
 // Gentle Agents: subagents as isolated `pi --mode rpc` children, a task
@@ -49,6 +48,8 @@ const STOP_KEY_DEFAULT = "alt+s";
 const RENDER_COALESCE_MS = 400;
 const CLOCK_TICK_MS = 1000;
 const TOOL_PREFIX = "subagent_";
+const SHIPPED_SDD_AGENT_NAME_SET = new Set(SHIPPED_SDD_AGENT_NAMES);
+
 const SDD_PHASE_BY_AGENT = {
 	"sdd-apply": "apply",
 	"sdd-remediate": "remediate",
@@ -196,9 +197,12 @@ export async function admitManagedRemediation(request: TaskRequest, input: unkno
 				task.error = "Managed remediation lacks complete passing planned-command evidence";
 			}
 			if (payload.outcome === "passed" && state.settlement && state.settlement.state !== "blocked") task.status = TASK_STATUS.COMPLETED;
-			if (!state.settlement || state.settlement.state === "blocked") {
+			if (!state.settlement) {
 				task.status = TASK_STATUS.FAILED;
 				task.error = "Native remediation settlement unresolved; retain exact history for reconciliation";
+			} else if (state.settlement.state === "blocked") {
+				task.status = TASK_STATUS.FAILED;
+				task.error = `Native remediation settlement blocked(${state.settlement.reason ?? "unspecified"}); current native admission decides any later attempt`;
 			}
 			await persist(task);
 		},
@@ -242,7 +246,6 @@ export interface AgentsDeps extends RunnerDeps {
 	runtimeMetricsPolicy?: RuntimeMetricsPolicyDeps;
 	metricsNow?: () => number;
 	metricsSchedule?: RunnerDeps["schedule"];
-	lookupPiCatalogName?: typeof lookupPiCatalogName;
 }
 
 export function agentRuntimePaths(home: string, agentHome = join(home, ".pi", "agent")): { sessions: string; transcripts: string } {
@@ -631,7 +634,6 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	const stoppingTaskIds = new Set<string>();
 	const yieldedTaskIds = new Set<string>();
 	const metricsNow = deps.metricsNow ?? (() => performance.now());
-	const catalogLookup = deps.lookupPiCatalogName ?? lookupPiCatalogName;
 	let metricsOwner = {};
 	const metricTasks = new Map<string, { selection?: LaunchSelection; started: number; launched: boolean; finished: boolean; current(): boolean; valid(): boolean }>();
 	const unsubscribeMetrics = pi.events.on(CHILD_METRICS_REVOKED, id => {
@@ -1045,12 +1047,16 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		const parentSessionId = ctx.sessionManager.getSessionId() ?? "";
 		const parentWorktreeRoot = ctx.sessionManager.getCwd();
 		const parentRepositoryIdentity = resolveCanonicalGitRepositoryIdentitySync(parentWorktreeRoot);
+		const sddPreflightContext = SHIPPED_SDD_AGENT_NAME_SET.has(agent.name)
+			? extractParentConfirmedSddPreflightContext(context)
+			: undefined;
 		return {
 			agent: research?.agent ?? agent,
 			remediationIntent,
 			prompt,
 			label,
 			context,
+			...(sddPreflightContext === undefined ? {} : { sddPreflightContext }),
 			mode,
 			cwd: target ?? parentWorktreeRoot,
 			parentSessionId,
@@ -1083,6 +1089,12 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	};
 
 	const launch = async (ctx: ExtensionContext, request: TaskRequest, signal?: AbortSignal): Promise<ToolText> => {
+		// This is the process-spawn boundary. A child receives its task context only
+		// after its RPC process starts, so validate the single parent transport here
+		// rather than letting a child invent/persist preferences during startup.
+		if (SHIPPED_SDD_AGENT_NAME_SET.has(request.agent.name) && !isParentConfirmedSddPreflightContext(request.context)) {
+			throw new Error("SDD child dispatch refused: parent-confirmed SDD preflight context is missing or malformed.");
+		}
 		let prepared: TaskRecord | undefined;
 		if (request.agent.name === "sdd-remediate") {
 			const previous = await loadHistory(tasksDir);
@@ -1109,7 +1121,6 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			onLaunch: () => { metrics.launched = true; request.onLaunch?.(); },
 			...(observe ? { canCollectResponseObservations: metrics.valid, prepareResponseObservations: async () => {
 				if (metrics.finished || owner !== metricsOwner || request.parentSessionId !== activeSessionId() || !runtimeMetricsEnvAllows(deps.env)) return false;
-				void catalogLookup({ provider: "openai", modelId: "gpt-4o" }).catch(() => {});
 				if (!metrics.valid()) return false;
 				metrics.selection = launchSelection(request.agent, request.model, request.thinking);
 				metrics.started = metricsNow();
@@ -1263,7 +1274,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 					artifact = parseResearchArtifactIntent(params.research_artifact ?? prior, previous.cwd, prior);
 				} catch (error) { return text(`Error: research continuation scope refused: ${String(error)}`, { error: "research scope" }); }
 			}
-			return launch(ctx, buildRequest(ctx, agent, String(params.prompt ?? ""), typeof params.label === "string" ? params.label : undefined, undefined, mode, previous.sessionPath, sddChange?.workspaceRoot ?? previous.cwd, sddChange, params.research_selection, artifact, params.remediation), signal);
+			return launch(ctx, buildRequest(ctx, agent, String(params.prompt ?? ""), typeof params.label === "string" ? params.label : undefined, previous.sddPreflightContext, mode, previous.sessionPath, sddChange?.workspaceRoot ?? previous.cwd, sddChange, params.research_selection, artifact, params.remediation), signal);
 		},
 	);
 

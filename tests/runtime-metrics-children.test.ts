@@ -6,11 +6,9 @@ import { runInNewContext } from "node:vm";
 import { parseAgentClass } from "../lib/runtime-metrics.ts";
 import { parseAgentDefinition, type AgentDefinition } from "../lib/agents-config.ts";
 import { normalizeRpcEvent, TASK_EVENT } from "../lib/agents-protocol.ts";
-import { lookupPiCatalogName } from "../lib/runtime-metrics-pi-identity.ts";
 import { ChildComposition, childEvent, classifyBuiltinAgent, launchSelection } from "../lib/runtime-metrics-children.ts";
 import { encodeNativeRuntimeEvent } from "../lib/runtime-metrics-native.ts";
 
-await lookupPiCatalogName({ provider: "openai", modelId: "gpt-4o" });
 const asset = new URL("../assets/agents/gentle-ai-worker.md", import.meta.url);
 const definition = parseAgentDefinition(readFileSync(asset, "utf8"), asset.pathname, "global");
 assert.ok("instructions" in definition);
@@ -123,7 +121,10 @@ test("launch distribution and each observed combination remain independent and p
 	assert.equal(view.settled, 1);
 	assert.equal(view.statuses.completed, 1);
 	assert.ok(!JSON.stringify(view).includes("local-"));
-	const privateLaunch = launchSelection({ ...workerDefinition, instructions: "private" }, { provider: "private", id: "private-model" }, "private-effort");
+	// "Private Vendor Co" fails the schema provider pattern (space, uppercase),
+	// unlike a genuine lowercase slug such as "private" that would now legitimately
+	// pass through as an open-weight provider name.
+	const privateLaunch = launchSelection({ ...workerDefinition, instructions: "private" }, { provider: "Private Vendor Co", id: "private-model" }, "private-effort");
 	const filtered = childEvent("local-session", "other", privateLaunch, "failed", {
 		coverage: "final_assistant_messages_only", agentSettled: false, responses: [response("private-model", "private-native")], droppedResponses: 0,
 	});
