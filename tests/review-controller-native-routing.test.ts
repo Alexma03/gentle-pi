@@ -298,6 +298,55 @@ test("approved acknowledgement burn tears down the retained candidate view and k
 	assert.ok(registry.hasProjection(lineageId, contributorRoot), "terminal approved cleanup keeps the lineage projection");
 });
 
+// gentle-ai#4003: the native burn is the committed authority outcome. A Pi-side
+// candidate-view teardown failure after it must never be reported as a failed
+// acknowledgement, or the caller cannot tell that authority was consumed.
+test("approved acknowledgement reports the burn truthfully when candidate-view cleanup fails after it", async (t) => {
+	const lineageId = "acknowledge-approved-deferred-cleanup";
+	const contributorRoot = candidateRepository(t);
+	writeFileSync(join(contributorRoot, "tracked.txt"), "candidate\n");
+	let failWorktreeRemove = true;
+	const registry = new CandidateViewRegistry((file, arguments_, options) => {
+		if (failWorktreeRemove && arguments_[0] === "worktree" && arguments_[1] === "remove") {
+			failWorktreeRemove = false;
+			throw Object.assign(new Error("simulated worktree removal failure"), { status: 128 });
+		}
+		return execFileSync(file, arguments_, options);
+	});
+	t.after(() => registry.cleanupAll());
+	const view = registry.create({ contributorRoot });
+	registry.retain(view.token, lineageId);
+	const statusRequests: unknown[] = [];
+	let acknowledgements = 0;
+	const native = {
+		targetStatus: async (request: unknown) => { statusRequests.push(request); return approvedAcknowledgementStatus(lineageId, contributorRoot); },
+		acknowledgeApproved: async () => { acknowledgements += 1; },
+	} as unknown as NativeReviewCli;
+
+	const completed = await __testing.executeReviewControllerOperation({ operation: "acknowledge-approved", lineageId }, contributorRoot, native, undefined, registry);
+
+	assert.equal(acknowledgements, 1, "exactly one native burn");
+	assert.equal(statusRequests.length, 1, "no STATUS reconciliation after a cleanup-only failure");
+	assert.equal(completed.status, "closed");
+	assert.equal(completed.outcome, "native-approved-acknowledgement-completed");
+	assert.equal(completed.authority, "burned");
+	assert.equal(completed.mutation_performed, true);
+	assert.equal(completed.mutation_outcome, "committed");
+	assert.deepEqual(completed.candidate_view_cleanup, {
+		status: "deferred",
+		diagnostics: { code: "candidate-view-git-failure", message: "candidate-view Git command worktree failed; inspect the candidate state before any new START" },
+		next_action: "retry-candidate-view-cleanup-or-remove-the-view-out-of-band",
+	});
+	assert.ok(existsSync(view.root), "a failed teardown preserves the candidate view");
+	assert.ok(registry.hasProjection(lineageId, contributorRoot), "the lineage projection survives the deferred cleanup");
+
+	// The residue stays recoverable: the registry still owns the view, so a
+	// later terminal cleanup removes it without replaying the burn.
+	registry.cleanupTerminal(lineageId, "approved", contributorRoot);
+	assert.equal(existsSync(view.root), false);
+	assert.equal(acknowledgements, 1);
+});
+
 test("ambiguous acknowledgement reconciles STATUS once without replaying the provider vector", async () => {
 	const lineageId = "ambiguous-acknowledgement";
 	let statusCalls = 0;
