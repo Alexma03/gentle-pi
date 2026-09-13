@@ -1839,7 +1839,15 @@ async function resolveSelectedNativeSddChangeStartup(
 	}
 	if (selection.phase === "remediate") {
 		if (status.nextRecommended !== "remediate" || status.remediationState?.failedEvidenceRevision !== selection.failedEvidenceRevision) throw new Error("Stale remediation selection");
-	} else if (status.nextRecommended !== selection.phase || status.dependencies[selection.phase] !== "ready" || status.blockedReasons.length > 0) {
+	} else if (status.nextRecommended !== selection.phase || status.dependencies[selection.phase] !== "ready" || (status.blockedReasons.length > 0 && selection.phase !== "verify")) {
+		// Native's contract gates terminal, archive, and apply work on a
+		// non-empty `blockedReasons`, and it deliberately keeps the `verify`
+		// route runnable, because the blocker can name the evidence refresh
+		// that is its own remedy ("failed verification evidence is incomplete;
+		// rerun SDD verification", gentle-ai#3538). Vetoing that route made the
+		// native-recommended phase unreachable (gentle-pi#972). The other
+		// phases still fail closed, and every blocker stays in the injected
+		// status for reporting.
 		throw new Error(`SDD selection native status blocks phase ${selection.phase}; it cannot execute.`);
 	}
 	return { selection, status };
