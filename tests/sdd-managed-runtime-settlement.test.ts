@@ -185,9 +185,11 @@ test("history pruning retains admitted unsettled and uncertain task payloads", a
 	const dir = await mkdtemp(join(tmpdir(), "remediation-history-")); t.after(() => rm(dir, { recursive: true, force: true }));
 	await saveTask(dir, { id: "retained", agent: "sdd-remediate", status: "failed", createdAt: 1, sddRemediation: { token: "opaque", settlementUncertain: true, settle: { requestId: "exact" } } } as unknown as TaskRecord, emptyThread());
 	for (const state of ["blocked", "complete"] as const) await saveTask(dir, { id: state, agent: "sdd-remediate", status: "failed", createdAt: 2, sddRemediation: { acquireResult: { state } } } as unknown as TaskRecord, emptyThread());
+	await saveTask(dir, { id: "settled-blocked", agent: "sdd-remediate", status: "failed", createdAt: 3, sddRemediation: { settlement: { state: "blocked", reason: "maintainer_decision" } } } as unknown as TaskRecord, emptyThread());
 	await pruneHistory(dir, 0);
 	const stored = await loadHistory(dir);
 	assert.equal(stored.length, 1); assert.equal(stored[0].task.sddRemediation.settle.requestId, "exact");
+	assert.ok(!stored.some(entry => entry.task.id === "settled-blocked"), "a known blocked settlement is prunable like any terminal task");
 });
 
 
@@ -213,6 +215,41 @@ test("native refusal or uncertain settlement is not a completed managed correcti
 	await admitted.finalizeRemediation(task, { spawned: true, exited: true, cleanupConfirmed: true });
 	assert.equal(task.status, "failed");
 	assert.match(task.error, /settlement/);
+});
+test("a received blocked settlement names the block; a lost settlement reply retains unresolved history", async () => {
+	const known = await admissionFixture({ sddAttemptSettle: async () => ({ state: "blocked", reason: "maintainer_decision" }) });
+	known.task.status = "completed";
+	await known.admitted.finalizeRemediation(known.task, { spawned: true, exited: true, cleanupConfirmed: true });
+	assert.equal(known.task.status, "failed");
+	assert.match(known.task.error, /blocked\(maintainer_decision\)/);
+	assert.doesNotMatch(known.task.error, /unresolved/);
+	assert.equal(remediationUnresolved(known.task), false);
+
+	const unspecified = await admissionFixture({ sddAttemptSettle: async () => ({ state: "blocked" }) });
+	unspecified.task.status = "completed";
+	await unspecified.admitted.finalizeRemediation(unspecified.task, { spawned: true, exited: true, cleanupConfirmed: true });
+	assert.equal(unspecified.task.status, "failed");
+	assert.match(unspecified.task.error, /blocked\(unspecified\)/, "a settlement without a reason is distinguishable from one whose reason is literally blocked");
+	assert.doesNotMatch(unspecified.task.error, /unresolved/);
+
+	let attempts = 0;
+	const uncertain = await admissionFixture({ sddAttemptSettle: async () => { attempts++; throw new Error("lost reply"); } });
+	uncertain.task.status = "completed";
+	await uncertain.admitted.finalizeRemediation(uncertain.task, { spawned: true, exited: true, cleanupConfirmed: true });
+	assert.equal(attempts, 2);
+	assert.equal(uncertain.task.status, "failed");
+	assert.match(uncertain.task.error, /unresolved/);
+	assert.equal(remediationUnresolved(uncertain.task), true);
+});
+test("remediationUnresolved treats a received settlement as terminal, regardless of state, unless uncertain", () => {
+	// A terminal acquire result keeps the final branch false, so the token and
+	// actor-claim assertions below discriminate on those fields alone.
+	const base = { acquire: {}, acquireResult: { state: "complete" } } as unknown as TaskRecord["sddRemediation"];
+	assert.equal(remediationUnresolved({ sddRemediation: { ...base } } as unknown as TaskRecord), false);
+	assert.equal(remediationUnresolved({ sddRemediation: { ...base, settlement: { state: "blocked", reason: "maintainer_decision" } } } as unknown as TaskRecord), false);
+	assert.equal(remediationUnresolved({ sddRemediation: { ...base, settlement: { state: "blocked", reason: "maintainer_decision" }, settlementUncertain: true } } as unknown as TaskRecord), true);
+	assert.equal(remediationUnresolved({ sddRemediation: { ...base, actorClaimed: true } } as unknown as TaskRecord), true);
+	assert.equal(remediationUnresolved({ sddRemediation: { ...base, token: "retained" } } as unknown as TaskRecord), true);
 });
 
 

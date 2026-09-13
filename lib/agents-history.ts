@@ -16,7 +16,13 @@ export function remediationUnresolved(task: TaskRecord): boolean {
 	const state = task.sddRemediation;
 	if (!state) return false;
 	if (state.acquireUncertain || state.settlementUncertain) return true;
-	if (state.settlement) return state.settlement.state === "blocked";
+	// A received settlement is a definite native outcome, whatever its state
+	// (including "blocked"): it is terminal task history, never local
+	// ambiguity. Native admission is the sole authority over any later
+	// attempt for the same cwd/change; only genuinely uncertain outcomes, or
+	// no settlement at all with a still-retained token/claimed actor, are
+	// unresolved.
+	if (state.settlement) return false;
 	return !!state.token || !!state.actorClaimed || !["blocked", "complete"].includes(state.acquireResult?.state ?? "");
 }
 
