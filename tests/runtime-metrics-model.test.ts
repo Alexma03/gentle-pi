@@ -56,3 +56,21 @@ test("literal custom/custom passes through", () => {
 test("surrounding whitespace is trimmed before matching", () => {
 	assert.deepEqual(normalizeRuntimeModel("  nan  ", "  deepseek-v4-flash  "), { provider: "nan", id: "deepseek-v4-flash" });
 });
+
+// The mirrored pattern is unambiguous (every suffix group starts with a
+// mandatory separator), so a long alphanumeric run followed by an invalid
+// character cannot trigger catastrophic backtracking in V8. The bound below
+// is generous on purpose: it catches an exponential regression, not jitter.
+test("a pathological 64-character id is rejected in linear time", () => {
+	const ids = [`gpt${"a".repeat(60)}!`, `glm${"5".repeat(60)}/`, `deepseek${"x".repeat(55)}-`];
+	const started = performance.now();
+	for (let round = 0; round < 50; round++) for (const id of ids) {
+		assert.deepEqual(normalizeRuntimeModel("nan", id), { provider: "custom", id: "custom" });
+	}
+	assert.ok(performance.now() - started < 500, "normalizer must not backtrack catastrophically");
+});
+
+test("attached run then separated groups stays public", () => {
+	assert.deepEqual(normalizeRuntimeModel("nan", "glm5.3-flash:thinking"), { provider: "nan", id: "glm5.3-flash:thinking" });
+	assert.deepEqual(normalizeRuntimeModel("nan", "gpt-1-2-3-4-5-6-7-8-9"), { provider: "custom", id: "custom" });
+});

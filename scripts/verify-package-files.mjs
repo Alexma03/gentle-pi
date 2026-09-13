@@ -181,7 +181,7 @@ const contractHashes = {
   "contracts/review-integration/v2/schemas/repair.schema.json": "98a85fd45a8ae7f6211ffeeb3f9c478fa1dd1c17f385751f15f2111e6c3ab167",
   "contracts/review-integration/v2/schemas/start.schema.json": "2991e3fcca672d9257d61b6a336fb34e58b15a8e03f8a09a7adf892cae6a8085",
   "contracts/review-integration/v2/schemas/status.schema.json": "c4dcc736cfc6300560a3c4262d2d982368529d5c49d58d499552a3b0beef9212",
-  "contracts/telemetry/runtime-aggregate-v1.schema.json": "89d4654379c1a7b961efc034ad8a02ee426713d278f2d87a8f6ba684c025d423",
+  "contracts/telemetry/runtime-aggregate-v1.schema.json": "eb0f2993d9271f55cb42eca343e6fbb601a733fb90bd40daeebc92ee60ae1ba9",
   "docs/review-integration.md": "95a3df92785bc4d9f3b99e702aaf817ae0440bd16c83218d2c3f2aca67c280fb",
 };
 
