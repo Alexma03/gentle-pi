@@ -802,7 +802,7 @@ test("a later alias keeps managed-root precedence and manifest ownership", (t) =
 
 test("runtime guidance keeps review policy out of the static orchestrator and technical reference", () => {
 	const staticReferences = ["docs/readme-reference.md", "skills/gentle-ai/SKILL.md"];
-	assert.match(readFileSync("README.md", "utf8"), /docs\/readme-reference\.md/);
+	assert.match(readFileSync("README.md", "utf8"), /\]\(docs\/readme-reference\.md(?:#[^)]+)?\)/);
 	const forbiddenGenericRoutes = [
 		/fresh-context `reviewer`/,
 		/fresh reviewer audits/,

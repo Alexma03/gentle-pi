@@ -134,7 +134,7 @@ test("canonical contract defines compact risk, causal admission, correction, CAS
 		...JUDGMENT_DAY_DISCOVERY_PATTERNS,
 	]);
 	assert.match(read(TECHNICAL_REFERENCE), /Review outcomes and receipt state are informational; commit, push, pull-request, and release delivery follow ordinary repository policy\./);
-	assert.match(read(README), /docs\/readme-reference\.md/);
+	assert.match(read(README), /\]\(docs\/readme-reference\.md(?:#[^)]+)?\)/);
 	assert.doesNotMatch(read(README), /one one-shot authorization for the exact command/i);
 	assert.doesNotMatch(read(README), /review-publication-gate/i);
 });

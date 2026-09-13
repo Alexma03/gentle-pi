@@ -108,7 +108,7 @@ test("technical reference declares the tested Pi minimum required for agent_sett
 	const reference = readFileSync(join(PACKAGE_ROOT, "docs", "readme-reference.md"), "utf8");
 	assert.match(reference, /Pi 0\.85\.1 or newer/);
 	assert.match(reference, /agent_settled/);
-	assert.match(readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8"), /docs\/readme-reference\.md/);
+	assert.match(readFileSync(join(PACKAGE_ROOT, "README.md"), "utf8"), /\]\(docs\/readme-reference\.md(?:#[^)]+)?\)/);
 });
 
 test("package manifest has no obsolete native activation build surface", () => {
