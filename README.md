@@ -1,7 +1,7 @@
 <a id="top"></a>
 
 <div align="center">
-  <img src="docs/assets/brand/gentle-pi-banner.svg" width="1200" alt="gentle-pi — Pi-native development environment">
+  <img src="docs/assets/brand/gentle-pi-banner.png" width="1200" alt="Gentle Shell — The Gentle AI agent for Pi">
 </div>
 
 <h1 align="center">Gentle-PI™</h1>
