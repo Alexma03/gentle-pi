@@ -4,7 +4,7 @@
   <img src="docs/assets/brand/gentle-pi-banner.svg" width="1200" alt="gentle-pi — Pi-native development environment">
 </div>
 
-<h1 align="center">gentle-pi</h1>
+<h1 align="center">gentle-pi™</h1>
 
 <p align="center"><strong>Turn Pi from a powerful coding agent into a controlled development harness.</strong></p>
 
@@ -268,4 +268,4 @@ Startup intro collaboration: thanks to [@aporcelli](https://github.com/aporcelli
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-F095C8?style=for-the-badge&labelColor=1A1218" alt="MIT License"></a>
 </p>
 
-> **Trademark notice:** The gentle-pi name and logo are trademarks of Alan Buscaglia. The MIT License applies to the code; it does not permit implying endorsement or official affiliation. See [TRADEMARKS.md](TRADEMARKS.md).
+> **Trademark notice:** The gentle-pi™ name and logo are trademarks of Alan Buscaglia. The MIT License applies to the code; it does not permit implying endorsement or official affiliation. See [TRADEMARKS.md](TRADEMARKS.md).
