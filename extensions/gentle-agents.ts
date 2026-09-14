@@ -3,6 +3,7 @@ import { extractParentConfirmedSddPreflightContext, getPackageAssetOwner, isPare
 import { NativeReviewCliV216, NativeReviewCliError, createNodeExecFileAdapter, decodeNativeSddStatusV2, type NativeReviewCli, type NativeSddAcquireRequest, type NativeSddAttemptResult, type NativeSddSettleRequest } from "../lib/native-review-cli.ts";
 import { spawn } from "node:child_process";
 import { recordReviewMutation } from "../lib/review-reminder-receipt.ts";
+import { SESSION_CHANGE_RELAY } from "../lib/session-changes.ts";
 import { SessionWorktreeRegistry, resolveSessionWorktree, type WorktreeResolver } from "../lib/session-worktree-registry.ts";
 import { existsSync, mkdirSync, readFileSync, lstatSync, realpathSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
@@ -885,6 +886,13 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			const root = deps.resolveWorktree(tool.path, task.cwd)?.root;
 			const childRoot = deps.resolveWorktree(task.cwd, task.cwd)?.root;
 			if (!root || root !== childRoot || !worktrees.roots().includes(root)) return;
+			if (tool.evidence?.root === root) {
+				try {
+					let path = tool.path.replace(/^@/, "");
+					if (path === "~" || path.startsWith("~/")) path = os.homedir() + path.slice(1);
+					if (realpathSync(resolve(task.cwd, path)) === resolve(root, tool.evidence.path)) pi.events.emit(SESSION_CHANGE_RELAY, { sessionId: task.parentSessionId, evidence: { ...tool.evidence, id: `${task.id}:${tool.toolCallId}` } });
+				} catch { /* Missing or mismatched targets cannot supply session diffs. */ }
+			}
 			recordReviewMutation(pi, sessions, root, { source: "subagent", taskId: task.id, toolName: tool.toolName, toolCallId: tool.toolCallId });
 		},
 		onFinish: (task, observations) => {
