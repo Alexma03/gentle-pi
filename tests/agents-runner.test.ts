@@ -321,6 +321,20 @@ test("child observation guard is never consulted when collection is default-off"
 	assert.equal(calls, 0);
 });
 
+test("child session diff evidence travels only with a paired successful tool outcome", async () => {
+ const observed: any[] = [];
+ const h = harness({ onSuccessfulMutation: (_task, tool) => { observed.push(tool); } });
+ const task = h.runner.run(request()); await tick();
+ const child = h.children[0];
+ const evidence = {id:"w",root:"/repo",path:"src/file.ts",before:{kind:"absent"},after:{kind:"text",text:"agent\n"}};
+ child.emit({type:"tool_execution_start",toolCallId:"w",toolName:"write",args:{path:"src/file.ts"}});
+ child.emit({type:"tool_execution_end",toolCallId:"w",isError:false,result:{content:[],details:{gentleSessionChange:evidence}}});
+ assert.deepEqual(observed[0].evidence,evidence);
+ child.emit({type:"tool_execution_end",toolCallId:"w",isError:false,result:{content:[],details:{gentleSessionChange:evidence}}});
+ assert.equal(observed.length,1);
+ h.runner.cancel(task.id); await tick();
+});
+
 for (const ending of ["cancel", "failure", "hook-error", "hook-async-error"] as const) {
 	test(`successful child mutations require paired RPC events and survive ${ending}`, async () => {
 		const mutations: unknown[] = [];
