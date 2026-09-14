@@ -2669,3 +2669,25 @@ test("gentle-pi#185 review correction: a restore whose materialization fails lea
 	assert.equal(registry.resolveForFinalize(lineageId, cwd).token, first.token, "the lineage must still resolve to its original worktree");
 	registry.cleanupTerminal(lineageId, "approved", cwd);
 });
+
+test("review subagent dispatch accepts the run tool's own fields alongside a review lens", (t) => {
+	const contributorRoot = repository(t);
+	writeFileSync(join(contributorRoot, "tracked.txt"), "candidate\n");
+	const registry = new CandidateViewRegistry();
+	t.after(() => registry.cleanupAll());
+	const view = registry.create({ contributorRoot });
+	registry.bindCurrent({ token: view.token, lineageId: "tool-fields-lineage", selectedLenses: ["review-risk"] });
+	// These are the exact fields the subagent_run tool schema declares (and the
+	// orchestrator prompt mandates for background tasks). The key gate must not
+	// reject them before the semantic checks run.
+	const dispatch = {
+		agent: "review-risk",
+		task: "review",
+		mode: "task",
+		label: "review frozen candidate",
+		context: "parent context",
+		workspace_root: contributorRoot,
+	};
+	assert.doesNotThrow(() => injectReviewCandidateView(dispatch, registry));
+	assert.match(dispatch.task, /Frozen candidate tree/);
+});

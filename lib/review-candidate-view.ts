@@ -77,7 +77,12 @@ const CANDIDATE_CONTEXT_MODE = {
 	DELETED: "deleted",
 } as const;
 export type CandidateContextMode = (typeof CANDIDATE_CONTEXT_MODE)[keyof typeof CANDIDATE_CONTEXT_MODE];
-const SUBAGENT_RUN_KEYS = new Set(["agent", "agents", "task", "context", "mode"]);
+// Allowed subagent_run input keys. This must stay in sync with the run tool
+// schema in extensions/gentle-agents.ts (agent, task, label, context,
+// workspace_root, research_artifact, research_selection, remediation,
+// sdd_change, mode): the key gate only rejects unknown fields, while the
+// semantic checks below still bound what a review dispatch may carry.
+const SUBAGENT_RUN_KEYS = new Set(["agent", "agents", "task", "context", "mode", "label", "workspace_root", "research_artifact", "research_selection", "remediation", "sdd_change"]);
 
 interface CandidateTreeEntry {
 	path: string;
