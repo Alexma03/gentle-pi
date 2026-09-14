@@ -23,6 +23,8 @@ In fullscreen at 140 columns or wider, the right sidebar scrolls **✿ Gentle-Pi
 
 The rail reuses its last frame until something it paints changes, so silent frames stay cheap and live session state still lands on the next frame: a model switch, a new thinking level, context growth, session cost, session name and extension statuses all refresh the Status card without a redraw of the rest of the sidebar.
 
+The sidebar Status card also shows `Profile` in its Model section when the profiles store has a valid active marker. It follows profile changes on the next render. Missing, unreadable, or invalid stores leave the line hidden. The compact bottom bar is unchanged.
+
 The status bar replaces pi's three-line footer with a single line of segments:
 
 ```text

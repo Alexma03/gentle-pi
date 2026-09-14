@@ -2,6 +2,8 @@ import { CustomEditor, keyHint, type ExtensionAPI, type ExtensionContext, type K
 import type { EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { execFile, spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { statSync } from "node:fs";
+import { profilesFilePath, readProfilesFileResult } from "../lib/agent-profiles.ts";
 import * as os from "node:os";
 import { join } from "node:path";
 import { renderShellBar, renderShellSidebarBar, shellEnabled, type ShellBarModel, type ShellBarTheme } from "../lib/shell-bar.ts";
@@ -39,6 +41,7 @@ interface ShellBarComponent {
 }
 
 interface BuildOptions {
+	profile?: string;
 	home?: string;
 	dirty?: number;
 	usage?: ProviderUsage;
@@ -47,11 +50,37 @@ interface BuildOptions {
 export type DevBinaryNotice = { state: "active"; path: string; sha256: string } | { state: "invalid"; reason: string };
 
 export interface ShellDeps {
+	activeProfile(): string | undefined;
 	fetch: typeof fetch;
 	now(): number;
 	devBinary(): DevBinaryNotice | undefined;
 	resolveWorktree: WorktreeResolver;
 	gitRunner(cwd: string): GitRunner;
+}
+
+// The rail digest runs every frame. Cache parsing by file identity and metadata,
+// not just mtime: profile writes replace the store atomically. Keep the cache
+// local to this shell instance and recheck on the next frame after panel edits.
+export function createActiveProfileReader(env: NodeJS.ProcessEnv = process.env): () => string | undefined {
+	const path = profilesFilePath(env.GENTLE_PI_CONFIG_HOME ?? join(os.homedir(), ".pi", "gentle-ai"));
+	let fingerprint: string | undefined;
+	let name: string | undefined;
+	return () => {
+		try {
+			const stat = statSync(path, { bigint: true });
+			const next = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+			if (next !== fingerprint) {
+				const result = readProfilesFileResult(path);
+				name = result.status === "valid" ? result.file.active : undefined;
+				fingerprint = next;
+			}
+			return name;
+		} catch {
+			fingerprint = undefined;
+			name = undefined;
+			return undefined;
+		}
+	};
 }
 
 function ambientDevBinary(): DevBinaryNotice | undefined {
@@ -64,7 +93,7 @@ function ambientDevBinary(): DevBinaryNotice | undefined {
 	}
 }
 
-const defaultShellDeps: ShellDeps = { fetch: (...args) => globalThis.fetch(...args), now: () => Date.now(), devBinary: ambientDevBinary, resolveWorktree: resolveSessionWorktree, gitRunner: shellGitRunner };
+const defaultShellDeps: Omit<ShellDeps, "activeProfile"> = { fetch: (...args) => globalThis.fetch(...args), now: () => Date.now(), devBinary: ambientDevBinary, resolveWorktree: resolveSessionWorktree, gitRunner: shellGitRunner };
 
 interface AssistantUsageEntry {
 	type: string;
@@ -104,6 +133,7 @@ export function buildShellBarModel(
 		.map(([, text]) => text);
 	return {
 		cwd: shortenHome(ctx.sessionManager.getCwd(), home),
+		profile: options.profile,
 		branch: footerData.getGitBranch(),
 		dirty: options.dirty,
 		sessionName: ctx.sessionManager.getSessionName(),
@@ -452,7 +482,7 @@ export async function fetchCodexUsage(token: string | undefined, fetchFn: typeof
 
 export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = process.env, overrides: Partial<ShellDeps> = {}): void {
 	if (!shellEnabled(env)) return;
-	const deps: ShellDeps = { ...defaultShellDeps, ...overrides };
+	const deps: ShellDeps = { ...defaultShellDeps, activeProfile: createActiveProfileReader(env), ...overrides };
 	const usage = new UsageStore();
 	let renderHost: ShellRenderHost | undefined;
 	let usageFetchedAt = 0;
@@ -558,7 +588,7 @@ export default function gentleShell(pi: ExtensionAPI, env: NodeJS.ProcessEnv = p
 			// part for: model, effort, context, cost, session name and extension
 			// statuses. The digest is what keeps the fullscreen memo honest, and it
 			// rebuilds the model exactly as the narrow bottom bar does every frame.
-			const footerModel = () => buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: usage.get(ctx.model?.provider ?? "") });
+			const footerModel = () => buildShellBarModel(pi, ctx, footerData, { dirty: tracker.model.files.length, usage: usage.get(ctx.model?.provider ?? ""), profile: deps.activeProfile() });
 			const part = sidebarPart(tui, "footer", bottom, {
 				digest: () => JSON.stringify(footerModel()),
 				render: (width) => renderShellSidebarBar(footerModel(), theme, width),
