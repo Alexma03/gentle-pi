@@ -49,28 +49,38 @@ The prompt wraps pi's editor in a rounded frame with a petal that shows what the
 - The hint appears only while the editor is empty.
 - If another extension already installed a custom editor, Gentle Shell leaves it alone.
 
-Changes across this session's registered worktrees show up below the editor and as an aggregate `±N` next to the session branch in the bar:
+Changes shows **captured write/edit operations from this agent session and its owned subagents**. It does not scan the repository on startup, read all untracked files, or poll live files in the background. Fullscreen, the sidebar, and mouse interaction are unchanged.
 
 ```text
 ✎ 3 files · +42 −7 · extensions/gentle-shell.ts, lib/shell-bar.ts, tests/x.test.ts · /gentle:changes
 ```
 
-- Each registered root shows **all** dirty files: plain `git diff` against HEAD plus untracked files, including edits that predate this session. There are no baselines or file-level attribution filters.
-- The canonical session cwd root is included automatically. Successful standard `read`, `write`, `edit`, `grep`, `find`, and `ls` calls register their target worktree after completion. Failed calls, shell command text, and prose never register roots. Only roots sharing the session's Git common directory are accepted.
-- For opaque shell use or worktrees used earlier, call `session_worktree_register` with `{"path":"/path/to/worktree"}`. Registration is explicit, canonicalized, and deduplicated; unrelated dirty siblings remain invisible without an ignored-roots list.
-- The root registry persists in Pi custom entries (`gentle-pi.session-worktree/v1`). Exit/resume and `/reload` restore the same session UUID; `/tree` keeps roots session-wide. New sessions, `/fork`, and `/clone` ignore inherited registrations with another UUID. Clean roots stay registered but hidden until dirty; missing/prunable roots are skipped safely. Ephemeral `--no-session` runs cannot persist across exit.
-- Counts refresh after every tool call, at the end of each turn, and every 5 seconds in the background, so edits made from nvim or another agent show up without touching pi. `GENTLE_PI_SHELL_CHANGES_WATCH_MS` changes the interval; `off` leaves only the tool-driven refresh. Outside a git repository the widget stays hidden.
-- On narrow terminals the file list is dropped before the summary is truncated.
+### What appears in Changes
 
-`/gentle:changes` or `alt+g` opens the framed two-pane viewer. Dirty worktrees are accordion groups in the left pane, labeled with branch and directory basename (`detached` when there is no branch). Expand groups to reveal indented changed files; multiple groups can stay expanded. The right pane previews the selected file's lazy-loaded diff, or shows the selected group's full directory and summary. Clean, bare, missing, and prunable roots remain hidden; untracked-only roots are included.
+- A worktree appears only after a captured successful mutation. Reading a file, opening a directory, registering a worktree, or launching a child is not mutation evidence.
+- Diffs compare the content observed before the agent's first captured operation with its latest captured result, not with HEAD. Consecutive agent edits combine; an agent revert removes its net change.
+- Edits from your editor or other sessions do not update these captured diffs. If an external or unobserved edit breaks continuity before the next agent operation on the same file, the file is marked **diff unavailable**, rather than mixing ownership.
+- Only worktrees in the coordinating session's Git clone are accepted. Child evidence is accepted only from an owned task with paired successful write/edit events and a matching target.
+- **Coverage is deliberately limited to write/edit tools.** Shell commands, custom mutation tools, failed/interrupted outcomes and children without the capture extension provide no attributed diff. A missing row does not mean the repository is clean or that no other changes occurred.
 
-- `j`/`k` or up/down traverse visible groups and files, keeping the selection in view. On a group, `enter`, space, or right arrow toggles expansion. Left arrow or backspace moves a file selection to its parent, or collapses the selected group. `ctrl+j`/`ctrl+k` or `pgdn`/`pgup` scroll the diff; `esc` or `q` closes the overlay.
-- In fullscreen mode, left-click selects a visible file and loads its diff without opening the editor. Mouse wheels scroll the file list and selected diff independently; hovering does not select or open anything.
-- Opening, pressing `r`, and the background/overlay refresh cadence scan only registered roots. Worktree discovery supplies branch labels, never registration. No changes in registered roots means no widget and an informational notice instead of an overlay.
-- While the overlay is open, git is polled every 2 seconds, so edits made from nvim, another agent, or a checkout show up in place. Expansion and selection stick to the raw worktree root and file path across refreshes; a diff reloads when its counts move.
-- `GENTLE_PI_SHELL_CHANGES_KEY` rebinds the shortcut (pi key syntax, for example `ctrl+shift+g`); `off` disables it. On macOS, `alt+g` needs the terminal to send Option as Meta.
-- On a file row, `o` (or `enter`) opens the selected file in `$VISUAL` or `$EDITOR`, with the selected worktree as the editor's working directory, and returns to pi when the editor exits. Diff lookup and caches are also scoped to that root; identical relative filenames in other worktrees cannot share a diff.
-- Untracked files are diffed against an empty file so new files show their full content.
+### Bounds and session lifetime
+
+Capture reads only the named target, up to 64 KiB and 2,000 text lines. Binary, oversized, nonregular and unverifiable snapshots show unavailable counts, never fabricated zero-count proof. At most 256 operation identities and 4 MiB of serialized evidence are retained per session; reaching the limit produces a warning.
+
+Snapshots are stored locally in Pi custom entries (`gentle-pi.session-change/v1`), including bounded before/after source text. Exit/resume and reload restore captures only for the exact same session UUID. New sessions and forks do not inherit attribution from another UUID. Ephemeral `--no-session` runs do not persist after exit. Capturing remains active in headless children and when the visual shell is disabled.
+
+The separate `session_worktree_register` tool still registers canonical same-clone roots for coordination, but registration alone never adds files to Changes. Existing `gentle-pi.session-worktree/v1` entries do not establish file-level attribution.
+
+### Browse captured diffs
+
+`/gentle:changes` or `alt+g` opens the two-pane viewer. Worktrees are accordion groups on the left; selecting a file displays its captured diff on the right.
+
+- `j`/`k` or arrows navigate. On a group, Enter, Space or Right expands it; Left returns to its parent or collapses it. `ctrl+j/k` or Page Up/Down scroll the diff; Escape or `q` closes.
+- Fullscreen left-click selects files; mouse wheels scroll the file list and diff independently. Hover does not open files.
+- Opening, pressing `r`, and the overlay's refresh cadence consult only the captured session model. They never rescan Git or load the current file contents. Same-line-count edits invalidate the diff preview by content revision.
+- On a file, `o` or Enter opens the actual current file in `$VISUAL` or `$EDITOR`, with its worktree as cwd. Edits made there are external and are not attributed to the agent.
+- `GENTLE_PI_SHELL_CHANGES_KEY` rebinds the shortcut; `off` disables it. `GENTLE_PI_SHELL_CHANGES_POLL_MS` controls only the open overlay's in-memory refresh. `GENTLE_PI_SHELL_CHANGES_WATCH_MS` no longer enables filesystem polling.
+- No captured changes means no widget and an informational notice; it does not assert that the working tree is clean.
 
 Subscription usage shows in the bar after the cost, and `/gentle:usage` opens a panel with every window per provider:
 
