@@ -67,7 +67,7 @@ The stable release is [`v2.6.0`](https://github.com/Gentleman-Programming/gentle
 
 ### Source checkout
 
-This checkout prepares `gentle-pi` `2.6.3`; it is source state, not a published release. Its package-local native runtime pin is Gentle AI `v2.9.0`, distinct from the published `v2.6.0` pairing.
+This checkout prepares `gentle-pi` `2.6.4`; it is source state, not a published release. Its package-local native runtime pin is Gentle AI `v2.9.0`, distinct from the published `v2.6.0` pairing.
 
 ### Pi compatibility
 
