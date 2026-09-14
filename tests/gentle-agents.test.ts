@@ -179,10 +179,11 @@ function deps(): { deps: Partial<AgentsDeps>; children: FakeChild[]; spawned: st
 	};
 }
 
-test("all nine subagent registrations own their transcript shell", () => {
+test("all ten subagent registrations own their transcript shell", () => {
 	const { pi, tools } = fakePi();
 	gentleAgents(pi, {}, deps().deps);
-	assert.equal(tools.size, 9);
+	assert.equal(tools.size, 10);
+	assert.deepEqual(tools.get("subagent_reconcile")?.parameters, { type: "object", additionalProperties: false, required: ["task_id"], properties: { task_id: { type: "string" } } });
 	for (const tool of tools.values()) assert.equal(tool.renderShell, "self", tool.name);
 });
 
@@ -1261,7 +1262,7 @@ test("subagent_list_agents and subagent_run in task mode launch a child with the
 	gentleAgents(pi, {}, harness.deps);
 	const { ctx, widget } = fakeContext();
 	await fire("session_start", ctx);
-	assert.deepEqual([...tools.keys()].sort(), ["subagent_cancel", "subagent_continue", "subagent_list_agents", "subagent_list_tasks", "subagent_reply", "subagent_result", "subagent_run", "subagent_send_message", "subagent_status"]);
+	assert.deepEqual([...tools.keys()].sort(), ["subagent_cancel", "subagent_continue", "subagent_list_agents", "subagent_list_tasks", "subagent_reconcile", "subagent_reply", "subagent_result", "subagent_run", "subagent_send_message", "subagent_status"]);
 	const listed = await tools.get("subagent_list_agents")!.execute("c0", {}, undefined, undefined, ctx);
 	assert.match(listed.content[0].text, /- explore \(global\): maps things/);
 
@@ -2140,6 +2141,52 @@ test("R1 malformed child grant denies tools even before/after failed session ini
 	assert.equal(denied(), true); assert.equal(registered.length, 0);
 });
 
+
+test("public reconciliation replays retained authority, persists closure, and never exposes or starts the actor", async () => {
+	const fixtureHome = join(root, "remediation-reconcile");
+	const acquire = { workspaceRoot: cwd, changeName: "alpha", requestId: "retained-acquire", workUnit: "correct", evidenceGoal: "Observed correction", remediatesEvidenceRevision: `sha256:${"a".repeat(64)}` };
+	await saveTask(historyDir(fixtureHome), { id: "retained", agent: "sdd-remediate", cwd, status: "failed", createdAt: 1, sddRemediation: { acquire, acquireUncertain: true } } as never, emptyThread());
+	const h = fakePi(), runtime = deps(), calls = [];
+	gentleAgents(h.pi, {}, { ...runtime.deps, home: fixtureHome, nativeSdd: {
+		sddAttemptAcquire: async input => { calls.push(["acquire", structuredClone(input)]); return { state: "proceed", token: "private-token" }; },
+		sddAttemptSettle: async input => { calls.push(["settle", structuredClone(input)]); return { state: "complete" }; },
+	} as unknown as NativeReviewCli });
+	const { ctx } = fakeContext(); await h.fire("session_start", ctx);
+	const output = await h.tools.get("subagent_reconcile").execute("reconcile", { task_id: "retained" }, undefined, undefined, ctx);
+	assert.match(output.content[0].text, /reconciled/i);
+	assert.equal(JSON.stringify(output).includes("private-token"), false);
+	assert.deepEqual(calls[0], ["acquire", acquire]); assert.equal(calls[1][0], "settle");
+	assert.equal(runtime.spawned.length, 0);
+	const retained = (await loadHistory(historyDir(fixtureHome)))[0].task;
+	assert.equal(retained.sddRemediation.acquireUncertain, undefined);
+	assert.deepEqual(retained.sddRemediation.settlement, { state: "complete" });
+});
+
+test("public reconciliation serializes concurrent calls for the same retained task", async () => {
+	const fixtureHome = join(root, "remediation-reconcile-concurrent");
+	const acquire = { workspaceRoot: cwd, changeName: "alpha", requestId: "retained-concurrent", workUnit: "correct", evidenceGoal: "Observed correction" };
+	await saveTask(historyDir(fixtureHome), { id: "retained-concurrent", agent: "sdd-remediate", cwd, status: "failed", createdAt: 1, sddRemediation: { acquire, acquireUncertain: true } } as never, emptyThread());
+	const h = fakePi(), runtime = deps(); let calls = 0, release!: (result: { state: "complete" }) => void;
+	const pending = new Promise<{ state: "complete" }>(resolve => { release = resolve; });
+	gentleAgents(h.pi, {}, { ...runtime.deps, home: fixtureHome, nativeSdd: { sddAttemptAcquire: async () => { calls++; return pending; } } as unknown as NativeReviewCli });
+	const { ctx } = fakeContext(); await h.fire("session_start", ctx);
+	const first = h.tools.get("subagent_reconcile").execute("first", { task_id: "retained-concurrent" }, undefined, undefined, ctx);
+	await tick();
+	await assert.rejects(h.tools.get("subagent_reconcile").execute("second", { task_id: "retained-concurrent" }, undefined, undefined, ctx), /already being reconciled/);
+	release({ state: "complete" }); await first;
+	assert.equal(calls, 1); assert.equal(runtime.spawned.length, 0);
+});
+
+test("public reconciliation rejects another clone and caller authority fields", async () => {
+	const fixtureHome = join(root, "remediation-reconcile-scope");
+	const acquire = { workspaceRoot: "/other/repo", changeName: "alpha", requestId: "retained-acquire", workUnit: "correct", evidenceGoal: "Observed correction" };
+	await saveTask(historyDir(fixtureHome), { id: "retained-scope", agent: "sdd-remediate", cwd: "/other/repo", status: "failed", createdAt: 1, sddRemediation: { acquire, acquireUncertain: true } } as never, emptyThread());
+	const h = fakePi(), runtime = deps(); let calls = 0;
+	gentleAgents(h.pi, {}, { ...runtime.deps, home: fixtureHome, resolveWorktree: (path, base) => ({ root: resolve(base, path), commonDir: path === cwd ? "/fixture/common" : "/other/common" }), nativeSdd: { sddAttemptAcquire: async () => { calls++; return { state: "complete" }; } } as unknown as NativeReviewCli });
+	const { ctx } = fakeContext(); await h.fire("session_start", ctx);
+	await assert.rejects(h.tools.get("subagent_reconcile").execute("scope", { task_id: "retained-scope" }, undefined, undefined, ctx), /same Git clone|worktree/i);
+	assert.equal(calls, 0);
+});
 
 test("R3/R4 host reload refuses retained acquire/actor uncertainty without another launch", async () => {
 	for (const actorClaimed of [false, true, "blocked", "complete"]) {
