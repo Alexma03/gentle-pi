@@ -11,7 +11,7 @@ import { visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import gentleAgents, { agentRuntimePaths, agentsCollapseKey, agentsEnabled, agentsStopKey, agentsViewKey, answerThroughUi, completionText, legacySubagentsInstalled, type AgentsDeps } from "../extensions/gentle-agents.ts";
 import { historyDir, loadHistory, saveTask } from "../lib/agents-history.ts";
 import { STALE_COMPLETION_MS } from "../lib/agents-completion-delivery.ts";
-import { emptyThread, TASK_EVENT, TASK_STATUS, TaskStore, type TaskRecord } from "../lib/agents-protocol.ts";
+import { applyTaskEvent, emptyThread, TASK_EVENT, TASK_STATUS, TaskStore, type TaskRecord } from "../lib/agents-protocol.ts";
 import { NativePointerScope } from "../lib/native-pointer-region.ts";
 import { PresenceCursor, PresencePublisher, listPresence, readActivity } from "../lib/orchestrator-presence.ts";
 import { stripAnsi } from "../lib/terminal-theme.ts";
@@ -2162,30 +2162,59 @@ test("public reconciliation replays retained authority, persists closure, and ne
 	assert.deepEqual(retained.sddRemediation.settlement, { state: "complete" });
 });
 
-test("public reconciliation serializes concurrent calls for the same retained task", async () => {
-	const fixtureHome = join(root, "remediation-reconcile-concurrent");
-	const acquire = { workspaceRoot: cwd, changeName: "alpha", requestId: "retained-concurrent", workUnit: "correct", evidenceGoal: "Observed correction" };
-	await saveTask(historyDir(fixtureHome), { id: "retained-concurrent", agent: "sdd-remediate", cwd, status: "failed", createdAt: 1, sddRemediation: { acquire, acquireUncertain: true } } as never, emptyThread());
-	const h = fakePi(), runtime = deps(); let calls = 0, release!: (result: { state: "complete" }) => void;
-	const pending = new Promise<{ state: "complete" }>(resolve => { release = resolve; });
-	gentleAgents(h.pi, {}, { ...runtime.deps, home: fixtureHome, nativeSdd: { sddAttemptAcquire: async () => { calls++; return pending; } } as unknown as NativeReviewCli });
-	const { ctx } = fakeContext(); await h.fire("session_start", ctx);
-	const first = h.tools.get("subagent_reconcile").execute("first", { task_id: "retained-concurrent" }, undefined, undefined, ctx);
-	await tick();
-	await assert.rejects(h.tools.get("subagent_reconcile").execute("second", { task_id: "retained-concurrent" }, undefined, undefined, ctx), /already being reconciled/);
-	release({ state: "complete" }); await first;
-	assert.equal(calls, 1); assert.equal(runtime.spawned.length, 0);
+test("durable reconciliation locks serialize independent extension instances sharing one tasksDir", async () => {
+	const fixtureHome = join(root, "remediation-reconcile-independent");
+	const id = "retained-independent";
+	const acquire = { workspaceRoot: cwd, changeName: "alpha", requestId: id, workUnit: "correct", evidenceGoal: "Observed correction" };
+	await saveTask(historyDir(fixtureHome), { id, agent: "sdd-remediate", cwd, status: "failed", createdAt: 1, sddRemediation: { acquire, acquireUncertain: true } } as never, emptyThread());
+	const first = fakePi(), second = fakePi(), runtime = deps();
+	let calls = 0, release!: (result: { state: "blocked" }) => void;
+	const pending = new Promise<{ state: "blocked" }>(resolve => { release = resolve; });
+	const native = { sddAttemptAcquire: async () => { calls++; return calls === 1 ? pending : { state: "blocked" }; } } as unknown as NativeReviewCli;
+	gentleAgents(first.pi, {}, { ...runtime.deps, home: fixtureHome, nativeSdd: native });
+	gentleAgents(second.pi, {}, { ...runtime.deps, home: fixtureHome, nativeSdd: native });
+	const firstContext = fakeContext(), secondContext = fakeContext();
+	await first.fire("session_start", firstContext.ctx); await second.fire("session_start", secondContext.ctx);
+	const running = first.tools.get("subagent_reconcile")!.execute("first", { task_id: id }, undefined, undefined, firstContext.ctx);
+	await eventually(() => calls === 1, "the first instance must reach native acquire while holding the lock");
+	await assert.rejects(second.tools.get("subagent_reconcile")!.execute("second", { task_id: id }, undefined, undefined, secondContext.ctx), /busy|active|already being reconciled/i);
+	assert.equal(calls, 1, "a busy filesystem lock fails before native acquire");
+	release({ state: "blocked" }); await running;
+	await first.fire("session_shutdown", firstContext.ctx); await second.fire("session_shutdown", secondContext.ctx);
 });
 
-test("public reconciliation rejects another clone and caller authority fields", async () => {
-	const fixtureHome = join(root, "remediation-reconcile-scope");
-	const acquire = { workspaceRoot: "/other/repo", changeName: "alpha", requestId: "retained-acquire", workUnit: "correct", evidenceGoal: "Observed correction" };
-	await saveTask(historyDir(fixtureHome), { id: "retained-scope", agent: "sdd-remediate", cwd: "/other/repo", status: "failed", createdAt: 1, sddRemediation: { acquire, acquireUncertain: true } } as never, emptyThread());
-	const h = fakePi(), runtime = deps(); let calls = 0;
-	gentleAgents(h.pi, {}, { ...runtime.deps, home: fixtureHome, resolveWorktree: (path, base) => ({ root: resolve(base, path), commonDir: path === cwd ? "/fixture/common" : "/other/common" }), nativeSdd: { sddAttemptAcquire: async () => { calls++; return { state: "complete" }; } } as unknown as NativeReviewCli });
+test("reconciliation reloads a stale local task and preserves the retained disk thread", async () => {
+	const fixtureHome = join(root, "remediation-reconcile-reload");
+	const id = "retained-reload";
+	const oldAcquire = { workspaceRoot: cwd, changeName: "alpha", requestId: "old", workUnit: "old", evidenceGoal: "old" };
+	const freshAcquire = { workspaceRoot: cwd, changeName: "alpha", requestId: "fresh", workUnit: "fresh", evidenceGoal: "fresh" };
+	await saveTask(historyDir(fixtureHome), { id, agent: "sdd-remediate", cwd, status: "failed", createdAt: 1, sddRemediation: { acquire: oldAcquire, acquireUncertain: true } } as never, applyTaskEvent(emptyThread(), { type: TASK_EVENT.NOTE, text: "old thread" }));
+	const h = fakePi(), runtime = deps(), seen: unknown[] = [];
+	gentleAgents(h.pi, {}, { ...runtime.deps, home: fixtureHome, nativeSdd: { sddAttemptAcquire: async input => { seen.push(structuredClone(input)); return { state: "blocked" }; } } as unknown as NativeReviewCli });
 	const { ctx } = fakeContext(); await h.fire("session_start", ctx);
-	await assert.rejects(h.tools.get("subagent_reconcile").execute("scope", { task_id: "retained-scope" }, undefined, undefined, ctx), /same Git clone|worktree/i);
-	assert.equal(calls, 0);
+	await h.tools.get("subagent_status")!.execute("status", { task_id: id }, undefined, undefined, ctx);
+	const freshThread = applyTaskEvent(emptyThread(), { type: TASK_EVENT.NOTE, text: "fresh thread" });
+	await saveTask(historyDir(fixtureHome), { id, agent: "sdd-remediate", cwd, status: "failed", createdAt: 1, sddRemediation: { acquire: freshAcquire, acquireUncertain: true } } as never, freshThread);
+	await h.tools.get("subagent_reconcile")!.execute("reconcile", { task_id: id }, undefined, undefined, ctx);
+	assert.deepEqual(seen, [freshAcquire], "native receives the force-reloaded retained request");
+	const stored = (await loadHistory(historyDir(fixtureHome))).find(entry => entry.task.id === id)!;
+	assert.deepEqual(stored.thread.items, freshThread.items, "persistence retains the exact disk thread, not the stale store thread");
+	await h.fire("session_shutdown", ctx);
+});
+
+test("reconciliation releases the durable lock after native failure", async () => {
+	const fixtureHome = join(root, "remediation-reconcile-failure");
+	const id = "retained-failure";
+	const acquire = { workspaceRoot: cwd, changeName: "alpha", requestId: id, workUnit: "correct", evidenceGoal: "Observed correction" };
+	await saveTask(historyDir(fixtureHome), { id, agent: "sdd-remediate", cwd, status: "failed", createdAt: 1, sddRemediation: { acquire, acquireUncertain: true } } as never, emptyThread());
+	const h = fakePi(), runtime = deps(); let calls = 0;
+	gentleAgents(h.pi, {}, { ...runtime.deps, home: fixtureHome, nativeSdd: { sddAttemptAcquire: async () => { calls++; if (calls === 1) throw new TypeError("native failure"); return { state: "blocked" }; } } as unknown as NativeReviewCli });
+	const { ctx } = fakeContext(); await h.fire("session_start", ctx);
+	await assert.rejects(h.tools.get("subagent_reconcile")!.execute("failed", { task_id: id }, undefined, undefined, ctx), /native failure/);
+	const recovered = await h.tools.get("subagent_reconcile")!.execute("retry", { task_id: id }, undefined, undefined, ctx);
+	assert.match(recovered.content[0].text, /reconciled/i);
+	assert.equal(calls, 2, "the second attempt acquires after finally released the first lock");
+	await h.fire("session_shutdown", ctx);
 });
 
 test("R3/R4 host reload refuses retained acquire/actor uncertainty without another launch", async () => {

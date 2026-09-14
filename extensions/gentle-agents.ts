@@ -19,7 +19,7 @@ import { isFinished, TASK_STATUS, TaskStore, type AskRequest, type TaskRecord } 
 import { AgentRunner, piCommand, abortReasonText, plannedCommands, type RemediationPlan, type RemediationScope, REMEDIATION_PLAN_ENV, parseRemediationPlan, remediationEvidence, type AskAnswer, type RunnerDeps, type SddChangeSelection, type TaskRequest, type RemediationTerminalFacts } from "../lib/agents-runner.ts";
 import { ChildMessenger, type IpcEndpoint } from "../lib/agents-messaging.ts";
 import { hasReviewSessionPermission, resolveCanonicalGitRepositoryIdentitySync, type ReviewSessionManager } from "../lib/review-session-standing-permission.ts";
-import { historyDir, remediationUnresolved, loadHistory, loadStoredTask, pruneHistory, saveTask } from "../lib/agents-history.ts";
+import { acquireTaskLock, historyDir, remediationUnresolved, loadHistory, loadStoredTask, pruneHistory, saveTask } from "../lib/agents-history.ts";
 import { sessionToMarkdown } from "../lib/agents-transcript.ts";
 import { AgentsView } from "../lib/agents-view.ts";
 import { PresencePublisher } from "../lib/orchestrator-presence.ts";
@@ -693,7 +693,6 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	const stopKey = agentsStopKey(env);
 	const store = new TaskStore();
 	const restoredTaskIds = new Set<string>();
-	const reconcilingTaskIds = new Set<string>();
 	const tasksDir = historyDir(deps.home, agentHome);
 	let ui: ExtensionContext["ui"] | undefined;
 	let host: { requestRender(): void } | undefined;
@@ -1314,21 +1313,21 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 
 	tool("reconcile", "Reconcile one retained managed remediation mutation without launching an actor.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params, ctx) => {
 		const id = String(params.task_id);
-		if (reconcilingTaskIds.has(id)) throw new Error(`Managed remediation task ${id} is already being reconciled`);
-		reconcilingTaskIds.add(id);
+		const lock = acquireTaskLock(tasksDir, id);
 		try {
-			const task = await resolveTask(id);
-			if (!task) return text(`Error: no task ${id}`, { error: "unknown task" });
+			const stored = await loadStoredTask(tasksDir, id);
+			if (!stored) return text(`Error: no task ${id}`, { error: "unknown task" });
+			const task = stored.task, retainedThread = stored.thread;
 			const target = registryFor(ctx).validate(task.cwd);
 			if (target !== resolve(task.cwd) || task.sddRemediation?.acquire.workspaceRoot !== target) throw new Error("Retained remediation task must resolve to its exact worktree in the same Git clone as this session");
 			const native = deps.nativeSdd ?? new NativeReviewCliV216(createNodeExecFileAdapter());
 			const persist = async (current: TaskRecord) => {
-				await saveTask(tasksDir, current, store.thread(current.id));
+				await saveTask(tasksDir, current, retainedThread);
 				store.update(current.id, { status: current.status, error: current.error, lastStep: current.lastStep, endedAt: current.endedAt, lastActivityAt: current.lastActivityAt, sddRemediation: current.sddRemediation });
 			};
 			const result = await reconcileManagedRemediation(task, native, persist);
 			return text(`Managed remediation task ${task.id} reconciled; no actor started. Use fresh native status and admission for later work.`, { gentleAgents: { taskId: task.id, agent: task.agent, status: task.status, mode: task.mode }, reconciliation: { ...result, actorStarted: false } });
-		} finally { reconcilingTaskIds.delete(id); }
+		} finally { lock.release(); }
 	});
 
 	tool("result", "Return the final answer of a finished subagent task, or its current state if it is still running.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params) => {
