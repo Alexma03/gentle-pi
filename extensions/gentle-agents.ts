@@ -962,7 +962,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		const selected = store.get(task.id);
 		if (!isOwnedActive(selected)) return;
 		if (selected.status === TASK_STATUS.QUEUED) {
-			if (runner.cancel(selected.id)) ctx.ui.notify(`Stopped ${selected.agent}.`);
+			if (runner.cancel(selected.id, "stopped from the agents panel")) ctx.ui.notify(`Stopped ${selected.agent}.`);
 			else ctx.ui.notify(`Task ${selected.agent} already finished.`, "warning");
 			return;
 		}
@@ -976,7 +976,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 				ctx.ui.notify(`Task ${selected.agent} already finished.`, "warning");
 				return;
 			}
-			if (runner.cancel(current.id)) ctx.ui.notify(`Stopped ${current.agent}.`);
+			if (runner.cancel(current.id, "stopped from the agents panel")) ctx.ui.notify(`Stopped ${current.agent}.`);
 			else ctx.ui.notify(`Task ${current.agent} already finished.`, "warning");
 		} finally {
 			stoppingTaskIds.delete(selected.id);
@@ -995,7 +995,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		const confirmation = (async () => {
 			try {
 				if (!await ctx.ui.confirm(`Stop ${count} active ${noun}?`, `Only these ${count} ${noun} will stop. Current work may be incomplete.`)) return;
-				const cancelled = active.filter((task) => runner.cancel(task.id)).length;
+				const cancelled = active.filter((task) => runner.cancel(task.id, "stopped from the agents panel (stop all)")).length;
 				ctx.ui.notify(`Stopped ${cancelled} ${cancelled === 1 ? "subagent" : "subagents"}.`);
 			} finally {
 				stopAllConfirmation = undefined;
@@ -1227,7 +1227,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		// no recorded reason. Cancel through the runner so the lifecycle runs and the
 		// record is persisted, and tell the user why.
 		const onAbort = (): void => {
-			if (runner.cancel(task.id)) {
+			if (runner.cancel(task.id, `cancelled: the tool call was aborted${abortReasonText(signal?.reason)}`)) {
 				ctx.ui.notify(
 					`Subagent ${task.agent} cancelled: the tool call was aborted${abortReasonText(signal?.reason)}. The run is recorded as cancelled.`,
 					"warning",
@@ -1351,7 +1351,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 
 	tool("cancel",  "Cancel a queued or running subagent task.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params) => {
 		const id = String(params.task_id);
-		return runner.cancel(id) ? text(`Cancelled task ${id}.`) : text(`Error: task ${id} is not running.`, { error: "not running" });
+		return runner.cancel(id, "cancelled by the cancel tool") ? text(`Cancelled task ${id}.`) : text(`Error: task ${id} is not running.`, { error: "not running" });
 	});
 
 	tool("send_message", "Steer a running subagent with a message delivered before its next model call.", { required: ["task_id", "message"], properties: { task_id: { type: "string" }, message: { type: "string" } } }, async (params) => {
@@ -1441,6 +1441,6 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		sidebarTui = undefined;
 		worktrees?.close();
 		worktrees = undefined;
-		runner.cancelAll();
+		runner.cancelAll("cancelled: parent session shut down");
 	});
 }
