@@ -13,7 +13,7 @@ The [v2.6.0 release](https://github.com/Gentleman-Programming/gentle-pi/releases
 - The Agents List and Details views preserve the orchestrator/session hierarchy and completion, abort, and lost-exit history. Parent-child queries and notifications have an explicit handoff path, while model, effort, and usage stay observable per task.
 - Named `/gentle:profiles` atomically route the orchestrator separately from packaged and review roles; see the [technical reference](readme-reference.md#agent-model-profiles) for the profile model.
 
-The source checkout currently prepares `gentle-pi` `2.6.3` with a package-local Gentle AI `v2.9.0` pin; this is not a claim that `2.6.3` is published.
+The source checkout currently prepares `gentle-pi` `2.6.4` with a package-local Gentle AI `v2.9.0` pin; this is not a claim that `2.6.4` is published.
 
 ## Shell interactions and runtime behavior
 
@@ -22,6 +22,8 @@ Gentle Shell is the Pi workspace experience provided by the `gentle-pi` package.
 In fullscreen at 140 columns or wider, the right sidebar scrolls **✿ Gentle-Pi ✿ → Status → Changes → Agents → TODO** together. The one-line heading is horizontally centered within the usable rail width, with pink flowers and normal white text in the Gentleman themes. Colors follow the active theme; no artwork scaling or custom fonts are used. Narrow/mobile terminals and regular mode retain bottom widgets without the sidebar heading. The original rose and text logo remain in the main chat startup intro.
 
 The rail reuses its last frame until something it paints changes, so silent frames stay cheap and live session state still lands on the next frame: a model switch, a new thinking level, context growth, session cost, session name and extension statuses all refresh the Status card without a redraw of the rest of the sidebar.
+
+The sidebar Status card also shows `Profile` in its Model section when the profiles store has a valid active marker. It follows profile changes on the next render. Missing, unreadable, or invalid stores leave the line hidden. The compact bottom bar is unchanged.
 
 The status bar replaces pi's three-line footer with a single line of segments:
 

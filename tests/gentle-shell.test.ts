@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync, execFile } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import installGentleShell, { buildShellBarModel, changesShortcut, devBinaryCard, fetchCodexUsage, loadFileDiff, shellGitRunner, openInExternalEditor, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
+import installGentleShell, { buildShellBarModel, createActiveProfileReader, changesShortcut, devBinaryCard, fetchCodexUsage, loadFileDiff, shellGitRunner, openInExternalEditor, type GentlePromptEditor } from "../extensions/gentle-shell.ts";
 import { CHANGE_STATUS } from "../lib/shell-changes.ts";
 import { sidebarState, type SidebarRail } from "../lib/shell-sidebar.ts";
 import type { ShellBarTheme } from "../lib/shell-bar.ts";
@@ -232,7 +232,8 @@ test("gentleShell installs the footer on session_start when a UI exists", () => 
 
 test("the fullscreen Status rail carries a live digest so a model switch refreshes it", async () => {
 	const { pi, handlers } = fakePi();
-	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" });
+	let profile: string | undefined = "team";
+	gentleShell(pi, { GENTLE_PI_SHELL_CHANGES_WATCH_MS: "off" }, { activeProfile: () => profile });
 	const entries: unknown[] = [];
 	const { ctx, ui } = fakeContext({ entries });
 	await fire(handlers, "session_start", ctx);
@@ -247,6 +248,14 @@ test("the fullscreen Status rail carries a live digest so a model switch refresh
 		const live = () => rail.digest?.();
 		assert.equal(typeof rail.digest, "function", "the Status card paints live state and must declare a digest");
 		assert.match(rail.render(46).join("\n"), /gpt-5\.5/);
+
+		assert.match(rail.render(46).join("\n"), /Profile.*team/);
+		const beforeProfile = live();
+		profile = "other";
+		assert.notEqual(live(), beforeProfile);
+		assert.match(rail.render(46).join("\n"), /Profile.*other/);
+		profile = undefined;
+		assert.doesNotMatch(rail.render(46).join("\n"), /Profile/);
 
 		const beforeModel = live();
 		(ctx.model as { id: string }).id = "gpt-5.6";
@@ -271,6 +280,39 @@ test("the fullscreen Status rail carries a live digest so a model switch refresh
 	} finally {
 		component.dispose();
 	}
+});
+
+test("profile reader follows store changes and rejects missing or invalid active markers", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "shell-profile-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+	const path = join(root, "profiles.json");
+	const read = createActiveProfileReader({ GENTLE_PI_CONFIG_HOME: root });
+	const save = (active: string | undefined) => writeFileSync(path, JSON.stringify({
+		kind: "gentle-pi.agent_model_profiles", version: 1, active, profiles: { team: {}, other: {} },
+	}));
+	assert.equal(read(), undefined);
+	save("team");
+	assert.equal(read(), "team");
+	assert.equal(read(), "team");
+	save("other");
+	assert.equal(read(), "other");
+	const replacement = join(root, "replacement.json");
+	writeFileSync(replacement, JSON.stringify({ kind: "gentle-pi.agent_model_profiles", version: 1, active: "team", profiles: { team: {} } }));
+	renameSync(replacement, path);
+	assert.equal(read(), "team", "atomic replacement refreshes the cached profile");
+	const isolated = createActiveProfileReader({ GENTLE_PI_CONFIG_HOME: join(root, "other-home") });
+	assert.equal(isolated(), undefined);
+	assert.equal(read(), "team", "another shell's config home does not alter this cache");
+	save("missing");
+	assert.equal(read(), undefined);
+	save(undefined);
+	assert.equal(read(), undefined);
+	writeFileSync(path, "{broken");
+	assert.equal(read(), undefined);
+	save("team");
+	assert.equal(read(), "team");
+	rmSync(path);
+	assert.equal(read(), undefined);
 });
 
 test("gentleShell stays out of the way without a UI or when disabled", () => {
