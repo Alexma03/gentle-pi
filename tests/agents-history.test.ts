@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
-import { acquireTaskLock, historyDir, loadHistory, loadStoredTask, pruneHistory, saveTask, taskLockPath } from "../lib/agents-history.ts";
+import { acquireTaskLock, historyDir, loadHistory, loadStoredTask, pruneHistory, saveTask } from "../lib/agents-history.ts";
 import { applyTaskEvent, emptyThread, TASK_EVENT, TASK_STATUS, TaskStore, type TaskRecord } from "../lib/agents-protocol.ts";
 
 // Gentle Agents history: JSON per task, async, lazy, pruned by count.
@@ -41,21 +41,18 @@ test("saveTask writes a task with its thread and loadStoredTask reads it back", 
 	assert.deepEqual(readdirSync(dir), ["a1.json"], "no temp file is left behind");
 });
 
-test("task reconciliation locks are busy, reclaim only a dead owner, and fail closed for malformed or foreign state", () => {
-	const lockDir = join(root, "task-locks");
+test("task reconciliation elections bypass dead candidates and fail closed for active or ambiguous candidates", () => {
+	const lockDir = join(root, "task-locks"), token = "11111111-1111-4111-8111-111111111111";
 	const held = acquireTaskLock(lockDir, "busy");
-	assert.throws(() => acquireTaskLock(lockDir, "busy"), /busy|active|ambiguous/i);
-	held.release();
-	orphanLock(lockDir, "dead"); const fence = `${taskLockPath(lockDir, "dead")}.reclaim`; writeFileSync(fence, "foreign");
-	assert.throws(() => acquireTaskLock(lockDir, "dead"), /reclaim fence is present/); rmSync(fence);
-	const reclaimed = acquireTaskLock(lockDir, "dead"); reclaimed.release();
-	const malformed = taskLockPath(lockDir, "malformed");
-	writeFileSync(malformed, "not-json");
+	assert.match(held.path, /busy\.reconcile\.[0-9a-f-]+$/);
+	assert.throws(() => acquireTaskLock(lockDir, "busy"), /busy|active|ambiguous/i); held.release();
+	orphanLock(lockDir, "dead");
+	const deadName = readdirSync(lockDir).find(name => name.startsWith("dead.reconcile."))!;
+	const bypassed = acquireTaskLock(lockDir, "dead");
+	assert.notEqual(bypassed.path, join(lockDir, deadName)); assert.ok(!readdirSync(lockDir).includes(deadName)); bypassed.release();
+	const malformed = join(lockDir, `malformed.reconcile.${token}`); writeFileSync(malformed, "not-json");
 	assert.throws(() => acquireTaskLock(lockDir, "malformed"), /busy|active|ambiguous|malformed/i);
-	orphanLock(lockDir, "foreign");
-	const foreign = taskLockPath(lockDir, "foreign");
-	const owner = JSON.parse(readFileSync(foreign, "utf8")) as Record<string, unknown>;
-	writeFileSync(foreign, JSON.stringify({ ...owner, host: "foreign-host" }));
+	const foreign = join(lockDir, `foreign.reconcile.${token}`); writeFileSync(foreign, JSON.stringify({ schema: "gentle-pi.task-reconciliation-lock/v1", taskId: "foreign", token, pid: process.pid, host: "foreign-host" }));
 	assert.throws(() => acquireTaskLock(lockDir, "foreign"), /busy|active|ambiguous|foreign/i);
 });
 test("loadHistory skips broken files, sorts newest first, and pruneHistory keeps the newest N", async () => {
