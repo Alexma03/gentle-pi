@@ -832,6 +832,40 @@ async function shutdownAndRestoreNativeSpawn(
 	}
 }
 
+for (const matching of [true, false]) {
+ test("owned child diff relay validates the exact file independently of review bookkeeping: "+matching, async () => {
+  const h=fakePi(), d=deps(), {ctx}=fakeContext();
+  const target=realpathSync(cwd);
+  (ctx as any).cwd=target;
+  ctx.sessionManager.getCwd=()=>target;
+  ctx.sessionManager.getEntries=(()=>h.entries) as any;
+  ctx.sessionManager.getBranch=(()=>h.entries) as any;
+  d.deps.resolveWorktree=(path,base)=>{
+   const full=resolve(base,path);
+   return full===target||full.startsWith(target+"/")?{root:target,commonDir:"/fixture/common"}:undefined;
+  };
+  const spawn=d.deps.spawn!;
+  d.deps.spawn=(...args)=>{
+   const child=spawn(...args),on=child.on.bind(child);
+   child.on=((event,listener)=>{if(event==="spawn")queueMicrotask(listener);return on(event,listener);}) as any;
+   return child;
+  };
+  gentleAgents(h.pi,{},d.deps);
+  await h.fire("session_start",ctx);
+  await h.tools.get("subagent_run")!.execute("diff",{agent:"explore",task:"Write",mode:"background",workspace_root:target},undefined,undefined,ctx);
+  await tick();
+  writeFileSync(join(target,"session-diff-test.ts"),"agent\n");
+  const evidence={id:"write",root:target,path:matching?"session-diff-test.ts":"different.ts",before:{kind:"text",text:"original\n"},after:{kind:"text",text:"agent\n"}};
+  d.children[0].emit({type:"tool_execution_start",toolCallId:"write",toolName:"write",args:{path:"session-diff-test.ts"}});
+  d.children[0].emit({type:"tool_execution_end",toolCallId:"write",isError:false,result:{content:[],details:{gentleSessionChange:evidence}}});
+  const relays=h.events.filter(event=>event.name==="gentle-pi:child-session-change");
+  assert.equal(relays.length,matching?1:0);
+  if(matching) assert.match((relays[0].data as any).evidence.id,/:write$/);
+  assert.equal(h.entries.filter(entry=>entry.customType===REVIEW_REMINDER_RECEIPT).length,1);
+  await h.fire("session_shutdown",ctx); await tick();
+ });
+}
+
 for (const scenario of ["own", "other-root", "escaped", "sibling", "session-switch", "shutdown", "unregistered"] as const) {
 	test(`child mutation attribution through registered subagent_run: ${scenario}`, async () => {
 		const h = fakePi();

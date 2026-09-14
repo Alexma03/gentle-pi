@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
+import { isSessionChangeEvidence, type SessionChangeEvidence } from "./session-changes.ts";
 import type { Duplex, Readable, Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import { RESEARCH_SELECTION_ENV, RESEARCH_ARTIFACT_ENV, type ResearchArtifactIntent } from "./sdd-research-capabilities.ts";
@@ -101,7 +102,7 @@ export interface RunnerHooks {
 	onNotification?(task: TaskRecord, message: string): boolean | void;
 	onQuery?(task: TaskRecord, requestId: string, message: string): boolean | void;
 	// Parent-only observation of a paired successful filesystem tool, not prose.
-	onSuccessfulMutation?(task: TaskRecord, tool: { toolName: "write" | "edit"; toolCallId: string; path: string }): void | Promise<void>;
+	onSuccessfulMutation?(task: TaskRecord, tool: { toolName: "write" | "edit"; toolCallId: string; path: string; evidence?: SessionChangeEvidence }): void | Promise<void>;
 }
 
 export interface RemediationHarnessPlan { command?: string; naReason?: string }
@@ -874,7 +875,11 @@ export class AgentRunner {
 				live.mutationStarts.delete(event.callId);
 				const task = this.store.get(id);
 				if (mutation && task && raw.isError === false && !event.isError) {
-					try { void Promise.resolve(this.hooks.onSuccessfulMutation?.(task, mutation)).catch(() => {}); }
+					try {
+						const evidence = (raw.result as { details?: { gentleSessionChange?: unknown } } | undefined)?.details?.gentleSessionChange;
+						const observed = isSessionChangeEvidence(evidence) && evidence.id === mutation.toolCallId ? { ...mutation, evidence: structuredClone(evidence) } : mutation;
+						void Promise.resolve(this.hooks.onSuccessfulMutation?.(task, observed)).catch(() => {});
+					}
 					catch { /* Bookkeeping failure must not rewrite a successful tool or stop the child. */ }
 				}
 			}
