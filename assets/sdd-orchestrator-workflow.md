@@ -41,7 +41,7 @@ Native unprefixed tokens are the only automatic planning routes. Prefixed or loc
 
 These planning routes remain runnable when missing planning artifacts leave `dependencies.apply: blocked`; do not require apply readiness to produce those artifacts. This is a planning-only exception, not permission to run apply or another blocked non-planning phase.
 
-Before any planning launch, stop for ambiguous change selection, unresolved session preflight, or unsafe action context. Carry `actionContext` and prove planned writes are within the authoritative workspace or allowed edit roots; workspace-planning without allowed edit roots remains read-only. Planning does not bypass the init guard, pre-proposal gate, or phase approval requirements.
+Before any planning launch, stop for ambiguous change selection, unresolved session preflight, or unsafe action context. Carry `actionContext` and prove planned writes are within the authoritative workspace or allowed edit roots; workspace-planning without allowed edit roots remains read-only. Planning does not bypass the init guard, optional research guidance, or phase approval requirements.
 
 ## Bounded Execution Routing
 
@@ -135,19 +135,15 @@ Interactive approval is phase-scoped. A user response such as "continue", "dale"
 
 Before `sdd-proposal` in interactive mode, offer the user a proposal question round instead of silently deciding whether the proposal is clear enough. Explain that the questions are meant to improve the PRD/proposal by uncovering business understanding, business rules, implications, impact, edge cases, and product tradeoffs. Prefer 3–5 concrete product questions per round, then summarize the resulting assumptions and ask whether the user wants to correct anything or run a second question round. Cover business/product/PRD decisions: business problem, target users and situations, business rules, product outcome, current-state gap, implications and impact, edge cases, decision gaps, first-slice scope boundaries, non-goals, product constraints, and business tradeoffs. Do not ask about test commands, PR shape, changed-line budget, or other harness mechanics at proposal time unless the user explicitly asks to discuss delivery.
 
-## Research and Pre-Proposal Gate
+## Optional Research
 
-This gate is MANDATORY and applies in both execution modes; in interactive mode it runs alongside the proposal question round above, and the two never contradict: the question round shapes the proposal, the gate decides whether `sdd-proposal` may launch at all.
+Recommend research when complexity, consequential uncertainty, or external facts warrant it, before or after exploration as useful. Research is not a prerequisite for questions, proposal, spec, design, or tasks; selection does not turn it into a completion gate. Supply concrete questions, requested depth, relevant local context and skill instructions, and source restrictions to the output-only `sdd-research` child; do not pass local paths as child read obligations.
 
-- Offer `sdd-research` immediately after `sdd-explore`. Research is optional until selected; selection makes completion mandatory.
-- Before every proposal, invoke `sdd-proposal` only when selected research is `done` or research is unselected, product decisions are `confirmed`, evidence references are valid, and the selected artifact-store state is ready.
-- The orchestrator owns product discovery. In automatic mode, unresolved product choices require one lossless grouped prompt with all context, options, consequences, allowed answers, and exact tokens; the orchestrator MUST persist the pending pre-proposal state before prompting, then STOP without invoking `sdd-proposal`.
-- The proposer receives a confirmed pre-proposal handoff and MUST NOT interview the user or infer consent.
-- Pi's native `gentle-pi.sdd-status` contract remains the sole status contract. Research and pre-proposal state are orchestrator-owned prose and artifacts (`sdd/{change}/research`, `sdd/{change}/preproposal`, `openspec/changes/{change}/research.md`) layered on top — never a native status field.
+The parent owns local reads, product choices, and any authorized persistence/readback. Do not make the research child fetch local artifacts or write files/Engram. Use the existing parent tools and selected store when findings merit persistence: exact change-local paths or project/topic keys, with actual readback before claiming success. First artifacts and in-memory sessions require no prior identity or checkpoint. For hybrid storage, report each actual write/readback result and resolve genuine divergence before overwriting; do not create another authority or claim a failed save succeeded. Preserve historical artifacts without requiring them for new research.
 
-Runtime mapping: use the injected `## SDD Research Capabilities` resolved from package-approved exact tool names intersected with active tools. Official documentation requires only `fetch_content`; open-web requires ALL FOUR tools: `web_search`, `source_check`, `fetch_content`, and `get_search_content`, each active and approved/reachable in the child. None is optional; inventory admission is not evidence of execution. Preserve explicit agent/source restrictions. The research child receives only reachable approved names in its CLI allowlist and rechecks child-local availability. Generic `mcp` and dynamic `mcp__context7` gateways do not imply authorization for arbitrary servers or remote methods; without a verified narrow route they grant nothing.
+Use individually authorized tools from the injected `## SDD Research Capabilities`. Documentation uses `fetch_content`; open-web uses any authorized available subset of `web_search`, `source_check`, `fetch_content`, and `get_search_content`. Forward exact observed class-specific tools and existing extension provenance in `research_selection`; never broaden source restrictions, invent online access, or treat generic MCP gateways as narrow grants. The child rechecks actual availability and provenance. Inventory is not evidence: require source-backed claims, original sources, publisher/version/date, and honest limits.
 
-Selected supported research MUST run and persist source-backed claims with exact tool calls, URLs, publisher/version, retrieval times, supporting excerpts and claim-to-source IDs. Tool inventory and search snippets are not evidence. Block only genuinely unavailable classes, retain partial results without unvalidated claims, and keep proposal readiness false until every selected class is complete. Never recommend skipping research because of a fictitious blanket restriction, invent citations, or substitute bash for missing tools. SDD chains treat research as unselected.
+Useful partial findings, unavailable sources, or an unpersisted inline result do not automatically block proposal or trigger a retry. Retain unanswered questions and explain their implications. Only a genuine unresolved product choice, unsafe dependent action, or actual permission denial blocks the work that depends on it. The parent relays product choices without inferring consent; no persisted pre-proposal readiness certificate is required. Native `gentle-ai.sdd-status` remains the sole SDD status authority; research adds no native phase or state.
 
 ## Delivery Strategy
 
@@ -194,6 +190,8 @@ Every installed SDD phase executor agent (`assets/agents/sdd-*.md`) carries the 
 
 In `auto` execution mode, the parent/orchestrator is the quality gate between SDD phases. After a delegated phase returns and before launching the next phase, validate that the phase actually reached its objective. This validation is autonomous: do not ask the user on the happy path, but stop and report if the gate catches a real problem.
 
+**Optional research takes precedence over the success-only checks below:** accept honest partial, unavailable, or inline findings without requiring an artifact or retry. Check only claimed persistence through parent-owned readback; never force a research/pre-proposal certificate. Genuine product decisions, unsafe dependencies, and actual permission denials still constrain their dependent actions.
+
 Check every phase result against the Result Contract:
 
 - **Contract conformance:** the phase returned `status`, `executive_summary`, `artifacts`, `next_recommended`, `risks`, and `skill_resolution`, and `status` indicates success rather than partial, failed, or blocked.
@@ -227,7 +225,7 @@ On Pi, phase model routing is user-owned and persisted, not prompt-passed: `/gen
 | Phase        | Default tier   | Reason                                     |
 | ------------ | -------------- | ------------------------------------------ |
 | sdd-explore  | balanced       | Reads code, structural - not architectural |
-| sdd-research | balanced       | Fail-closed evidence record keeping        |
+| sdd-research | balanced       | Optional source-backed investigation        |
 | sdd-proposal | deep-reasoning | Architectural decisions                    |
 | sdd-spec     | balanced       | Structured writing                         |
 | sdd-design   | deep-reasoning | Architecture decisions                     |

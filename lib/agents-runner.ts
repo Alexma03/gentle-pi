@@ -1,7 +1,7 @@
 import { isSessionChangeEvidence, type SessionChangeEvidence } from "./session-changes.ts";
 import type { Duplex, Readable, Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
-import { RESEARCH_SELECTION_ENV, RESEARCH_ARTIFACT_ENV, type ResearchArtifactIntent } from "./sdd-research-capabilities.ts";
+import { RESEARCH_SELECTION_ENV } from "./sdd-research-capabilities.ts";
 import { AGENT_MODE, formatModelRef, type AgentDefinition, type AgentMode, type ModelRef } from "./agents-config.ts";
 import { CHILD_QUERY_MAX_INFLIGHT, CHILD_QUERY_TIMEOUT_MS, parseChildFrame, validChildMessage, validChildQueryId } from "./agents-messaging.ts";
 import { ParentStandingReviewPermissionBroker } from "./review-session-standing-permission-ipc.ts";
@@ -160,7 +160,6 @@ export interface TaskRequest {
 	sddChange?: SddChangeSelection;
 	// Untrusted narrowing intent; paths come only from matching host provenance.
 	researchSelection?: unknown;
-	researchArtifact?: ResearchArtifactIntent;
 	extensionPaths?: string[];
 	// Captures the originating session; invoked only after successful OS spawn.
 	onLaunch?: () => void;
@@ -274,7 +273,7 @@ export function childArguments(request: TaskRequest): string[] {
 	if (request.resumeSessionPath) args.push("--session", request.resumeSessionPath);
 	if (request.model) args.push("--model", request.thinking ? `${formatModelRef(request.model)}:${request.thinking}` : formatModelRef(request.model));
 	else if (request.thinking) args.push("--thinking", request.thinking);
-	const tools = request.agent.tools.length > 0 ? [...new Set([...request.agent.tools, PARENT_NOTIFICATION_TOOL])] : DEFAULT_TOOLS;
+	const tools = request.agent.tools.length > 0 || request.agent.name === "sdd-research" ? [...new Set([...request.agent.tools, PARENT_NOTIFICATION_TOOL])] : DEFAULT_TOOLS;
 	if (tools.length > 0) args.push("--tools", tools.join(","));
 	if (request.agent.instructions.length > 0) args.push("--append-system-prompt", request.agent.instructions);
 	return args;
@@ -354,7 +353,6 @@ export class AgentRunner {
 			...(request.sddPreflightContext ? { sddPreflightContext: request.sddPreflightContext } : {}),
 			mode: request.mode,
 			prompt: request.prompt,
-			...(request.researchArtifact ? { researchArtifact: structuredClone(request.researchArtifact) } : {}),
 			label: taskLabel(request.prompt, request.label),
 			cwd: request.cwd,
 			parentSessionId: request.parentSessionId,
@@ -394,7 +392,6 @@ export class AgentRunner {
 		const launchRequest = {
 			...request,
 			sddChange: request.sddChange && { ...request.sddChange },
-			researchArtifact: request.researchArtifact && structuredClone(request.researchArtifact),
 		};
 		this.queue.push({ task, request: launchRequest });
 		queueMicrotask(() => this.pump());
@@ -486,7 +483,7 @@ export class AgentRunner {
 		const hasParentPermissionChannel = request.authorizeParentStandingReviewPermission !== undefined;
 		const env = {
 			...request.env,
-			...(request.extensionPaths ? { [RESEARCH_SELECTION_ENV]: JSON.stringify(request.researchSelection ?? null), [RESEARCH_ARTIFACT_ENV]: JSON.stringify(request.researchArtifact ?? null) } : {}),
+			...(request.extensionPaths ? { [RESEARCH_SELECTION_ENV]: JSON.stringify(request.researchSelection ?? null) } : {}),
 			[CHILD_MARKER]: "1",
 			[IPC_MARKER]: `${this.deps.now()}-${Math.random().toString(36).slice(2)}`,
 			...(hasParentPermissionChannel ? { GENTLE_PI_AGENTS_PARENT_PERMISSION_FD: "3" } : {}),

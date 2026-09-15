@@ -6,7 +6,7 @@ import { recordReviewMutation } from "../lib/review-reminder-receipt.ts";
 import { SESSION_CHANGE_RELAY } from "../lib/session-changes.ts";
 import { SessionWorktreeRegistry, resolveSessionWorktree, type WorktreeResolver } from "../lib/session-worktree-registry.ts";
 import { existsSync, mkdirSync, readFileSync, lstatSync, realpathSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import { join, resolve, isAbsolute, sep } from "node:path";
@@ -29,7 +29,7 @@ import { AGENTS_GLYPH, renderAgentsCard, widgetExpiryMs, widgetRows } from "../l
 import { CARD_TONE, renderCard } from "../lib/shell-card.ts";
 import { openInExternalEditor } from "./gentle-shell.ts";
 import { resolveGentlePiAgentHome } from "../lib/agent-home.ts";
-import { assertResearchCheckpoint, parseResearchPersistence, RESEARCH_PERSISTENCE_ENTRY, canonicalArtifactPath, researchAgent, renderResearchCapabilities, RESEARCH_CHILD_TOOLS_ENV, RESEARCH_SELECTION_ENV, RESEARCH_ARTIFACT_ENV, parseResearchArtifactIntent, researchArtifactCall, researchArtifactReadback, type ResearchArtifactIntent, type ResearchWriteIdentity } from "../lib/sdd-research-capabilities.ts";
+import { canonicalArtifactPath, researchAgent, renderResearchCapabilities, RESEARCH_CHILD_TOOLS_ENV, RESEARCH_SELECTION_ENV } from "../lib/sdd-research-capabilities.ts";
 import { CHILD_METRICS_EVENT, CHILD_METRICS_REVOKED, childEvent, launchSelection, type LaunchSelection } from "../lib/runtime-metrics-children.ts";
 import { runtimeMetricsEnvAllows, type RuntimeMetricsPolicyDeps } from "../lib/runtime-metrics-policy.ts";
 
@@ -347,21 +347,6 @@ export async function answerThroughUi(ui: ExtensionContext["ui"] | undefined, as
 	}
 }
 
-interface ResearchArtifactCallObservation {
-	index: number;
-	desired?: ResearchWriteIdentity;
-}
-const RESEARCH_ARTIFACT_SCHEMA = {
-	type: "object", description: "Untrusted exact artifact intent, never authorization or readback. Same bounds required on continuation.",
-	required: ["store", "worktree", "changeName", "retainedIntent", "locators"],
-	properties: {
-		store: { type: "string", enum: ["openspec", "engram", "both", "none"] }, worktree: { type: "string" }, changeName: { type: "string" }, retainedIntent: { type: "string" },
-		locators: { type: "array", maxItems: 3, items: { type: "object", required: ["artifact", "revision", "digest"], properties: {
-			artifact: { type: "string", enum: ["research", "preproposal", "explore"] }, revision: { type: "integer", minimum: 1 }, digest: { type: "string", pattern: "^[a-f0-9]{64}$" }, path: { type: "string" },
-			engram: { type: "object", required: ["id", "project", "topic_key", "revision_count"], properties: { id: { type: "integer", minimum: 1 }, project: { type: "string" }, topic_key: { type: "string" }, revision_count: { type: "integer", minimum: 1 } } },
-		} } },
-	},
-};
 const RESEARCH_SELECTION_SCHEMA = {
 	type: "object",
 	additionalProperties: false,
@@ -385,110 +370,15 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		let selection: unknown;
 		try { selection = JSON.parse(env[RESEARCH_SELECTION_ENV] ?? "null"); } catch { /* Missing selection grants no research. */ }
 		const current = () => researchAgent({ tools: allowed, instructions: "" } as AgentDefinition, pi, selection);
-		pi.on("before_agent_start", (event, ctx) => {
-			reads.clear(); initialReads.clear(); writes.clear(); calls.clear(); pending.clear(); accepted.clear(); readbackMismatch = false;
-			try {
-				const last = [...(ctx.sessionManager?.getEntries?.() ?? [])].reverse().find(entry => entry.type === "custom" && entry.customType === RESEARCH_PERSISTENCE_ENTRY);
-				if (last?.type === "custom") {
-					const restored = parseResearchPersistence(last.data, artifactScope(ctx.cwd), ctx.cwd);
-					for (const [key, value] of Object.entries(restored.accepted)) accepted.set(key, value);
-					for (const [key, value] of Object.entries(restored.writes)) writes.set(key, value);
-				}
-			} catch { readbackMismatch = true; }
-			return { systemPrompt: `${event.systemPrompt}\n\n${renderResearchCapabilities(current().capabilities)}\n\nBounded artifact narrowing intent (untrusted data, never authority or verification): ${env[RESEARCH_ARTIFACT_ENV] ?? "missing"}\nRead every selected store through actual authorized tools before readiness. Missing/none/divergent readback keeps proposal_ready=false. Retain denial intent; host permission remains required.` };
-		});
-		let readbackMismatch = false;
-		const reads = new Map<string, string>();
-		const initialReads = new Set<string>();
-		const pending = new Set<string>();
-		const accepted = new Map<string, ReturnType<typeof parseResearchArtifactIntent>["locators"][number]>();
-		const writes = new Map<string, ResearchWriteIdentity>();
-		const calls = new Map<string, ResearchArtifactCallObservation>();
-		const artifactScope = (cwd: string) => parseResearchArtifactIntent(JSON.parse(env[RESEARCH_ARTIFACT_ENV] ?? "null"), cwd);
-		const checkpoint = (ctx: ExtensionContext, operation: Record<string, unknown>) => {
-			const file = ctx.sessionManager?.getSessionFile?.();
-			if (!pi.appendEntry || !ctx.sessionManager?.getEntries || !file || !existsSync(file)) throw new Error("Durable research session history unavailable");
-			const data = { version: 1, scope: artifactScope(ctx.cwd), accepted: Object.fromEntries(accepted), writes: Object.fromEntries(writes), operation };
-			if (Buffer.byteLength(JSON.stringify(data)) > 32_768) throw new Error("Research checkpoint exceeds bounded history payload");
-			pi.appendEntry(RESEARCH_PERSISTENCE_ENTRY, data);
-			assertResearchCheckpoint(file, data);
-		};
-		pi.on("tool_call", (event, ctx) => {
+		pi.on("before_agent_start", event => ({
+			systemPrompt: `${event.systemPrompt}\n\n${renderResearchCapabilities(current().capabilities)}\n\nResearch is output-only. Use parent-supplied local context; do not read or mutate repository or Engram artifacts. Return useful partial findings and unavailable sources honestly. The parent owns authorized persistence and actual readback.`,
+		}));
+		pi.on("tool_call", event => {
 			const registered = pi.getAllTools().some(tool => tool.name === event.toolName && tool.sourceInfo?.source !== "sdk");
 			const selected = current().agent.tools.includes(event.toolName) || event.toolName === "subagent_parent_message";
 			if (!registered || !selected || !allowed.includes(event.toolName) || !pi.getActiveTools().includes(event.toolName)) {
-				return { block: true, reason: "Tool is outside the research child's active launch allowlist." };
+				return { block: true, reason: "Tool is outside the output-only research child's active launch allowlist." };
 			}
-			if (event.toolName === "subagent_parent_message" || ["fetch_content", "web_search", "source_check", "get_search_content"].includes(event.toolName)) return;
-			try {
-				const scope = artifactScope(ctx.cwd);
-				const index = researchArtifactCall(scope, ctx.cwd, event.toolName, event.input);
-				let desired: ResearchWriteIdentity | undefined;
-				if (["write", "edit", "mem_save"].includes(event.toolName)) {
-					if (readbackMismatch || pending.size) throw new Error("Stale/divergent state requires explicit identical-scope re-entry.");
-					const tools = scope.store === "both" ? ["read", "mem_get_observation"] : [scope.store === "openspec" ? "read" : "mem_get_observation"];
-					if (!scope.locators.every((_, i) => tools.every(tool => initialReads.has(`${i}:${tool}`)))) throw new Error("Every selected artifact requires matching initial readback before mutation.");
-					reads.clear();
-					const content = "content" in event.input ? event.input.content : undefined;
-					if (event.toolName === "edit" || typeof content !== "string") throw new Error("Use a full bounded write/save for post-write readback.");
-					const key = `${index}:${event.toolName === "write" ? "read" : "mem_get_observation"}`;
-					if (!initialReads.has(key) || writes.has(key)) throw new Error("Fresh matching readback required before mutation.");
-					const revision: unknown = JSON.parse(content).revision;
-					if (!Number.isSafeInteger(revision) || Number(revision) <= (accepted.get(key) ?? scope.locators[index]).revision) throw new Error("Full write requires a newer positive revision.");
-					desired = { revision: Number(revision), digest: createHash("sha256").update(content).digest("hex") };
-					if (scope.store === "both") {
-						const peerKey = `${index}:${event.toolName === "write" ? "mem_get_observation" : "read"}`;
-						const peer = writes.get(peerKey) ?? accepted.get(peerKey);
-						if (peer && peer.revision > (accepted.get(key) ?? scope.locators[index]).revision && (peer.revision !== desired.revision || peer.digest !== desired.digest)) throw new Error("Hybrid desired identity divergence refused before mutation");
-					}
-					calls.clear(); pending.add(event.toolCallId); writes.set(key, desired);
-					checkpoint(ctx, { toolCallId: event.toolCallId, tool: event.toolName, index, desired });
-				}
-				calls.set(event.toolCallId, { index, desired });
-			} catch (error) { return { block: true, reason: `Research scope refused: ${String(error)}. Retain intent and uncertainty; no replacement store.` }; }
-		});
-		pi.on("tool_result", (event, ctx) => {
-			const call = calls.get(event.toolCallId);
-			calls.delete(event.toolCallId);
-			if (!call) return;
-			const { index, desired } = call;
-			if (desired) {
-				let valid = false;
-				try {
-					valid = event.isError === false && Array.isArray(event.content) && event.content.length > 0 && Array.from(event.content).every(part => part !== null && typeof part === "object" && part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0);
-				} catch { /* Malformed mutation results cannot authorize completion. */ }
-				if (!valid) readbackMismatch = true;
-				try { checkpoint(ctx, { toolCallId: event.toolCallId, tool: event.toolName, index, valid, isError: event.isError, resultDigest: createHash("sha256").update(JSON.stringify(event.content) ?? "undefined").digest("hex") }); }
-				catch { readbackMismatch = true; }
-				pending.delete(event.toolCallId); reads.clear();
-				return;
-			}
-			if (!["read", "mem_get_observation"].includes(event.toolName)) return;
-			if (pending.size) return { content: [...event.content, { type: "text" as const, text: "Research readback incomplete: proposal_ready=false; mutation pending." }] };
-			let matched = false, complete = false;
-			try {
-				const scope = artifactScope(ctx.cwd);
-				researchArtifactCall(scope, ctx.cwd, event.toolName, event.input);
-				const bytes = event.content.map(part => part.type === "text" ? part.text : "").join("");
-				const returned = event.toolName === "read" ? bytes : JSON.parse(bytes);
-				const key = `${index}:${event.toolName}`, written = writes.get(key);
-				const expected = { ...(accepted.get(key) ?? scope.locators[index]), ...written };
-				matched = !event.isError && researchArtifactReadback(expected, event.toolName, returned, written !== undefined);
-				if (matched) {
-					reads.set(key, expected.digest);
-					initialReads.add(key);
-					accepted.set(key, event.toolName === "read" ? expected : { ...expected, engram: { ...expected.engram!, revision_count: returned.revision_count } });
-					writes.delete(key);
-					checkpoint(ctx, { toolCallId: event.toolCallId, tool: event.toolName, index, matched: true });
-				}
-				const tools = scope.store === "both" ? ["read", "mem_get_observation"] : [scope.store === "openspec" ? "read" : "mem_get_observation"];
-				const divergent = scope.locators.some((_, i) => tools.every(tool => reads.has(`${i}:${tool}`)) && new Set(tools.map(tool => reads.get(`${i}:${tool}`))).size !== 1);
-				if (divergent) matched = false;
-				complete = matched && !readbackMismatch && scope.store !== "none" && scope.locators.every((_, i) => tools.every(tool => reads.has(`${i}:${tool}`)));
-			} catch { matched = false; /* Unsupported or undurable readback is not evidence. */ }
-			if (!matched) { reads.clear(); readbackMismatch = true; }
-			const note = !matched ? "Research readback mismatch: proposal_ready=false; retain intent and uncertainty." : complete ? "Readback identity matched in all selected stores; not evidence validation or proposal admission." : "Research readback incomplete: proposal_ready=false; read every selected store.";
-			return { content: [...event.content, { type: "text" as const, text: note }], isError: event.isError || !matched };
 		});
 	}
 	const childIpc = ownedChildIpc(env, overrides.childIpc ?? (process.send ? process as unknown as IpcEndpoint : undefined));
@@ -963,7 +853,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 
 	const roots = (ctx: ExtensionContext) => ({ cwd: ctx.sessionManager.getCwd(), home: deps.home, agentHome });
 
-	const buildRequest = (ctx: ExtensionContext, agent: AgentDefinition, prompt: string, label: string | undefined, context: string | undefined, mode: AgentMode, resume?: string, workspaceRoot?: string, sddChange?: SddChangeSelection, researchSelection?: unknown, researchArtifact?: unknown, remediationIntent?: unknown): TaskRequest => {
+	const buildRequest = (ctx: ExtensionContext, agent: AgentDefinition, prompt: string, label: string | undefined, context: string | undefined, mode: AgentMode, resume?: string, workspaceRoot?: string, sddChange?: SddChangeSelection, researchSelection?: unknown, remediationIntent?: unknown): TaskRequest => {
 		const registry = registryFor(ctx);
 		const parentCwd = ctx.sessionManager.getCwd();
 		// An explicit target is validated before any queue or session-dir writes.
@@ -1006,7 +896,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			sessionDir,
 			resumeSessionPath: resume,
 			env: research ? { ...deps.env, [RESEARCH_CHILD_TOOLS_ENV]: JSON.stringify([...research.agent.tools, "subagent_parent_message"]) } : deps.env,
-			...(research ? { researchSelection, extensionPaths: research.extensionPaths, researchArtifact: researchArtifact === undefined ? undefined : parseResearchArtifactIntent(researchArtifact, target ?? parentCwd) } : {}),
+			...(research ? { researchSelection, extensionPaths: research.extensionPaths } : {}),
 			...(launchSddChange === undefined ? {} : { sddChange: launchSddChange }),
 			...(parentRepositoryIdentity === undefined ? {} : {
 				authorizeParentStandingReviewPermission: (repositoryIdentity: string) => {
@@ -1130,7 +1020,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 				label: { type: "string", description: "Three to six words naming the work, shown on the agents card, e.g. 'map footer data sources'." },
 				context: { type: "string", description: "Optional extra context appended to the task." },
 				workspace_root: { type: "string", description: "Optional worktree in the same Git clone. Validated before queueing; the child runs at its canonical root and registers it on actual launch." },
-				research_artifact: RESEARCH_ARTIFACT_SCHEMA, research_selection: RESEARCH_SELECTION_SCHEMA,
+				research_selection: RESEARCH_SELECTION_SCHEMA,
 				remediation: REMEDIATION_SCHEMA, sdd_change: { type: "object", additionalProperties: false, required: ["changeName", "workspaceRoot", "phase"], properties: { changeName: { type: "string" }, workspaceRoot: { type: "string" }, failedEvidenceRevision: { type: "string" }, phase: { type: "string", enum: ["apply", "verify", "archive", "remediate"] } }, description: "Launch-local selected SDD identity, accepted only by matching SDD phase agents." },
 				mode: { type: "string", enum: ["task", "background"], description: "task waits for the result (default); background returns immediately." },
 			},
@@ -1143,7 +1033,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			let sddChange: SddChangeSelection | undefined;
 			try { sddChange = parseSddChange(params.sdd_change, agent.name); }
 			catch (error) { return text(`Error: ${error instanceof Error ? error.message : String(error)}`, { error: "invalid sdd_change" }); }
-			return launch(ctx, buildRequest(ctx, agent, String(params.task ?? ""), typeof params.label === "string" ? params.label : undefined, typeof params.context === "string" ? params.context : undefined, mode, undefined, typeof params.workspace_root === "string" ? params.workspace_root : undefined, sddChange, params.research_selection, params.research_artifact, params.remediation), signal);
+			return launch(ctx, buildRequest(ctx, agent, String(params.task ?? ""), typeof params.label === "string" ? params.label : undefined, typeof params.context === "string" ? params.context : undefined, mode, undefined, typeof params.workspace_root === "string" ? params.workspace_root : undefined, sddChange, params.research_selection, params.remediation), signal);
 		},
 	);
 
@@ -1184,7 +1074,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	tool(
 		"continue",
 		"Resume a finished subagent task in its own session with a follow-up prompt.",
-		{ required: ["task_id", "prompt"], properties: { research_artifact: RESEARCH_ARTIFACT_SCHEMA, research_selection: RESEARCH_SELECTION_SCHEMA, task_id: { type: "string" }, prompt: { type: "string" }, label: { type: "string", description: "Three to six words naming the follow-up." }, remediation: REMEDIATION_SCHEMA, sdd_change: { type: "object", additionalProperties: false, required: ["changeName", "workspaceRoot", "phase"], properties: { changeName: { type: "string" }, workspaceRoot: { type: "string" }, failedEvidenceRevision: { type: "string" }, phase: { type: "string", enum: ["apply", "verify", "archive", "remediate"] } }, description: "Fresh launch-local selected SDD identity, required when continuing an SDD phase agent." }, mode: { type: "string", enum: ["task", "background"] } } },
+		{ required: ["task_id", "prompt"], properties: { research_selection: RESEARCH_SELECTION_SCHEMA, task_id: { type: "string" }, prompt: { type: "string" }, label: { type: "string", description: "Three to six words naming the follow-up." }, remediation: REMEDIATION_SCHEMA, sdd_change: { type: "object", additionalProperties: false, required: ["changeName", "workspaceRoot", "phase"], properties: { changeName: { type: "string" }, workspaceRoot: { type: "string" }, failedEvidenceRevision: { type: "string" }, phase: { type: "string", enum: ["apply", "verify", "archive", "remediate"] } }, description: "Fresh launch-local selected SDD identity, required when continuing an SDD phase agent." }, mode: { type: "string", enum: ["task", "background"] } } },
 		async (params, ctx, signal) => {
 			const previous = await resolveTask(String(params.task_id));
 			if (!previous) return text(`Error: no task ${String(params.task_id)}`, { error: "unknown task" });
@@ -1199,14 +1089,8 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			try { sddChange = parseSddChange(params.sdd_change, agent.name); }
 			catch (error) { return text(`Error: ${error instanceof Error ? error.message : String(error)}`, { error: "invalid sdd_change" }); }
 			if (sddPhaseForAgent(agent.name) && !sddChange) return text("Error: continuing an SDD phase agent requires a fresh sdd_change selection.", { error: "missing sdd_change" });
-			let artifact: ResearchArtifactIntent | undefined;
-			if (agent.name === "sdd-research") {
-				try {
-					const prior = parseResearchArtifactIntent("researchArtifact" in previous ? previous.researchArtifact : undefined, previous.cwd);
-					artifact = parseResearchArtifactIntent(params.research_artifact ?? prior, previous.cwd, prior);
-				} catch (error) { return text(`Error: research continuation scope refused: ${String(error)}`, { error: "research scope" }); }
-			}
-			return launch(ctx, buildRequest(ctx, agent, String(params.prompt ?? ""), typeof params.label === "string" ? params.label : undefined, previous.sddPreflightContext, mode, previous.sessionPath, sddChange?.workspaceRoot ?? previous.cwd, sddChange, params.research_selection, artifact, params.remediation), signal);
+
+			return launch(ctx, buildRequest(ctx, agent, String(params.prompt ?? ""), typeof params.label === "string" ? params.label : undefined, previous.sddPreflightContext, mode, previous.sessionPath, sddChange?.workspaceRoot ?? previous.cwd, sddChange, params.research_selection, params.remediation), signal);
 		},
 	);
 

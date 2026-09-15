@@ -748,20 +748,18 @@ test("research launch transports selected grants and only matching existing exte
 	fake.pi.getActiveTools = () => ["fetch_content", "web_search", "mcp", "bash"];
 	fake.pi.getAllTools = () => fake.pi.getActiveTools().map(name => ({ name, sourceInfo: { source: "extension", path: "/installed/web.ts" } })) as never;
 	const selection = { documentation: { tools: ["fetch_content"], extensions: { fetch_content: "/installed/web.ts" } } };
-	const artifact = { store: "openspec", worktree: cwd, changeName: "demo", retainedIntent: "preserve denied documentation questions", locators: [{ artifact: "research", path: join(cwd, "openspec/changes/demo/research.md"), revision: 1, digest: "a".repeat(64) }] };
 	let childEnv: NodeJS.ProcessEnv = {};
 	gentleAgents(fake.pi, {}, { ...runtime.deps, home: fixtureHome, spawn: (command, args, options) => {
 		childEnv = options.env!;
 		return runtime.deps.spawn!(command, args, options);
 	} });
-	const result = await fake.tools.get("subagent_run")!.execute("research", { agent: "sdd-research", task: "Research docs", context: PARENT_CONFIRMED_SDD_CONTEXT, mode: "background", research_selection: selection, research_artifact: artifact }, undefined, undefined, ctx);
+	const result = await fake.tools.get("subagent_run")!.execute("research", { agent: "sdd-research", task: "Research docs", context: PARENT_CONFIRMED_SDD_CONTEXT, mode: "background", research_selection: selection }, undefined, undefined, ctx);
 	await tick();
 	const argv = runtime.spawned[0];
-	assert.equal(argv[argv.indexOf("--tools") + 1], "read,write,fetch_content,subagent_parent_message");
+	assert.equal(argv[argv.indexOf("--tools") + 1], "fetch_content,subagent_parent_message");
 	assert.equal(argv[argv.indexOf("--extension") + 1], "/installed/web.ts");
 	assert.deepEqual(JSON.parse(childEnv.GENTLE_PI_RESEARCH_SELECTION!), selection);
-	assert.deepEqual(JSON.parse(childEnv.GENTLE_PI_RESEARCH_ARTIFACT!), artifact);
-	assert.ok(fake.tools.get("subagent_continue")!.parameters.properties.research_artifact);
+	assert.equal(fake.tools.get("subagent_continue")!.parameters.properties.research_artifact, undefined);
 	assert.ok(fake.tools.get("subagent_continue")!.parameters.properties.research_selection, "fresh selection must be expressible on continuation");
 	assert.ok(JSON.parse(childEnv.GENTLE_PI_RESEARCH_TOOLS!).includes("subagent_parent_message"));
 	assert.match(argv[argv.indexOf("--append-system-prompt") + 1], /documentation: available/);
@@ -769,33 +767,46 @@ test("research launch transports selected grants and only matching existing exte
 	runtime.children[0].emit({ type: "agent_settled" });
 	await tick();
 	const taskId = (result.details.gentleAgents as { taskId: string }).taskId;
-	const rejected = await fake.tools.get("subagent_continue")!.execute("broaden", { task_id: taskId, prompt: "Inspect", mode: "background", research_artifact: { ...artifact, store: "none", locators: [] } }, undefined, undefined, ctx);
-	assert.match(rejected.content[0].text, /scope/);
-	assert.equal(runtime.spawned.length, 1);
-	await fake.tools.get("subagent_continue")!.execute("resume", { task_id: taskId, prompt: "Inspect", mode: "background", research_artifact: artifact }, undefined, undefined, ctx);
+	await fake.tools.get("subagent_continue")!.execute("resume", { task_id: taskId, prompt: "Inspect", mode: "background" }, undefined, undefined, ctx);
 	await tick();
 	assert.equal(runtime.spawned.length, 2);
 	assert.ok(!runtime.spawned[1].includes("--extension"), "no inherited research selection");
-	assert.equal(runtime.spawned[1][runtime.spawned[1].indexOf("--tools") + 1], "read,write,subagent_parent_message");
+	assert.equal(runtime.spawned[1][runtime.spawned[1].indexOf("--tools") + 1], "subagent_parent_message");
 	assert.equal(JSON.parse(childEnv.GENTLE_PI_RESEARCH_SELECTION!), null);
-	assert.deepEqual(JSON.parse(childEnv.GENTLE_PI_RESEARCH_ARTIFACT!), artifact, "denial intent and exact store/path survive re-entry");
 	fake.pi.getActiveTools = () => ["web_search"];
 	runtime.children[1].emit({ type: "agent_settled" });
 	await tick();
-	const denied = await fake.tools.get("subagent_continue")!.execute("missing-tool", { task_id: taskId, prompt: "Retry same scope", mode: "background", research_selection: selection, research_artifact: artifact }, undefined, undefined, ctx);
+	const denied = await fake.tools.get("subagent_continue")!.execute("missing-tool", { task_id: taskId, prompt: "Retry same scope", mode: "background", research_selection: selection }, undefined, undefined, ctx);
 	await tick();
 	assert.ok(!runtime.spawned[2].includes("--extension"));
 	runtime.children[2].emit({ type: "agent_settled" });
 	await tick();
 	fake.pi.getActiveTools = () => ["fetch_content", "web_search"];
-	await fake.tools.get("subagent_continue")!.execute("corrected", { task_id: (denied.details.gentleAgents as { taskId: string }).taskId, prompt: "Retry same scope", mode: "background", research_selection: selection, research_artifact: artifact }, undefined, undefined, ctx);
+	await fake.tools.get("subagent_continue")!.execute("corrected", { task_id: (denied.details.gentleAgents as { taskId: string }).taskId, prompt: "Retry same scope", mode: "background", research_selection: selection }, undefined, undefined, ctx);
 	await tick();
 	assert.equal(runtime.spawned[3][runtime.spawned[3].indexOf("--extension") + 1], "/installed/web.ts");
-	assert.deepEqual(JSON.parse(childEnv.GENTLE_PI_RESEARCH_ARTIFACT!), artifact);
 	await fake.fire("session_shutdown", ctx);
 });
 
-test("research child inventory requires every canonical open-web tool", () => {
+test("research registered continuation needs no prior artifact identity", async () => {
+	const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+	const home = join(root, "optional-research-home");
+	mkdirSync(join(home, ".pi/agent/agents"), { recursive: true });
+	writeFileSync(join(home, ".pi/agent/agents/sdd-research.md"), "---\nname: sdd-research\ntools: [read]\n---\nExplore a question.");
+	gentleAgents(h.pi, {}, { ...runtime.deps, home });
+	await h.fire("session_start", ctx);
+	const first = await h.tools.get("subagent_run")!.execute("first", { agent: "sdd-research", task: "Inspect a question", context: PARENT_CONFIRMED_SDD_CONTEXT, mode: "background" }, undefined, undefined, ctx);
+	await tick();
+	runtime.children[0].emit({ type: "agent_settled" });
+	await tick();
+	const taskId = (first.details.gentleAgents as { taskId: string }).taskId;
+	const next = await h.tools.get("subagent_continue")!.execute("next", { task_id: taskId, prompt: "Investigate the remaining question", mode: "background" }, undefined, undefined, ctx);
+	await tick();
+	assert.equal(runtime.spawned.length, 2, JSON.stringify(next));
+	await h.fire("session_shutdown", ctx);
+});
+
+test("research child inventory exposes remaining authorized tools", () => {
 	const required = ["web_search", "source_check", "fetch_content", "get_search_content"];
 	for (const missing of [undefined, ...required]) {
 		const hooks = new Map<string, (event: any) => any>();
@@ -803,7 +814,7 @@ test("research child inventory requires every canonical open-web tool", () => {
 		const pi = { on: (name: string, handler: (event: any) => any) => hooks.set(name, handler), getActiveTools: () => active, getAllTools: () => required.map(name => ({ name, sourceInfo: { source: "extension", path: "/installed/web.ts" } })) } as never;
 		gentleAgents(pi, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_RESEARCH_TOOLS: JSON.stringify(required), GENTLE_PI_RESEARCH_SELECTION: JSON.stringify({ documentation: { tools: ["fetch_content"], extensions: { fetch_content: "/installed/web.ts" } }, "open-web": { tools: required, extensions: Object.fromEntries(required.map(name => [name, "/installed/web.ts"])) } }) });
 		const prompt = hooks.get("before_agent_start")!({ systemPrompt: "research" }).systemPrompt;
-		assert.match(prompt, new RegExp(`open-web: ${missing === undefined ? "available" : "blocked"}`));
+		assert.match(prompt, /open-web: available/);
 		assert.match(prompt, new RegExp(`documentation: ${missing === "fetch_content" ? "blocked" : "available"}`));
 		assert.match(prompt, /Availability is not evidence/);
 	}
@@ -816,7 +827,7 @@ test("research child rechecks local inventory and blocks gateway calls", async (
 	assert.match(hooks.get("before_agent_start")!({ systemPrompt: "research" }).systemPrompt, /documentation: blocked/);
 	assert.equal(hooks.get("tool_call")!({ toolName: "mcp" }).block, true);
 	assert.equal(hooks.get("tool_call")!({ toolName: "fetch_content" }).block, true);
-	assert.equal(hooks.get("tool_call")!({ toolName: "read" }).block, true, "missing artifact scope cannot authorize a read");
+	assert.equal(hooks.get("tool_call")!({ toolName: "read" }).block, true, "missing path context cannot authorize a read");
 });
 
 async function shutdownAndRestoreNativeSpawn(
@@ -1967,7 +1978,7 @@ test("aborting the caller's signal cancels the subagent, records it, and says wh
 	assert.equal(harness.children[0].killed.length > 0, true, "the runner terminated the child");
 });
 
-test("selected child routes recheck provenance and keep separately authorized local tools", () => {
+test("selected child routes recheck provenance and deny research local tools", () => {
  const names = ["fetch_content", "web_search", "read", "write", "mem_save", "subagent_parent_message"];
  const selection = { documentation: { tools: ["fetch_content"], extensions: { fetch_content: "/installed/web.ts" } } };
  const path = join(root, "openspec/changes/demo/research.md");
@@ -1982,137 +1993,9 @@ test("selected child routes recheck provenance and keep separately authorized lo
   const call = hooks.get("tool_call")!;
   assert.equal(call({ toolName: "fetch_content" })?.block, mismatch === "none" ? undefined : true, mismatch);
   assert.equal(call({ toolName: "web_search" })?.block, true, "available but unselected");
-  for (const toolName of names.slice(2)) assert.equal(call({ toolName, input: toolName === "mem_save" ? { project: "pi", topic_key: "sdd/demo/research", content: '{"revision":2}' } : { path, content: '{"revision":2}' } }, { cwd: root })?.block, ["write", "mem_save"].includes(toolName) ? true : undefined, toolName);
+  for (const toolName of names.slice(2)) assert.equal(call({ toolName, input: toolName === "mem_save" ? { project: "pi", topic_key: "sdd/demo/research", content: '{"revision":2}' } : { path, content: '{"revision":2}' } }, { cwd: root })?.block, toolName === "subagent_parent_message" ? undefined : true, toolName);
  }
 });
-
-test("research child narrows artifact arguments and observes actual dual-store readbacks", async () => {
- const { createHash } = await import("node:crypto");
- const cwd = join(root, "bounded-child");
- mkdirSync(cwd, { recursive: true });
- const bytes = '{"revision":1,"outcome":"blocked"}';
- const locator = { artifact: "research", path: join(cwd, "openspec/changes/demo/research.md"), revision: 1, digest: createHash("sha256").update(bytes).digest("hex"), engram: { id: 12, project: "pi", topic_key: "sdd/demo/research", revision_count: 1 } };
- const scope = { store: "both", worktree: cwd, changeName: "demo", retainedIntent: "fetch missing; preserve questions", locators: [locator] };
- const hooks = new Map<string, (...args: unknown[]) => unknown>();
- let active = ["read", "write", "mem_get_observation", "mem_save", "subagent_parent_message"];
- const journal = join(cwd, "session.jsonl"); writeFileSync(journal, "");
- const pi = { appendEntry: (customType, data) => appendFileSync(journal, JSON.stringify({ type: "custom", customType, data }) + "\n"), on: (name: string, fn: (...args: unknown[]) => unknown) => hooks.set(name, fn), getActiveTools: () => active, getAllTools: () => active.map(name => ({ name })) };
- gentleAgents(pi as never, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_RESEARCH_TOOLS: JSON.stringify(active), GENTLE_PI_RESEARCH_ARTIFACT: JSON.stringify(scope) });
- const ctx = { cwd, sessionManager: { getEntries: () => [], getSessionFile: () => journal } };
- const prompt = hooks.get("before_agent_start")!({ systemPrompt: "research" }, ctx) as { systemPrompt: string };
- assert.match(prompt.systemPrompt, /retainedIntent/);
- assert.match(prompt.systemPrompt, /never authority/);
- const call = (toolName: string, input: object, toolCallId = "c") => hooks.get("tool_call")!({ toolName, input, toolCallId }, ctx) as { block: boolean } | undefined;
- const result = (toolName: string, input: object, content: string, isError = false) => hooks.get("tool_result")!({ toolName, input, toolCallId: "c", content: [{ type: "text", text: content }], isError }, ctx) as { content: { text: string }[]; isError?: boolean };
- assert.equal(call("write", { path: locator.path, content: '{"revision":2,"outcome":"blocked"}' })?.block, true, "initial readback must precede mutation");
- assert.equal(call("write", { path: join(cwd, "outside.md") })?.block, true);
- assert.equal(call("mem_get_observation", { id: 13 })?.block, true);
- assert.equal(call("mem_save", { project: "pi", topic_key: "sdd/other/research" })?.block, true);
- assert.equal(call("read", { path: locator.path }), undefined);
- assert.match(result("read", { path: locator.path }, bytes).content.at(-1)!.text, /incomplete/);
- assert.equal(call("mem_get_observation", { id: 12 }), undefined);
- const observed = { ...locator.engram, content: bytes };
- assert.match(result("mem_get_observation", { id: 12 }, JSON.stringify(observed)).content.at(-1)!.text, /all selected stores/);
- hooks.get("before_agent_start")!({ systemPrompt: "fresh generation" }, ctx);
- assert.equal(call("write", { path: locator.path, content: '{"revision":5}' })?.block, true, "new generation cannot reuse initial authorization");
- call("read", { path: locator.path }); result("read", { path: locator.path }, bytes);
- call("mem_get_observation", { id: 12 }); result("mem_get_observation", { id: 12 }, JSON.stringify(observed));
- const next = '{"revision":5,"outcome":"partial"}';
- assert.equal(call("write", { path: locator.path, content: next }), undefined);
- call("read", { path: locator.path }, "pending-read");
- const pendingRead = hooks.get("tool_result")!({ toolName: "read", input: { path: locator.path }, toolCallId: "pending-read", content: [{ type: "text", text: bytes }], isError: false }, ctx) as { content: { text: string }[] };
- assert.match(pendingRead.content.at(-1)!.text, /incomplete/, "old bytes cannot complete a pending mutation");
- result("write", { path: locator.path, content: next }, "written");
- call("read", { path: locator.path });
- assert.match(result("read", { path: locator.path }, next).content.at(-1)!.text, /incomplete/);
- assert.equal(call("mem_save", { project: "pi", topic_key: locator.engram.topic_key, content: next }), undefined);
- result("mem_save", { project: "pi", topic_key: locator.engram.topic_key, content: next }, "saved");
- call("read", { path: locator.path });
- result("read", { path: locator.path }, next);
- call("mem_get_observation", { id: 12 });
- assert.match(result("mem_get_observation", { id: 12 }, JSON.stringify({ ...observed, content: next, revision_count: 2 })).content.at(-1)!.text, /all selected stores/);
- assert.equal(call("write", { path: locator.path, content: '{"revision":2}' })?.block, true, "revision 1 to 5 to 2 is refused");
- const newer = '{"revision":6}';
- assert.equal(call("mem_save", { project: "pi", topic_key: locator.engram.topic_key, content: newer }), undefined);
- result("mem_save", { project: "pi", topic_key: locator.engram.topic_key, content: newer }, "saved");
- call("mem_get_observation", { id: 12 });
- assert.equal(result("mem_get_observation", { id: 12 }, JSON.stringify({ ...observed, content: newer, revision_count: 2 })).isError, true, "each save must advance the accepted Engram revision count");
- call("write", { path: locator.path, content: '{"revision":3,"outcome":"partial"}' });
- result("write", { path: locator.path }, "permission denied", true);
- call("mem_get_observation", { id: 12 });
- assert.match(result("mem_get_observation", { id: 12 }, JSON.stringify({ ...observed, content: next, revision_count: 2 })).content.at(-1)!.text, /proposal_ready=false/, "write attempt invalidates prior readback even when denied");
- call("mem_get_observation", { id: 12 });
- assert.equal(result("mem_get_observation", { id: 12 }, JSON.stringify({ ...observed, project: "wrong" })).isError, true);
- assert.equal(call("write", { path: locator.path, content: '{"revision":4}' })?.block, true, "stale/divergent readback must refuse recovery writes");
- assert.equal(call("mem_save", { project: "pi", topic_key: locator.engram.topic_key, content: '{"revision":4}' })?.block, true);
- active = active.filter(name => name !== "write");
- assert.equal(call("write", { path: locator.path })?.block, true);
- assert.equal((hooks.get("tool_call")!({ toolName: "read", input: { path: locator.path } }, { cwd: root }) as { block: boolean }).block, true);
- active.push("write");
- gentleAgents(pi as never, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_RESEARCH_TOOLS: JSON.stringify(active), GENTLE_PI_RESEARCH_ARTIFACT: JSON.stringify(scope) });
- call("read", { path: locator.path });
- result("read", { path: locator.path }, bytes);
- call("mem_get_observation", { id: 12 });
- result("mem_get_observation", { id: 12 }, JSON.stringify(observed));
- call("write", { path: locator.path, content: next });
- result("write", { path: locator.path, content: next }, "written");
- const divergent = '{"revision":2,"outcome":"done"}';
- call("mem_save", { project: "pi", topic_key: locator.engram.topic_key, content: divergent });
- result("mem_save", { project: "pi", topic_key: locator.engram.topic_key, content: divergent }, "saved");
- call("read", { path: locator.path });
- result("read", { path: locator.path }, next);
- call("mem_get_observation", { id: 12 });
- assert.equal(result("mem_get_observation", { id: 12 }, JSON.stringify({ ...observed, content: divergent, revision_count: 2 })).isError, true, "individually matching but divergent hybrid writes never converge");
- for (const completion of [[], [{ type: "text", text: "" }], [{ type: "text", text: "denied" }]]) {
-  gentleAgents(pi as never, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_RESEARCH_TOOLS: JSON.stringify(active), GENTLE_PI_RESEARCH_ARTIFACT: JSON.stringify({ ...scope, store: "openspec", locators: [{ ...locator, engram: undefined }] }) });
-  call("read", { path: locator.path }); result("read", { path: locator.path }, bytes);
-  assert.equal(call("write", { path: locator.path, content: next }), undefined);
-  assert.equal(call("write", { path: locator.path, content: next }, "overlap")?.block, true);
-  hooks.get("tool_result")!({ toolName: "write", input: { path: locator.path, content: next }, toolCallId: "c", content: completion, isError: completion.length > 0 && completion[0].text === "denied" }, ctx);
-  call("read", { path: locator.path });
-  assert.match(result("read", { path: locator.path }, next).content.at(-1)!.text, /proposal_ready=false/, "failed or malformed write cannot establish completion");
-  assert.equal(call("write", { path: locator.path, content: '{"revision":6}' })?.block, true);
- }
- for (const tool of ["write", "mem_save"]) {
-  const memory = tool === "mem_save", readTool = memory ? "mem_get_observation" : "read";
-  const input = memory ? { id: 12 } : { path: locator.path };
-  const mutation = memory ? { project: "pi", topic_key: locator.engram.topic_key, content: next } : { path: locator.path, content: next };
-  gentleAgents(pi as never, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_RESEARCH_TOOLS: JSON.stringify(active), GENTLE_PI_RESEARCH_ARTIFACT: JSON.stringify({ ...scope, store: memory ? "engram" : "openspec", locators: [{ ...locator, path: memory ? undefined : locator.path, engram: memory ? locator.engram : undefined }] }) });
-  call(readTool, input); result(readTool, input, memory ? JSON.stringify(observed) : bytes);
-  assert.equal(call(tool, mutation), undefined);
-  assert.doesNotThrow(() => hooks.get("tool_result")!({ toolName: tool, input: mutation, toolCallId: "c", content: [null], isError: false }, ctx));
-  call(readTool, input);
-  assert.match(result(readTool, input, memory ? JSON.stringify({ ...observed, content: next, revision_count: 2 }) : next).content.at(-1)!.text, /proposal_ready=false/);
-  assert.equal(call(tool, { ...mutation, content: '{"revision":6}' })?.block, true);
- }
- for (const store of ["openspec", "engram", "both"]) {
-  for (const bad of ["missing", "malformed", "revision", "digest", "project", "topic", "id", "worktree"]) {
-   gentleAgents(pi as never, { GENTLE_PI_AGENTS_CHILD: "1", GENTLE_PI_RESEARCH_TOOLS: JSON.stringify(active), GENTLE_PI_RESEARCH_ARTIFACT: JSON.stringify({ ...scope, store, locators: [{ ...locator, path: store === "engram" ? undefined : locator.path, engram: store === "openspec" ? undefined : locator.engram }] }) });
-   const memory = store !== "openspec";
-   const tool = memory ? "mem_get_observation" : "read";
-   const input = memory ? { id: 12 } : { path: locator.path };
-   if (store === "both") {
-    call("read", { path: locator.path });
-    result("read", { path: locator.path }, bytes);
-    assert.equal(call("write", { path: locator.path, content: next })?.block, true, "both initial stores must match before either mutation");
-   }
-   if (bad !== "missing") {
-    const content = bad === "revision" ? '{"revision":0}' : bad === "digest" ? '{"revision":1,"different":true}' : bytes;
-    const value = { ...observed, content, ...(bad === "project" ? { project: "wrong" } : bad === "topic" ? { topic_key: "wrong" } : bad === "id" ? { id: 13 } : {}) };
-    if (bad === "worktree") {
-     assert.equal((hooks.get("tool_call")!({ toolName: tool, input, toolCallId: "c" }, { cwd: root }) as { block: boolean }).block, true);
-    } else if (memory || !["project", "topic", "id"].includes(bad)) {
-     call(tool, input);
-     assert.equal(result(tool, input, bad === "malformed" ? "{" : memory ? JSON.stringify(value) : content).isError, true);
-    }
-   }
-   if (store !== "engram") assert.equal(call("write", { path: locator.path, content: next })?.block, true, `${store}/${bad}: zero writes`);
-   if (memory) assert.equal(call("mem_save", { project: "pi", topic_key: locator.engram.topic_key, content: next })?.block, true, `${store}/${bad}: zero saves`);
-  }
- }
-
-});
-
 
 for (const condition of ["granted", "declined", "native-denied", "asset-drift"] as const) test(`managed dispatch needs real consent but no attempt command (${condition})`, async () => {
 	const consent = condition === "granted";

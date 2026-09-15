@@ -67,7 +67,7 @@ const requiredToolsByAgent: Record<string, string[]> = {
 	"sdd-init.md": ["read", "grep", "find", "edit", "write", "bash", "mem_search", "mem_get_observation", "mem_save", "mem_update"],
 	"sdd-onboard.md": ["read", "grep", "find", "edit", "write", "bash", "mem_search", "mem_get_observation", "mem_save", "mem_update"],
 	"sdd-proposal.md": ["read", "grep", "find", "edit", "write", "mem_search", "mem_get_observation", "mem_save"],
-	"sdd-research.md": ["read", "grep", "find", "edit", "write", "mem_search", "mem_get_observation", "mem_save", "fetch_content", "web_search", "source_check", "get_search_content"],
+	"sdd-research.md": [ "fetch_content", "web_search", "source_check", "get_search_content"],
 	"sdd-spec.md": ["read", "grep", "find", "edit", "write", "mem_search", "mem_get_observation", "mem_save"],
 	"sdd-status.md": ["read", "grep", "find", "bash", "mem_search", "mem_get_observation"],
 	"sdd-tasks.md": ["read", "grep", "find", "edit", "write", "mem_search", "mem_get_observation", "mem_save"],
@@ -90,13 +90,14 @@ test("SDD package agents declare role-appropriate tools as YAML arrays", () => {
 
 test("artifact-producing SDD agents can persist OpenSpec files while status remains read-only", () => {
 	for (const fileName of Object.keys(requiredToolsByAgent).filter(
-		(fileName) => fileName !== "sdd-status.md",
+		(fileName) => !["sdd-status.md", "sdd-research.md"].includes(fileName),
 	)) {
 		const tools = readTools(join(assetsAgentsDir, fileName));
 		assert.ok(tools.includes("edit"), `${fileName} must include edit`);
 		assert.ok(tools.includes("write"), `${fileName} must include write`);
 	}
 
+	assert.deepEqual(readTools(join(assetsAgentsDir, "sdd-research.md")), requiredToolsByAgent["sdd-research.md"]);
 	const statusTools = readTools(join(assetsAgentsDir, "sdd-status.md"));
 	assert.ok(!statusTools.includes("edit"), "sdd-status.md must remain read-only");
 	assert.ok(!statusTools.includes("write"), "sdd-status.md must remain read-only");
@@ -107,7 +108,7 @@ test("research instructions require executed evidence rather than blanket denial
 	assert.doesNotMatch(source, /documentation=\[\]; open-web=\[\]/);
 	assert.match(source, /Actually call approved tools/);
 	assert.match(source, /claim maps to source IDs/);
-	assert.match(source, /proposal_ready: false/);
+	assert.match(source, /partial or unavailable research is not a failed proposal gate/);
 	assert.ok(!readTools(join(assetsAgentsDir, "sdd-research.md")).includes("bash"));
 });
 

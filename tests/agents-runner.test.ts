@@ -1062,17 +1062,12 @@ test("research narrowing transport keeps exact argv paths and replaces inherited
  const h = harness();
  const selection = { documentation: { tools: ["fetch_content"], extensions: { fetch_content: "/installed/docs tools.ts" } } };
  for (const researchSelection of [selection, undefined]) {
-  const artifact = { store: "none" as const, worktree: "/work", changeName: "demo", retainedIntent: "denied questions", locators: [] };
-  const expected = structuredClone(artifact);
-  const launch = request({ researchSelection, researchArtifact: artifact, extensionPaths: researchSelection ? ["/installed/docs tools.ts"] : [],
-   env: { PATH: "/bin", GENTLE_PI_RESEARCH_SELECTION: "stale broad selection", GENTLE_PI_RESEARCH_ARTIFACT: "stale broader scope" } });
+  const launch = request({ researchSelection, extensionPaths: researchSelection ? ["/installed/docs tools.ts"] : [],
+   env: { PATH: "/bin", GENTLE_PI_RESEARCH_SELECTION: "stale broad selection" } });
   const argv = childArguments(launch);
   assert.deepEqual(argv.filter((_, i) => argv[i - 1] === "--extension"), launch.extensionPaths);
   const task = h.runner.run(launch);
-  artifact.worktree = "/wrong";
   await tick();
-  assert.deepEqual(JSON.parse(h.spawnOptions.at(-1)!.env.GENTLE_PI_RESEARCH_ARTIFACT!), expected);
-  assert.deepEqual("researchArtifact" in task ? task.researchArtifact : undefined, expected);
   assert.deepEqual(JSON.parse(h.spawnOptions.at(-1)!.env.GENTLE_PI_RESEARCH_SELECTION!), researchSelection ?? null);
   assert.equal(h.spawnOptions.at(-1)!.env.PATH, "/bin");
   h.runner.cancel(task.id);
