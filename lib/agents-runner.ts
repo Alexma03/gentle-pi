@@ -1,12 +1,11 @@
-import { createHash } from "node:crypto";
 import { isSessionChangeEvidence, type SessionChangeEvidence } from "./session-changes.ts";
 import type { Duplex, Readable, Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
-import { RESEARCH_SELECTION_ENV, RESEARCH_ARTIFACT_ENV, type ResearchArtifactIntent } from "./sdd-research-capabilities.ts";
+import { RESEARCH_SELECTION_ENV } from "./sdd-research-capabilities.ts";
 import { AGENT_MODE, formatModelRef, type AgentDefinition, type AgentMode, type ModelRef } from "./agents-config.ts";
 import { CHILD_QUERY_MAX_INFLIGHT, CHILD_QUERY_TIMEOUT_MS, parseChildFrame, validChildMessage, validChildQueryId } from "./agents-messaging.ts";
 import { ParentStandingReviewPermissionBroker } from "./review-session-standing-permission-ipc.ts";
-import { isFinished, normalizeRpcEvent, TASK_EVENT, TASK_STATUS, taskLabel, type AskRequest, type ChildResponseObservation, type TaskRecord, type RemediationTaskState, type TaskStore } from "./agents-protocol.ts";
+import { isFinished, normalizeRpcEvent, TASK_EVENT, TASK_STATUS, taskLabel, type AskRequest, type ChildResponseObservation, type TaskRecord, type TaskStore } from "./agents-protocol.ts";
 
 // Gentle Agents runner. Every subagent is its own `pi --mode rpc` process:
 // the host never runs subagent work on the TUI thread. It writes JSON
@@ -117,21 +116,6 @@ export interface RemediationPlan {
 	runtimeHarness: RemediationHarnessPlan;
 	rollback: RemediationRollbackPlan;
 }
-export interface RemediationObservation {
-	slot: number;
-	toolCallId: string;
-	command: string;
-	cwd: string;
-	exitCode: number | null;
-	result: string;
-}
-export interface RemediationObservations {
-	failedEvidenceRevision: string;
-	plan: RemediationPlan;
-	observations: RemediationObservation[];
-	pending: Record<string, number>;
-	invalid: boolean;
-}
 const concrete = (value: unknown): value is string => typeof value === "string" && value.trim() === value && value.length > 3 && value.length <= 4096 && !/[\0\r\n]/.test(value);
 export function parseRemediationPlan(value: unknown, cwd: string): RemediationPlan {
 	const plan = value as RemediationPlan;
@@ -141,65 +125,28 @@ export function parseRemediationPlan(value: unknown, cwd: string): RemediationPl
 	return structuredClone(plan);
 }
 export const plannedCommands = (plan: RemediationPlan) => [...plan.commands, ...(plan.runtimeHarness.command ? [plan.runtimeHarness.command] : []), plan.rollback.command];
-const evidenceDigest = (value: string) => `sha256:${createHash("sha256").update(value).digest("hex")}`;
-
-// Only paired stock-shell observations may fill this remediation-only plan.
-export function observeRemediationTool(state: RemediationObservations, raw: Record<string, unknown>): void {
-	if (raw.toolName !== "bash" || typeof raw.toolCallId !== "string") return;
-	const id = raw.toolCallId;
-	if (raw.type === "tool_execution_start") {
-		const command = (raw.args as { command?: unknown } | undefined)?.command;
-		if (typeof command !== "string" || !plannedCommands(state.plan).includes(command)) return;
-		if (Object.hasOwn(state.pending, id) || state.observations.some(item => item.toolCallId === id) || Object.keys(state.pending).length >= 32) { state.invalid = true; return; }
-		const slot = plannedCommands(state.plan).findIndex((item, index) => item === command && !state.observations.some(observation => observation.slot === index) && !Object.values(state.pending).includes(index));
-		if (slot < 0) { state.invalid = true; return; }
-		state.pending[id] = slot;
-	}
-	if (raw.type !== "tool_execution_end" || !Object.hasOwn(state.pending, id)) return;
-	const slot = state.pending[id];
-	const command = plannedCommands(state.plan)[slot];
-	delete state.pending[id];
-	const result = raw.result as { content?: unknown; details?: { truncation?: unknown; fullOutputPath?: unknown; remediationCommand?: RemediationObservation & { truncated?: boolean } } } | undefined;
-	const observed = result?.details?.remediationCommand;
-	const output = JSON.stringify(result?.content ?? null);
-	if (!observed || observed.toolCallId !== id || observed.command !== command || observed.cwd !== state.plan.cwd ||
-		!(observed.exitCode === null || Number.isInteger(observed.exitCode)) || state.observations.length >= 32) { state.invalid = true; return; }
-	const contentValid = Array.isArray(result?.content) && result.content.length > 0 && result.content.every(part =>
-		part && typeof part === "object" && (part as { type?: unknown }).type === "text" && typeof (part as { text?: unknown }).text === "string");
-	if (raw.isError !== false || observed.exitCode !== 0 || observed.truncated || result?.details?.truncation || result?.details?.fullOutputPath || output.length > 16_000 || !contentValid) state.invalid = true;
-	state.observations.push({ slot, toolCallId: id, command, cwd: observed.cwd, exitCode: observed.exitCode, result: `Observed command output ${evidenceDigest(output)}: ${output.slice(0, 400)}` });
-}
-export function remediationEvidence(state: RemediationObservations) {
-	const find = (slot: number) => state.observations.find(item => item.slot === slot && item.command === plannedCommands(state.plan)[slot] && item.cwd === state.plan.cwd && item.exitCode === 0);
-	if (state.invalid || Object.keys(state.pending).length || !/^sha256:[0-9a-f]{64}$/.test(state.failedEvidenceRevision) || !plannedCommands(state.plan).every((_, slot) => find(slot))) return undefined;
-	const result = (slot: number) => `cwd ${state.plan.cwd}; retained command observation ${evidenceDigest(JSON.stringify(find(slot)))}`;
-	return {
-		schema: "gentle-ai.remediation-evidence/v1",
-		failed_evidence_revision: state.failedEvidenceRevision,
-		commands: state.plan.commands.map((command, slot) => ({ command, exit_code: 0, result: result(slot) })),
-		runtime_harness: state.plan.runtimeHarness.command ? { status: "passed", command: state.plan.runtimeHarness.command, result: result(state.plan.commands.length) } : { status: "not_applicable", na_reason: state.plan.runtimeHarness.naReason },
-		rollback: { boundary: state.plan.rollback.boundary, evidence: result(plannedCommands(state.plan).length - 1) },
-	};
+// Launch-local scope only; task history is not an attempt authority.
+export interface RemediationContext {
+	failedEvidenceRevision: string;
+	plan: RemediationPlan;
+	scope: RemediationScope;
 }
 
 export interface SddChangeSelection {
 	changeName: string;
 	workspaceRoot: string;
-	phase: "apply" | "verify" | "sync" | "archive" | "remediate";
+	phase: "apply" | "verify" | "archive" | "remediate";
 	failedEvidenceRevision?: string;
 }
 
 export const SDD_CHANGE_FLAG = "--gentle-sdd-change";
 
-export interface RemediationTerminalFacts { spawned: boolean; exited: boolean; cleanupConfirmed: boolean }
-
 export const REMEDIATION_PLAN_ENV = "GENTLE_PI_SDD_REMEDIATION_PLAN";
 
 export interface TaskRequest {
 	remediationIntent?: unknown;
-	sddRemediation?: RemediationTaskState;
+	sddRemediation?: RemediationContext;
 	sddPreflightContext?: string;
-	finalizeRemediation?: (task: TaskRecord, facts: RemediationTerminalFacts) => Promise<void>;
 	agent: AgentDefinition;
 	prompt: string;
 	label: string | undefined;
@@ -216,7 +163,6 @@ export interface TaskRequest {
 	sddChange?: SddChangeSelection;
 	// Untrusted narrowing intent; paths come only from matching host provenance.
 	researchSelection?: unknown;
-	researchArtifact?: ResearchArtifactIntent;
 	extensionPaths?: string[];
 	// Captures the originating session; invoked only after successful OS spawn.
 	onLaunch?: () => void;
@@ -334,7 +280,7 @@ export function childArguments(request: TaskRequest): string[] {
 	if (request.resumeSessionPath) args.push("--session", request.resumeSessionPath);
 	if (request.model) args.push("--model", request.thinking ? `${formatModelRef(request.model)}:${request.thinking}` : formatModelRef(request.model));
 	else if (request.thinking) args.push("--thinking", request.thinking);
-	const tools = request.agent.tools.length > 0 ? [...new Set([...request.agent.tools, PARENT_NOTIFICATION_TOOL])] : DEFAULT_TOOLS;
+	const tools = request.agent.tools.length > 0 || request.agent.name === "sdd-research" ? [...new Set([...request.agent.tools, PARENT_NOTIFICATION_TOOL])] : DEFAULT_TOOLS;
 	if (tools.length > 0) args.push("--tools", tools.join(","));
 	if (request.agent.instructions.length > 0) args.push("--append-system-prompt", request.agent.instructions);
 	return args;
@@ -381,7 +327,7 @@ export class JsonLines {
 
 export function promptText(request: TaskRequest): string {
 	const prompt = request.context ? `${request.prompt}\n\n## Context\n${request.context}` : request.prompt;
-	return request.sddRemediation ? `${prompt}\n\n## Host-owned remediation evidence plan\nExecute these exact commands in the selected cwd; do not perform native acquire or settle.\n${JSON.stringify(request.sddRemediation.plan)}\nFailed evidence: ${request.sddRemediation.failedEvidenceRevision}` : prompt;
+	return request.sddRemediation ? `${prompt}\n\n## Human-authorized remediation plan\nExecute only these exact commands in the selected cwd; report actual results without claiming native verification.\n${JSON.stringify(request.sddRemediation.plan)}\nFailed evidence: ${request.sddRemediation.failedEvidenceRevision}` : prompt;
 }
 
 export class AgentRunner {
@@ -392,8 +338,6 @@ export class AgentRunner {
 	private readonly processControl: ProcessControl;
 	private readonly queue: Array<{ task: TaskRecord; request: TaskRequest }> = [];
 	private readonly live = new Map<string, LiveTask>();
-	private readonly remediationFinalizers = new Map<string, NonNullable<TaskRequest["finalizeRemediation"]>>();
-	private readonly finalizingRemediation = new Set<string>();
 	private readonly waiters = new Map<string, Array<(task: TaskRecord) => void>>();
 	private readonly queryWaiters = new Map<string, Array<(query: TaskQuery | undefined) => void>>();
 	private readonly firstQueries = new Map<string, TaskQuery>();
@@ -407,22 +351,15 @@ export class AgentRunner {
 		this.processControl = deps.process ?? hostProcess;
 	}
 
-	prepareRemediation(request: TaskRequest): TaskRecord {
-		if (request.agent.name !== "sdd-remediate" || this.store.list().some(task => task.agent === "sdd-remediate" && task.cwd === request.cwd && !isFinished(task.status))) throw new Error("Remediation already preparing/running; reconcile its retained task before another actor");
-		return this.createTask(request);
-	}
-
 	private createTask(request: TaskRequest): TaskRecord {
 		const now = this.deps.now();
 		this.counter += 1;
 		const task: TaskRecord = {
 			id: `${now.toString(36)}-${this.counter.toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
 			agent: request.agent.name,
-			...(request.sddRemediation ? { sddRemediation: structuredClone(request.sddRemediation) } : {}),
 			...(request.sddPreflightContext ? { sddPreflightContext: request.sddPreflightContext } : {}),
 			mode: request.mode,
 			prompt: request.prompt,
-			...(request.researchArtifact ? { researchArtifact: structuredClone(request.researchArtifact) } : {}),
 			label: taskLabel(request.prompt, request.label),
 			cwd: request.cwd,
 			parentSessionId: request.parentSessionId,
@@ -446,17 +383,22 @@ export class AgentRunner {
 		return task;
 	}
 
-	run(request: TaskRequest, preparedRemediation?: TaskRecord): TaskRecord {
-		if (preparedRemediation && (this.store.get(preparedRemediation.id) !== preparedRemediation || preparedRemediation.cwd !== request.cwd || preparedRemediation.agent !== "sdd-remediate" || preparedRemediation.status !== TASK_STATUS.QUEUED || this.queue.some(entry => entry.task.id === preparedRemediation.id))) throw new Error("Invalid or already dispatched remediation task");
-		const task = preparedRemediation ?? this.createTask(request);
-		if (request.sddRemediation) task.sddRemediation = structuredClone(request.sddRemediation);
-		if (request.finalizeRemediation) this.remediationFinalizers.set(task.id, request.finalizeRemediation);
+	run(request: TaskRequest): TaskRecord {
+		// Admission already confirmed the canonical cwd and human edit scope.
+		// Check this runner's queue/live slots before scheduling any launch: history
+		// is not a lock, and quarantined children still own their live slot.
+		if (request.sddRemediation) {
+			const active = [...this.queue.map(entry => entry.task), ...[...this.live.keys()].map(id => this.store.get(id))];
+			if (active.some(task => task?.agent === "sdd-remediate" && task.cwd === request.cwd)) {
+				throw new Error("Remediation already queued or running in this worktree; wait for confirmed cleanup or cancel the active task before requesting fresh authorization");
+			}
+		}
+		const task = this.createTask(request);
 		// A caller can retain and mutate its request after dispatch. Preserve only
 		// the identity selected at construction for this child launch.
 		const launchRequest = {
 			...request,
 			sddChange: request.sddChange && { ...request.sddChange },
-			researchArtifact: request.researchArtifact && structuredClone(request.researchArtifact),
 		};
 		this.queue.push({ task, request: launchRequest });
 		queueMicrotask(() => this.pump());
@@ -548,7 +490,7 @@ export class AgentRunner {
 		const hasParentPermissionChannel = request.authorizeParentStandingReviewPermission !== undefined;
 		const env = {
 			...request.env,
-			...(request.extensionPaths ? { [RESEARCH_SELECTION_ENV]: JSON.stringify(request.researchSelection ?? null), [RESEARCH_ARTIFACT_ENV]: JSON.stringify(request.researchArtifact ?? null) } : {}),
+			...(request.extensionPaths ? { [RESEARCH_SELECTION_ENV]: JSON.stringify(request.researchSelection ?? null) } : {}),
 			[CHILD_MARKER]: "1",
 			[IPC_MARKER]: `${this.deps.now()}-${Math.random().toString(36).slice(2)}`,
 			...(hasParentPermissionChannel ? { GENTLE_PI_AGENTS_PARENT_PERMISSION_FD: "3" } : {}),
@@ -802,8 +744,6 @@ export class AgentRunner {
 		const live = this.live.get(id);
 		if (!live || live.terminal || !value || typeof value !== "object") return;
 		const raw = value as Record<string, unknown>;
-		const remediation = this.store.get(id)?.sddRemediation;
-		if (remediation) observeRemediationTool(remediation, raw);
 		if (raw.type === "response") {
 			this.armStall(id, live);
 			if (!live.observationPreparation) this.checkObservationGrant(live);
@@ -1012,24 +952,7 @@ export class AgentRunner {
 
 	private finish(id: string, status: TaskRecord["status"], error: string | null, live?: LiveTask): void {
 		const current = this.store.get(id);
-		if (!current || isFinished(current.status) || this.finalizingRemediation.has(id)) return;
-		const finalize = this.remediationFinalizers.get(id);
-		if (finalize) {
-			this.finalizingRemediation.add(id);
-			const terminal = { ...current, status, error };
-			void finalize(terminal, { spawned: typeof live?.child.pid === "number", exited: live?.childExit !== undefined, cleanupConfirmed: !live || !live.quarantined && live.childExit !== undefined }).then(() => {
-				status = terminal.status;
-				error = terminal.error;
-			}).catch(() => {
-				status = TASK_STATUS.FAILED;
-				error = "Native remediation settlement could not be durably finalized; retain task history and reconcile before further execution";
-			}).finally(() => {
-				this.remediationFinalizers.delete(id);
-				this.finalizingRemediation.delete(id);
-				this.finish(id, status, error, live);
-			});
-			return;
-		}
+		if (!current || isFinished(current.status)) return;
 		const finished = this.store.update(id, { status, endedAt: this.deps.now(), error, lastStep: error ?? "done" });
 		if (finished) {
 			if (live) this.checkObservationGrant(live);

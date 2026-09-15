@@ -65,7 +65,7 @@ Per-action table, Work Routing Ladder examples, Cost and Context Balance, Canoni
 
 ## SDD Workflow (lazy-loaded)
 
-The detailed SDD workflow is intentionally not embedded in this always-on parent prompt. Before handling any `/sdd-*` command, natural-language SDD request, SDD continuation/routing, apply/verify/sync/archive work, or SDD/Judgment-Day phase delegation, read this package asset first:
+The detailed SDD workflow is intentionally not embedded in this always-on parent prompt. Before handling any `/sdd-*` command, natural-language SDD request, SDD continuation/routing, apply/verify/archive work, or SDD/Judgment-Day phase delegation, read this package asset first:
 
 `sdd-orchestrator-workflow.md`
 
