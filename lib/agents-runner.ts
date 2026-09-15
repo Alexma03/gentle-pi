@@ -379,6 +379,15 @@ export class AgentRunner {
 	}
 
 	run(request: TaskRequest): TaskRecord {
+		// Admission already confirmed the canonical cwd and human edit scope.
+		// Check this runner's queue/live slots before scheduling any launch: history
+		// is not a lock, and quarantined children still own their live slot.
+		if (request.sddRemediation) {
+			const active = [...this.queue.map(entry => entry.task), ...[...this.live.keys()].map(id => this.store.get(id))];
+			if (active.some(task => task?.agent === "sdd-remediate" && task.cwd === request.cwd)) {
+				throw new Error("Remediation already queued or running in this worktree; wait for confirmed cleanup or cancel the active task before requesting fresh authorization");
+			}
+		}
 		const task = this.createTask(request);
 		// A caller can retain and mutate its request after dispatch. Preserve only
 		// the identity selected at construction for this child launch.

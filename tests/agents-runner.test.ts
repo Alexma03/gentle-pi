@@ -26,7 +26,7 @@ interface Harness {
 	spawnOptions: Array<{ env: NodeJS.ProcessEnv; stdio?: string[] }>;
 }
 
-function harness(options: { pid?: number; maxConcurrency?: number; stallTimeoutMs?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; onNotification?: RunnerHooks["onNotification"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
+function harness(options: { failStart?: boolean; process?: RunnerDeps["process"]; pid?: number; maxConcurrency?: number; stallTimeoutMs?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; onNotification?: RunnerHooks["onNotification"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
 	const children: FakeChild[] = [];
 	const timers: Harness["timers"] = [];
 	const asks: Harness["asks"] = [];
@@ -34,7 +34,9 @@ function harness(options: { pid?: number; maxConcurrency?: number; stallTimeoutM
 	const spawnOptions: Harness["spawnOptions"] = [];
 	let clock = 1000;
 	const deps: RunnerDeps = {
+		process: options.process,
 		spawn: (_command, _args, launchOptions) => {
+			if (options.failStart) throw new Error("fixture spawn failed");
 			spawnOptions.push({ env: launchOptions.env, stdio: launchOptions.stdio });
 			const fake = fakeChild({ exitOnKill: options.exitOnKill, pid: options.pid });
 			if (options.state !== undefined) {
@@ -1012,8 +1014,9 @@ test("an unprobeable process group quarantines at its deadline and still records
 	const finishes: string[] = [];
 	let now = 1_000;
 	let launches = 0;
+	let child: FakeChild;
 	const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 10_000 }, {
-		spawn: () => fakeChild({ exitOnKill: false, pid: 90 + (launches += 1) }).child,		now: () => now,
+		spawn: () => (child = fakeChild({ exitOnKill: false, pid: 90 + (launches += 1) })).child,		now: () => now,
 		schedule: (fn, ms) => {
 			const timer = { fn, ms, cancelled: false };
 			timers.push(timer);
@@ -1022,7 +1025,7 @@ test("an unprobeable process group quarantines at its deadline and still records
 		pi: { command: "pi", args: [] },
 		process: { platform: "win32", kill: () => {} },
 	}, { askUser: async () => ({ value: "yes" }), onFinish: (task) => { finishes.push(task.id); } });
-	const first = runner.run(request());
+	const first = runner.run(managedRequest());
 	const second = runner.run(request({ prompt: "queued" }));
 	await tick();
 	runner.cancel(first.id);
@@ -1039,6 +1042,12 @@ test("an unprobeable process group quarantines at its deadline and still records
 	assert.equal(finishes.length, 1, "the run is recorded exactly once");
 	assert.equal(store.get(second.id)?.status, TASK_STATUS.QUEUED, "an unconfirmed exit retains its capacity");
 	assert.equal(launches, 1, "no further launch happens while the slot is quarantined");
+	assert.throws(() => runner.run(managedRequest()), /Remediation already queued or running/, "a failed record does not release its quarantined child");
+	child!.exit(0);
+	await tick();
+	assert.doesNotThrow(() => runner.run(managedRequest()), "confirmed cleanup releases the managed workspace");
+	runner.cancelAll();
+	child!.exit(0);
 });
 
 test("abortReasonText renders an Error, a string, and nothing for unknown reasons", () => {
@@ -1069,4 +1078,82 @@ test("research narrowing transport keeps exact argv paths and replaces inherited
   h.runner.cancel(task.id);
   assert.equal((await h.runner.waitFor(task.id)).status, TASK_STATUS.CANCELLED);
  }
+});
+
+function managedRequest(cwd = "/repo"): TaskRequest {
+	return request({ agent: { ...explorer, name: "sdd-remediate" }, cwd, sddRemediation: {
+		failedEvidenceRevision: "failed-revision",
+		plan: { cwd, commands: ["pnpm test"], runtimeHarness: { naReason: "Not applicable because this tests runner admission." }, rollback: { boundary: "fixture", command: "git diff --check" } },
+		scope: { cwd, editPaths: [], commands: ["pnpm test", "git diff --check"], allowedEditRoots: [cwd] },
+	} });
+}
+
+for (const queued of [true, false]) test(`managed exclusion covers ${queued ? "queued" : "running"} same-workspace actors`, async () => {
+	const h = harness({ pid: 123, process: { platform: "win32", kill() {} } });
+	const first = h.runner.run(managedRequest());
+	if (!queued) await tick();
+	try {
+		assert.throws(() => h.runner.run(managedRequest()), /Remediation already queued or running/);
+		assert.equal(h.store.list().length, 1, "rejection creates no task or queue entry");
+		await tick();
+		assert.equal(h.children.length, 1);
+		assert.equal(h.store.get(first.id)?.status, TASK_STATUS.RUNNING);
+	} finally { h.runner.cancelAll(); await tick(); }
+});
+
+test("managed exclusion does not serialize other workspaces or ordinary tasks", async () => {
+	const h = harness({ maxConcurrency: 3, pid: 123, process: { platform: "win32", kill() {} } });
+	h.runner.run(managedRequest());
+	h.runner.run(managedRequest("/other"));
+	h.runner.run(request());
+	await tick();
+	assert.equal(h.children.length, 3);
+	h.runner.cancelAll();
+	await tick();
+});
+
+for (const ending of ["complete", "failure", "cancel", "queued-cancel"] as const) test(`managed exclusion releases after ${ending}`, async () => {
+	const h = harness({ pid: 123, process: { platform: "win32", kill() {} } });
+	const first = h.runner.run(managedRequest());
+	if (ending === "queued-cancel") h.runner.cancel(first.id);
+	else {
+		await tick();
+		if (ending === "complete") {
+			h.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "Finished" }], stopReason: "stop" }] });
+			h.children[0].emit({ type: "agent_settled" });
+		} else if (ending === "failure") h.children[0].exit(1);
+		else h.runner.cancel(first.id);
+	}
+	await h.runner.waitFor(first.id);
+	const next = h.runner.run(managedRequest());
+	await tick();
+	assert.equal(h.store.get(next.id)?.status, TASK_STATUS.RUNNING);
+	h.runner.cancelAll();
+	await tick();
+});
+
+test("managed exclusion lasts until child cleanup is confirmed", async () => {
+	const h = harness({ pid: 123, exitOnKill: false, process: { platform: "win32", kill() {} } });
+	const first = h.runner.run(managedRequest());
+	await tick();
+	h.runner.cancel(first.id);
+	try { assert.throws(() => h.runner.run(managedRequest()), /Remediation already queued or running/); }
+	finally { h.children[0].exit(0); }
+	await h.runner.waitFor(first.id);
+	const next = h.runner.run(managedRequest());
+	await tick();
+	assert.equal(h.store.get(next.id)?.status, TASK_STATUS.RUNNING);
+	h.runner.cancelAll();
+	for (const child of h.children) child.exit(0);
+	await tick();
+});
+
+test("managed exclusion releases failed startup and ignores historical-only tasks", async () => {
+	const h = harness({ failStart: true });
+	const first = h.runner.run(managedRequest());
+	assert.equal((await h.runner.waitFor(first.id)).status, TASK_STATUS.FAILED);
+	h.store.add({ ...h.store.get(first.id)!, id: "historical-only", status: TASK_STATUS.RUNNING });
+	const next = h.runner.run(managedRequest());
+	assert.equal((await h.runner.waitFor(next.id)).status, TASK_STATUS.FAILED, "the next actor reaches spawn, not a historical admission lock");
+	assert.match(h.store.get(next.id)?.error ?? "", /fixture spawn failed/);
 });

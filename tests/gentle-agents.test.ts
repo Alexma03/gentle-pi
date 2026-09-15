@@ -2144,6 +2144,11 @@ for (const condition of ["granted", "declined", "native-denied", "asset-drift"] 
 	assert.equal(h.tools.has("subagent_reconcile"), false);
 	if (consent) {
 		assert.ok(runtime.children[0].written.some((command) => command.type === "prompt"), "the registered actor receives its prompt");
+		const repeat = h.tools.get("subagent_run")!.execute("repeat", { agent: "sdd-remediate", task: "Correct alpha again", context: PARENT_CONFIRMED_SDD_CONTEXT, mode: "background", sdd_change: { changeName: "alpha", workspaceRoot: cwd, phase: "remediate", failedEvidenceRevision: revision }, remediation: { plan: { cwd, commands: ["pnpm test"], runtimeHarness: { naReason: "Not applicable because this fixture tests registered dispatch only." }, rollback: { boundary: "Remove isolated fixture", command: "git diff --check" } } } }, undefined, undefined, ctx);
+		await assert.rejects(repeat, /Remediation already queued or running/);
+		assert.equal(confirmations, 2, "independent human consent does not permit overlapping managed actors");
+		assert.equal(runtime.spawned.length, 1);
+
 		runtime.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "Work stopped; no verification success is claimed." }], stopReason: "stop" }] });
 		runtime.children[0].emit({ type: "agent_settled" });
 		await tick();
