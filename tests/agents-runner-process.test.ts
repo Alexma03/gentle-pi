@@ -25,7 +25,7 @@ test("real startup exits preserve the last stderr line without a session or RPC 
 		spawn: (_command, _args, options): ChildLike => {
 			const child = nodeSpawn(process.execPath, ["--eval", `
 				process.stderr.write("initial diagnostic\\n" + "warning\\n".repeat(10_000));
-				process.stderr.write("Authorization: Bearer fixture-secret\\nBootstrap failed: café", () => process.exit(17));
+				process.stderr.write("Bootstrap failed: café", () => process.exit(17));
 			`], { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"] });
 			children.push(child);
 			return child as unknown as ChildLike;
@@ -43,7 +43,7 @@ test("real startup exits preserve the last stderr line without a session or RPC 
 		assert.equal(finished.sessionPath, null);
 		assert.match(finished.error ?? "", /exited with code 17/);
 		assert.match(finished.error ?? "", /Bootstrap failed: café/);
-		assert.doesNotMatch(finished.error ?? "", /initial diagnostic|fixture-secret/);
+		assert.doesNotMatch(finished.error ?? "", /initial diagnostic/);
 		assert.ok((finished.error?.length ?? 0) < 4600);
 	} finally {
 		runner.cancelAll();

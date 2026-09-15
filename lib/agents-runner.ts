@@ -219,8 +219,6 @@ interface LiveTask {
 	processGroup: number | undefined;
 	terminal: { status: TaskRecord["status"]; error: string | null } | undefined;
 	childExit: number | null | undefined;
-	childSignal?: NodeJS.Signals | null;
-	diagnostics: StderrTail;
 	cleanupDeadlineAt: number | undefined;
 	quarantined: boolean;
 	nextId: number;
@@ -247,49 +245,6 @@ const DEFAULT_TOOLS: readonly string[] = [];
 const TERMINATION_GRACE_MS = 250;
 const GROUP_CONFIRM_MS = 25;
 const GROUP_CONFIRM_DEADLINE_MS = 1_000;
-const STDERR_DRAIN_MS = 100;
-const STDERR_LIMIT = 4096;
-
-// Redact whole sensitive lines before retaining them. Never retain a suffix of
-// an oversized raw line: truncating away a credential's label could expose it.
-class StderrTail {
-	private line = "";
-	private tail = "";
-	private oversized = false;
-	private privateKey = false;
-	private closed = false;
-
-	push(chunk: string): void {
-		if (this.closed) return;
-		for (const [index, part] of chunk.split("\n").entries()) {
-			if (index > 0) this.flushLine();
-			if (this.oversized) continue;
-			if (this.line.length + part.length > STDERR_LIMIT) {
-				this.line = "";
-				this.oversized = true;
-			} else this.line += part;
-		}
-	}
-
-	private flushLine(): void {
-		let line = stripVTControlCharacters(this.line).replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g, "");
-		if (/-----BEGIN .*PRIVATE KEY-----/.test(line)) this.privateKey = true;
-		const sensitive = this.privateKey || /authorization|cookie|token|secret|password|passwd|credential|api[_-]?key|private[_-]?key|\bbearer\b|\bbasic\b|\bsk-[\w-]|\bgh[pousr]_|https?:\/\/|\beyJ[\w-]+\./i.test(line);
-		if (/-----END .*PRIVATE KEY-----/.test(line)) this.privateKey = false;
-		if (this.oversized) line = "[stderr line omitted: too long]";
-		else if (sensitive) line = "[REDACTED]";
-		if (line) this.tail = `${this.tail}${line}\n`.slice(-STDERR_LIMIT);
-		this.line = "";
-		this.oversized = false;
-	}
-
-	finish(): string {
-		if (!this.closed) this.flushLine();
-		this.closed = true;
-		return this.tail.trim();
-	}
-}
-
 const QUERY_REJECTION_ERRORS = new Set([
 	"invalid child IPC frame",
 	"invalid child IPC correlation",
@@ -563,7 +518,7 @@ export class AgentRunner {
 			return;
 		}
 		const processGroup = detached && typeof child.pid === "number" && child.pid > 0 ? child.pid : undefined;
-		const live: LiveTask = { child, mutationStarts: new Map(), inFlightTools: new Map(), pending: new Map(), queries: new Map(), replies: new Map(), cancelStall: () => {}, cancelGrace: () => {}, processGroup, terminal: undefined, childExit: undefined, diagnostics: new StderrTail(), cleanupDeadlineAt: undefined, quarantined: false, nextId: 0, ipcClosed: false, acknowledgedIpcIds: new Set(), acknowledgedIpcOrder: [], stderrTail: "" };
+		const live: LiveTask = { child, mutationStarts: new Map(), inFlightTools: new Map(), pending: new Map(), queries: new Map(), replies: new Map(), cancelStall: () => {}, cancelGrace: () => {}, processGroup, terminal: undefined, childExit: undefined, cleanupDeadlineAt: undefined, quarantined: false, nextId: 0, ipcClosed: false, acknowledgedIpcIds: new Set(), acknowledgedIpcOrder: [], stderrTail: "" };
 		if (request.prepareResponseObservations) {
 			let ready = false;
 			live.observationPreparation = () => ready;
@@ -602,11 +557,10 @@ export class AgentRunner {
 		child.stdout.on("data", (chunk: string) => lines.push(chunk));
 		child.stderr?.setEncoding("utf8");
 		child.stderr?.on("data", (chunk: string) => {
-			live.diagnostics.push(chunk);
 			const tail = live.stderrTail + chunk;
 			live.stderrTail = tail.length > STDERR_TAIL_MAX ? tail.slice(-STDERR_TAIL_MAX) : tail;
 		});
-		child.on("exit", (code, signal) => this.exited(id, code, signal));
+		child.on("exit", (code) => this.exited(id, code));
 		if (request.sddRemediation && child.pid === undefined) {
 			this.childError(id, new Error("remediation child has no process ID"));
 			return;
@@ -977,11 +931,10 @@ export class AgentRunner {
 		this.finish(id, TASK_STATUS.FAILED, `could not start pi: ${error.message}`, live);
 	}
 
-	private exited(id: string, code: number | null, signal: NodeJS.Signals | null): void {
+	private exited(id: string, code: number | null): void {
 		const live = this.live.get(id);
 		if (!live) return;
 		live.childExit = code;
-		live.childSignal = signal;
 		if (this.groupExists(live)) {
 			if (!live.terminal) this.requestStop(id, TASK_STATUS.FAILED, `pi exited with code ${code ?? "unknown"} before agent_settled${this.stderrSuffix(live)}`);
 			return;
@@ -1001,45 +954,7 @@ export class AgentRunner {
 			return;
 		}
 		const terminal = live.terminal;
-		const status = terminal?.status ?? TASK_STATUS.FAILED;
-		const error = terminal ? terminal.error : `pi exited with code ${live.childExit ?? "unknown"} before agent_settled`;
-		if (status !== TASK_STATUS.FAILED) {
-			live.diagnostics.finish();
-			this.finish(id, status, error, live);
-			return;
-		}
-		// Node's exit can precede the final stderr data. Drain briefly, but never
-		// let an inherited pipe hold completion indefinitely after group cleanup.
-		const stderr = live.child.stderr;
-		let finished = false;
-		let cancelDrain = () => {};
-		const finish = () => {
-			if (finished) return;
-			finished = true;
-			cancelDrain();
-			stderr?.off("end", finish);
-			stderr?.off("close", finish);
-			const tail = live.diagnostics.finish();
-			if (terminal) {
-				const exit = `exit code: ${live.childExit ?? "unknown"}${live.childSignal ? `; signal: ${live.childSignal}` : ""}`;
-				this.finish(id, status, `${error ?? "pi failed"} (${exit})${tail ? `\nstderr tail:\n${tail}` : ""}`, live);
-				return;
-			}
-			// No terminal: upstream contract (assert.equal) requires exactly
-				// `... before agent_settled; stderr: <single line>`. Feed it the
-				// redacted tail so secret redaction still holds, and keep the
-				// signal detail only when a signal exists (fork signal test).
-			const singleLine = tail.replace(/\s+/g, " ").trim();
-			const signalPart = live.childSignal ? ` (signal: ${live.childSignal}; exit code: ${live.childExit ?? "unknown"})` : "";
-			const suffix = singleLine ? `; stderr: ${singleLine}` : "";
-			this.finish(id, status, `${error}${signalPart}${suffix}`, live);
-		};
-		if (!stderr || stderr.readableEnded || stderr.destroyed) finish();
-		else {
-			stderr.once("end", finish);
-			stderr.once("close", finish);
-			cancelDrain = this.deps.schedule(finish, STDERR_DRAIN_MS);
-		}
+		this.finish(id, terminal ? terminal.status : TASK_STATUS.FAILED, terminal ? terminal.error : `pi exited with code ${live.childExit ?? "unknown"} before agent_settled${this.stderrSuffix(live)}`, live);
 	}
 
 	private finish(id: string, status: TaskRecord["status"], error: string | null, live?: LiveTask): void {

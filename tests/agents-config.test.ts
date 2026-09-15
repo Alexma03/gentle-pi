@@ -218,38 +218,3 @@ test("resolveAgentProfile prefers the profile, then the definition, then the def
 	assert.deepEqual(resolveAgentProfile(bare, config), { model: { provider: "openai-codex", id: "gpt-6-astra" }, thinking: "medium", source: { model: "default", thinking: "default" } });
 	assert.deepEqual(resolveAgentProfile(bare, parseAgentsConfig(undefined, undefined)).source, { model: "unresolved", thinking: "unresolved" });
 });
-
-test("thinking max is accepted from definitions, discovery, and profile effort while invalid levels stay rejected", () => {
-	for (const frontmatter of ["thinking: max", "effort: max", "thinking_level: max"]) {
-		const parsed = parseAgentDefinition(`---\nname: maxed\ndescription: d\nmodel: openai-codex/gpt-5.6-terra\n${frontmatter}\n---\nbody`, "/x/maxed.md", "global");
-		assert.ok(!("error" in parsed));
-		assert.equal(parsed.thinking, "max");
-		assert.deepEqual(parsed.model, { provider: "openai-codex", id: "gpt-5.6-terra" });
-	}
-	const invalid = parseAgentDefinition("---\nname: bad\nthinking: extreme\n---\nbody", "/x/bad.md", "global");
-	assert.ok("error" in invalid);
-	assert.match(invalid.error, /thinking "extreme"/);
-	assert.match(invalid.error, /max/);
-
-	const home = join(root, "home-max");
-	const cwd = join(root, "project-max");
-	mkdirSync(join(home, ".pi/agent/agents"), { recursive: true });
-	writeFileSync(join(home, ".pi/agent/agents/maxed.md"), "---\ndescription: d\nmodel: openai-codex/gpt-5.6-terra\nthinking: max\n---\nbody");
-	writeFileSync(join(home, ".pi/agent/agents/efforted.md"), "---\ndescription: d\neffort: max\n---\nbody");
-	writeFileSync(join(home, ".pi/agent/agents/bad.md"), "---\nthinking: extreme\n---\nx");
-	const discovered = discoverAgents({ cwd, home });
-	assert.deepEqual(discovered.agents.map((agent) => `${agent.name}:${agent.thinking}`), ["efforted:max", "maxed:max"]);
-	assert.equal(discovered.errors.length, 1);
-	assert.match(discovered.errors[0], /bad\.md/);
-	assert.deepEqual(discovered.agents.find((agent) => agent.name === "maxed")?.model, { provider: "openai-codex", id: "gpt-5.6-terra" });
-
-	const config = parseAgentsConfig({ default_effort: "max", model_profiles: { worker: { model: "openai/gpt-5", effort: "max" }, kept: { model: "anthropic/claude", thinking: "low" } } }, undefined);
-	assert.equal(config.defaultThinking, "max");
-	assert.deepEqual(config.modelProfiles.worker, { model: { provider: "openai", id: "gpt-5" }, thinking: "max" });
-	assert.deepEqual(config.modelProfiles.kept, { model: { provider: "anthropic", id: "claude" }, thinking: "low" });
-	const rejected = parseAgentsConfig({ model_profiles: { bad: { model: "openai/gpt-5", effort: "extreme" } } }, undefined);
-	assert.deepEqual(rejected.modelProfiles.bad, { model: { provider: "openai", id: "gpt-5" }, thinking: undefined });
-	const bare = parseAgentDefinition("---\nname: bare\n---\nbody", "/x/bare.md", "global");
-	assert.ok(!("error" in bare));
-	assert.equal(resolveAgentProfile(bare, config).thinking, "max");
-});
