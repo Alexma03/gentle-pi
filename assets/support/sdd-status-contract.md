@@ -4,7 +4,7 @@ Shared OpenSpec-style contract for Gentle Pi SDD phases. Use this before acting 
 
 ## Purpose
 
-Any phase that selects, continues, applies, verifies, syncs, or archives an SDD change MUST first produce or consume structured status. The status is the handoff between the parent orchestrator and phase executor.
+Any phase that selects, continues, applies, verifies, or archives an SDD change MUST first produce or consume structured status. The status is the handoff between the parent orchestrator and phase executor.
 
 ## Change Selection
 
@@ -47,7 +47,7 @@ Before any planning launch, stop for ambiguous change selection, unresolved sess
 | `remediate` | `sdd-remediate` |
 | `archive` | `sdd-archive` |
 
-Execute only a native selected action whose dependency and `actionContext` permit it. Unknown, malformed, blocked, or unsupported actions stop before work; no local route, prefixed token, or prose can replace them. `notes` is separate from `blockedReasons` and never gates: report a non-empty `notes` value as informational and proceed when the dependency and `blockedReasons` gates allow. Manual `sdd-sync` remains its intentional local resolver and is never an automatic native-status dispatch.
+For automatic continuation, execute only a native selected action whose dependency and `actionContext` permit it. Unknown, malformed, blocked, or unsupported actions stop before work; no local route, prefixed token, or prose can replace them. `notes` is separate from `blockedReasons` and never gates: report a non-empty `notes` value as informational and proceed when the dependency and `blockedReasons` gates allow.
 
 ## Status Schema
 
@@ -78,3 +78,7 @@ Every command or agent that acts on a change MUST show or consume status before 
 - task progress and unchecked task list when tasks exist;
 - next recommended action;
 - any `actionContext` or edit-root warnings.
+
+## Classical completion
+
+After completed apply, follow fresh native status to archive; verification is optional and explicitly invokable when its native dependency is ready and the provider recommends apply or archive. Never rewrite a pinned provider that still selects verify. Archive owns applicable delta-spec composition and retains task truth, dependsOn, real edit authority, confinement, collision/destructive-change consent, archive history and recovery. There is no standalone sync phase or post-SDD RDD prerequisite.
