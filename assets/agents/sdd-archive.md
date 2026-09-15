@@ -121,6 +121,23 @@ sync into:
 openspec/specs/{domain}/spec.md
 ```
 
+### Resume prior composition
+
+Before writing, inspect current deltas and canonical content together with existing change-specific artifacts and relevant repository history when available. A legacy `sync-report.md`, prior archive report, or apply-progress may identify domains, canonical files, operation names, recorded checks and destructive approvals. Read the actual supporting content; a PASS label or absence alone is not proof that this change applied an operation. Do not require a legacy report when ordinary artifacts/history already establish the result.
+
+Classify each operation as already applied, pending, or unresolved:
+
+| Operation | Already applied | Pending or unresolved |
+| --- | --- | --- |
+| ADDED / MODIFIED | The full current requirement block matches the intended delta result, and existing artifacts/history corroborate this change's application of that same operation. | Apply only a demonstrably pending operation. An existing ADDED target or differing current content after recorded application is unresolved; do not overwrite later work. |
+| REMOVED | The target is absent and corroborating history establishes that the same requirement was removed by this change using the current delta, with its recorded destructive approval. | An existing target is pending only when its content and history agree with the intended removal; a missing target without corroborating history is unresolved. |
+
+For mixed or interrupted composition, reconcile each operation separately; a domain-level success claim cannot skip pending operations. Apply only pending operations, leaving already-applied effects and unrelated canonical content unchanged. The strict delta helper rejects repeated ADDED/REMOVED operations: do not replay the full delta against an already-composed canonical spec or weaken that helper to treat absence as success.
+
+Stop and report any unresolved operation before any canonical write or archive move. Name the affected requirement and the missing or conflicting fact; request clarification rather than fabricate application history. Current same-domain collision checks and explicit composition/archive order still apply, including to already-applied effects. Existing task completion, native readiness, grants/confinement and archive-destination checks also still apply. Destructive approval for a prior operation does not authorize new or changed destructive writes.
+
+Record already-applied, pending and unresolved operations with supporting artifact/history references and current-content checks in the ordinary archive report. Do not create a new report schema, hash inventory, token or mandatory attestation; do not mutate historical sync reports. This reconciliation applies only to file-backed composition, not to an Engram-only canonical merge layer.
+
 ### New canonical spec
 
 If `openspec/specs/{domain}/spec.md` does not exist, treat the change spec as a full domain spec and copy it to the canonical path.
@@ -140,7 +157,7 @@ Merge rules:
 - Match requirements by exact `### Requirement: {Name}` heading.
 - Preserve every canonical requirement not mentioned by the delta.
 - Preserve heading hierarchy and Markdown formatting.
-- Fail or block if a MODIFIED or REMOVED requirement does not exist in the canonical spec.
+- Fail or block if a MODIFIED requirement is missing, or a REMOVED target is missing without corroborating history under Resume prior composition; only a proven already-applied operation is excluded from the pending delta.
 - If another active change under `openspec/changes/*/specs/{domain}/spec.md` touches the same domain, report the collision and require the parent's explicit composition/archive order before writing.
 - Block on unsupported `## RENAMED Requirements`; require a corrected ADDED/MODIFIED/REMOVED delta rather than improvising.
 - Preserve completed `dependsOn` and archive-history checks from native status; never replace them with local readiness.
@@ -161,7 +178,7 @@ Never silently drop scenarios from a MODIFIED requirement. If a MODIFIED delta a
 
 ## Move to Archive
 
-After successful file-backed sync, move:
+After applicable pending composition succeeds and already-applied effects are reconciled, move:
 
 ```text
 openspec/changes/{change}/
