@@ -219,7 +219,7 @@ export interface NativeSddStatusV2 extends Readonly<Record<string, unknown>> {
 	changeRoot: string | null;
 	actionContext: Readonly<Record<string, unknown>> & { mode: "repo-local"; workspaceRoot: string; allowedEditRoots: readonly string[] };
 	dependencies: Readonly<Record<(typeof NATIVE_SDD_DEPENDENCIES)[number], NativeSddDependencyState>>;
-	phaseInstructions?: Readonly<Record<(typeof NATIVE_SDD_INSTRUCTION_PHASES)[number], readonly string[]>>;
+	phaseInstructions?: Readonly<Record<(typeof NATIVE_SDD_INSTRUCTION_PHASES)[number], readonly string[]> & { remediate?: readonly string[] }>;
 	blockedReasons: readonly string[];
 	nextRecommended: string;
 	remediationState?: { required: boolean; complete: boolean; failedEvidenceRevision: string };
@@ -1459,7 +1459,7 @@ interface NativeJsonExecution {
 }
 
 const NATIVE_SDD_DEPENDENCIES = ["proposal", "specs", "design", "tasks", "apply", "verify", "archive"] as const;
-const NATIVE_SDD_INSTRUCTION_PHASES = ["apply", "verify", "remediate", "archive"] as const;
+const NATIVE_SDD_INSTRUCTION_PHASES = ["apply", "verify", "archive"] as const;
 const NATIVE_SDD_NEXT_RECOMMENDATIONS = ["apply", "verify", "remediate", "archive", "archived", "resolve-blockers", "sdd-new", "select-change", "propose", "spec", "design", "tasks"] as const;
 const NATIVE_SDD_DEPENDENCY_STATES = ["blocked", "ready", "all_done"] as const;
 
@@ -1487,7 +1487,13 @@ export function decodeNativeSddStatusV2(value: unknown, request: Pick<NativeSddS
 	if (status.phaseInstructions !== undefined) {
 		const instructions = object(status.phaseInstructions);
 		for (const phase of NATIVE_SDD_INSTRUCTION_PHASES) stringArray(instructions[phase]);
-		if (Object.keys(instructions).length !== NATIVE_SDD_INSTRUCTION_PHASES.length) throw new Error("native SDD instructions have an unsupported shape");
+		// Classical SDD no longer emits a remediation phase. Keep the published
+		// producer's optional legacy instructions intact without inventing them
+		// for a newer producer or accepting unknown phase keys.
+		const hasRemediation = Object.hasOwn(instructions, "remediate");
+		if (hasRemediation) stringArray(instructions.remediate);
+		if (Object.keys(instructions).length !== NATIVE_SDD_INSTRUCTION_PHASES.length + Number(hasRemediation)) throw new Error("native SDD instructions have an unsupported shape");
+		if (status.nextRecommended === "remediate" && !hasRemediation) throw new Error("native SDD remediation instructions are missing");
 	}
 	if (status.nextRecommended === "remediate" || status.remediationState !== undefined) {
 		const remediation = object(status.remediationState);
