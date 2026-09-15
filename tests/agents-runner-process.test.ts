@@ -22,13 +22,13 @@ test("real startup exits preserve the last stderr line without a session or RPC 
 	const store = new TaskStore();
 	const children: ReturnType<typeof nodeSpawn>[] = [];
 	const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 5_000 }, {
-		spawn: (_command, _args, options) => {
+		spawn: (_command, _args, options): ChildLike => {
 			const child = nodeSpawn(process.execPath, ["--eval", `
 				process.stderr.write("initial diagnostic\\n" + "warning\\n".repeat(10_000));
 				process.stderr.write("Authorization: Bearer fixture-secret\\nBootstrap failed: café", () => process.exit(17));
-			`], options);
+			`], { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"] });
 			children.push(child);
-			return child;
+			return child as unknown as ChildLike;
 		},
 		now: Date.now,
 		schedule: (fn, ms) => {
@@ -41,7 +41,7 @@ test("real startup exits preserve the last stderr line without a session or RPC 
 		const finished = await runner.waitFor(runner.run(request("startup fixture")).id);
 		assert.equal(finished.status, TASK_STATUS.FAILED);
 		assert.equal(finished.sessionPath, null);
-		assert.match(finished.error ?? "", /exit code: 17/);
+		assert.match(finished.error ?? "", /exited with code 17/);
 		assert.match(finished.error ?? "", /Bootstrap failed: café/);
 		assert.doesNotMatch(finished.error ?? "", /initial diagnostic|fixture-secret/);
 		assert.ok((finished.error?.length ?? 0) < 4600);

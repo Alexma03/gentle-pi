@@ -5,8 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { PassThrough } from "node:stream";
 import { AGENT_MODE, parseAgentsConfig, resolveAgentProfile, type AgentDefinition } from "../lib/agents-config.ts";
-import { TASK_STATUS, TaskStore, type RemediationTaskState, type TaskRecord } from "../lib/agents-protocol.ts";
-import { AgentRunner, childArguments, JsonLines, piCommand, abortReasonText, type RemediationPlan, type RemediationTerminalFacts, type RunnerDeps, type RunnerHooks, type TaskRequest } from "../lib/agents-runner.ts";
+import { TASK_STATUS, TaskStore, type TaskRecord } from "../lib/agents-protocol.ts";
+import { AgentRunner, childArguments, JsonLines, piCommand, abortReasonText, type RunnerDeps, type RunnerHooks, type TaskRequest } from "../lib/agents-runner.ts";
 import { fakeChild, type FakeChild } from "./agents-fake-child.ts";
 
 // Gentle Agents runner: every subagent is a child `pi --mode rpc` process.
@@ -29,7 +29,7 @@ interface Harness {
 	spawnOptions: Array<{ env: NodeJS.ProcessEnv; stdio?: string[] }>;
 }
 
-function harness(options: { pid?: number; maxConcurrency?: number; stallTimeoutMs?: number; toolStallTimeoutMs?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; onNotification?: RunnerHooks["onNotification"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
+function harness(options: { failStart?: boolean; process?: RunnerDeps["process"]; pid?: number; maxConcurrency?: number; stallTimeoutMs?: number; toolStallTimeoutMs?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; onNotification?: RunnerHooks["onNotification"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
 	const children: FakeChild[] = [];
 	const timers: Harness["timers"] = [];
 	const asks: Harness["asks"] = [];
@@ -37,7 +37,9 @@ function harness(options: { pid?: number; maxConcurrency?: number; stallTimeoutM
 	const spawnOptions: Harness["spawnOptions"] = [];
 	let clock = 1000;
 	const deps: RunnerDeps = {
+		process: options.process,
 		spawn: (_command, _args, launchOptions) => {
+			if (options.failStart) throw new Error("fixture spawn failed");
 			spawnOptions.push({ env: launchOptions.env, stdio: launchOptions.stdio });
 			const fake = fakeChild({ exitOnKill: options.exitOnKill, pid: options.pid });
 			if (options.state !== undefined) {
@@ -1201,8 +1203,9 @@ test("an unprobeable process group quarantines at its deadline and still records
 	const finishes: string[] = [];
 	let now = 1_000;
 	let launches = 0;
+	let child: FakeChild;
 	const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 10_000 }, {
-		spawn: () => fakeChild({ exitOnKill: false, pid: 90 + (launches += 1) }).child,		now: () => now,
+		spawn: () => (child = fakeChild({ exitOnKill: false, pid: 90 + (launches += 1) })).child,		now: () => now,
 		schedule: (fn, ms) => {
 			const timer = { fn, ms, cancelled: false };
 			timers.push(timer);
@@ -1211,7 +1214,7 @@ test("an unprobeable process group quarantines at its deadline and still records
 		pi: { command: "pi", args: [] },
 		process: { platform: "win32", kill: () => {} },
 	}, { askUser: async () => ({ value: "yes" }), onFinish: (task) => { finishes.push(task.id); } });
-	const first = runner.run(request());
+	const first = runner.run(managedRequest());
 	const second = runner.run(request({ prompt: "queued" }));
 	await tick();
 	runner.cancel(first.id);
@@ -1228,6 +1231,12 @@ test("an unprobeable process group quarantines at its deadline and still records
 	assert.equal(finishes.length, 1, "the run is recorded exactly once");
 	assert.equal(store.get(second.id)?.status, TASK_STATUS.QUEUED, "an unconfirmed exit retains its capacity");
 	assert.equal(launches, 1, "no further launch happens while the slot is quarantined");
+	assert.throws(() => runner.run(managedRequest()), /Remediation already queued or running/, "a failed record does not release its quarantined child");
+	child!.exit(0);
+	await tick();
+	assert.doesNotThrow(() => runner.run(managedRequest()), "confirmed cleanup releases the managed workspace");
+	runner.cancelAll();
+	child!.exit(0);
 });
 
 test("abortReasonText renders an Error, a string, and nothing for unknown reasons", () => {
@@ -1242,17 +1251,12 @@ test("research narrowing transport keeps exact argv paths and replaces inherited
  const h = harness();
  const selection = { documentation: { tools: ["fetch_content"], extensions: { fetch_content: "/installed/docs tools.ts" } } };
  for (const researchSelection of [selection, undefined]) {
-  const artifact = { store: "none" as const, worktree: "/work", changeName: "demo", retainedIntent: "denied questions", locators: [] };
-  const expected = structuredClone(artifact);
-  const launch = request({ researchSelection, researchArtifact: artifact, extensionPaths: researchSelection ? ["/installed/docs tools.ts"] : [],
-   env: { PATH: "/bin", GENTLE_PI_RESEARCH_SELECTION: "stale broad selection", GENTLE_PI_RESEARCH_ARTIFACT: "stale broader scope" } });
+  const launch = request({ researchSelection, extensionPaths: researchSelection ? ["/installed/docs tools.ts"] : [],
+   env: { PATH: "/bin", GENTLE_PI_RESEARCH_SELECTION: "stale broad selection" } });
   const argv = childArguments(launch);
   assert.deepEqual(argv.filter((_, i) => argv[i - 1] === "--extension"), launch.extensionPaths);
   const task = h.runner.run(launch);
-  artifact.worktree = "/wrong";
   await tick();
-  assert.deepEqual(JSON.parse(h.spawnOptions.at(-1)!.env.GENTLE_PI_RESEARCH_ARTIFACT!), expected);
-  assert.deepEqual("researchArtifact" in task ? task.researchArtifact : undefined, expected);
   assert.deepEqual(JSON.parse(h.spawnOptions.at(-1)!.env.GENTLE_PI_RESEARCH_SELECTION!), researchSelection ?? null);
   assert.equal(h.spawnOptions.at(-1)!.env.PATH, "/bin");
   h.runner.cancel(task.id);
@@ -1260,55 +1264,80 @@ test("research narrowing transport keeps exact argv paths and replaces inherited
  }
 });
 
+function managedRequest(cwd = "/repo"): TaskRequest {
+	return request({ agent: { ...explorer, name: "sdd-remediate" }, cwd, sddRemediation: {
+		failedEvidenceRevision: "failed-revision",
+		plan: { cwd, commands: ["pnpm test"], runtimeHarness: { naReason: "Not applicable because this tests runner admission." }, rollback: { boundary: "fixture", command: "git diff --check" } },
+		scope: { cwd, editPaths: [], commands: ["pnpm test", "git diff --check"], allowedEditRoots: [cwd] },
+	} });
+}
 
-test("runner retains remediation observations and awaits terminal settlement", async () => {
-	const h = harness({ pid: 123 });
-	let finalized: { record: TaskRecord; facts: RemediationTerminalFacts } | undefined;
-	let release: () => void;
-	const gate = new Promise<void>(resolve => { release = resolve; });
-	const remediationPlan: RemediationPlan = { cwd: "/repo", commands: ["pnpm test"], runtimeHarness: { naReason: "Not applicable because the fixture has no runtime boundary." }, rollback: { boundary: "Revert fixture", command: "git diff --check" } };
-	const remediation: RemediationTaskState = { failedEvidenceRevision: `sha256:${"a".repeat(64)}`, plan: remediationPlan, pending: {}, observations: [], invalid: false, token: "opaque", acquire: { workspaceRoot: "/repo", changeName: "demo", requestId: "fixture", workUnit: "correct", evidenceGoal: "Observed correction" } };
-	const task = h.runner.run(request({ sddRemediation: remediation, finalizeRemediation: async (record, facts) => { finalized = { record, facts }; await gate; } }));
+for (const queued of [true, false]) test(`managed exclusion covers ${queued ? "queued" : "running"} same-workspace actors`, async () => {
+	const h = harness({ pid: 123, process: { platform: "win32", kill() {} } });
+	const first = h.runner.run(managedRequest());
+	if (!queued) await tick();
+	try {
+		assert.throws(() => h.runner.run(managedRequest()), /Remediation already queued or running/);
+		assert.equal(h.store.list().length, 1, "rejection creates no task or queue entry");
+		await tick();
+		assert.equal(h.children.length, 1);
+		assert.equal(h.store.get(first.id)?.status, TASK_STATUS.RUNNING);
+	} finally { h.runner.cancelAll(); await tick(); }
+});
+
+test("managed exclusion does not serialize other workspaces or ordinary tasks", async () => {
+	const h = harness({ maxConcurrency: 3, pid: 123, process: { platform: "win32", kill() {} } });
+	h.runner.run(managedRequest());
+	h.runner.run(managedRequest("/other"));
+	h.runner.run(request());
 	await tick();
-	for (const command of ["pnpm test", "git diff --check"]) {
-		h.children[0].emit({ type: "tool_execution_start", toolName: "bash", toolCallId: command, args: { command } });
-		h.children[0].emit({ type: "tool_execution_end", toolName: "bash", toolCallId: command, isError: false, result: { content: [{ type: "text", text: "command output" }], details: { remediationCommand: { command, toolCallId: command, cwd: "/repo", exitCode: 0 } } } });
+	assert.equal(h.children.length, 3);
+	h.runner.cancelAll();
+	await tick();
+});
+
+for (const ending of ["complete", "failure", "cancel", "queued-cancel"] as const) test(`managed exclusion releases after ${ending}`, async () => {
+	const h = harness({ pid: 123, process: { platform: "win32", kill() {} } });
+	const first = h.runner.run(managedRequest());
+	if (ending === "queued-cancel") h.runner.cancel(first.id);
+	else {
+		await tick();
+		if (ending === "complete") {
+			h.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "Finished" }], stopReason: "stop" }] });
+			h.children[0].emit({ type: "agent_settled" });
+		} else if (ending === "failure") h.children[0].exit(1);
+		else h.runner.cancel(first.id);
 	}
-	h.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }] });
-	h.children[0].emit({ type: "agent_settled" });
+	await h.runner.waitFor(first.id);
+	const next = h.runner.run(managedRequest());
 	await tick();
-	assert.ok(finalized);
-	assert.equal(finalized.record.sddRemediation?.observations.length, 2);
-	const prompt = h.children[0].written.find(value => value.type === "prompt").message;
-	assert.ok(typeof prompt === "string");
-	assert.match(prompt, /pnpm test/);
-	assert.doesNotMatch(prompt, /opaque/);
-	assert.equal(finalized.facts.cleanupConfirmed, true);
-	assert.equal(h.finishes.length, 0);
-	release(); await h.runner.waitFor(task.id);
-	assert.equal(h.finishes.length, 1);
-	assert.equal(remediation.observations.length, 0);
+	assert.equal(h.store.get(next.id)?.status, TASK_STATUS.RUNNING);
+	h.runner.cancelAll();
+	await tick();
 });
 
-
-test("admitted no-PID failure settles interrupted before sending a prompt", async () => {
-	const h = harness(); let facts;
-	const task = h.runner.run(request({ sddRemediation: { plan: {} } as unknown as RemediationTaskState, finalizeRemediation: async (_task, observed) => { facts = observed; } }));
+test("managed exclusion lasts until child cleanup is confirmed", async () => {
+	const h = harness({ pid: 123, exitOnKill: false, process: { platform: "win32", kill() {} } });
+	const first = h.runner.run(managedRequest());
 	await tick();
-	assert.equal(h.children[0].written.some(value => value.type === "prompt"), false);
-	await h.runner.waitFor(task.id);
-	assert.equal(facts.spawned, false);
-	assert.equal(facts.exited, false);
-	assert.equal(facts.cleanupConfirmed, false);
+	h.runner.cancel(first.id);
+	try { assert.throws(() => h.runner.run(managedRequest()), /Remediation already queued or running/); }
+	finally { h.children[0].exit(0); }
+	await h.runner.waitFor(first.id);
+	const next = h.runner.run(managedRequest());
+	await tick();
+	assert.equal(h.store.get(next.id)?.status, TASK_STATUS.RUNNING);
+	h.runner.cancelAll();
+	for (const child of h.children) child.exit(0);
+	await tick();
 });
 
-
-test("admitted synchronous spawn failure finalizes without launching another actor", async () => {
-	let spawns = 0, facts;
-	const store = new TaskStore();
-	const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 100 }, { spawn: () => { spawns++; throw new Error("spawn refused"); }, pi: { command: "pi", args: [] }, now: () => 1, schedule: () => () => {} }, { askUser: async () => ({}) });
-	const task = runner.run(request({ sddRemediation: { plan: {} } as unknown as RemediationTaskState, finalizeRemediation: async (_task, value) => { facts = value; } }));
-	await runner.waitFor(task.id);
-	assert.deepEqual(facts, { spawned: false, exited: false, cleanupConfirmed: true });
-	assert.equal(spawns, 1);
+test("managed exclusion releases failed startup and ignores historical-only tasks", async () => {
+	const h = harness({ failStart: true });
+	const first = h.runner.run(managedRequest());
+	assert.equal((await h.runner.waitFor(first.id)).status, TASK_STATUS.FAILED);
+	h.store.add({ ...h.store.get(first.id)!, id: "historical-only", status: TASK_STATUS.RUNNING });
+	const next = h.runner.run(managedRequest());
+	assert.equal((await h.runner.waitFor(next.id)).status, TASK_STATUS.FAILED, "the next actor reaches spawn, not a historical admission lock");
+	assert.match(h.store.get(next.id)?.error ?? "", /fixture spawn failed/);
 });

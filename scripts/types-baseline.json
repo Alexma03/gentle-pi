@@ -1,11 +1,11 @@
 {
   "note": "Recorded TypeScript diagnostics. Regenerate with `node scripts/check-types.mjs --update` after fixing or deliberately accepting diagnostics. This file may only shrink without a review decision.",
-  "total": 200,
+  "total": 197,
   "byFileAndCode": {
     "extensions/codegraph-tools.ts TS2339": 1,
     "extensions/codegraph-tools.ts TS2345": 1,
-    "extensions/gentle-agents.ts TS2322": 3,
-    "extensions/gentle-ai.ts TS2322": 5,
+    "extensions/gentle-agents.ts TS2322": 2,
+    "extensions/gentle-ai.ts TS2322": 3,
     "extensions/gentle-ai.ts TS2339": 11,
     "extensions/gentle-ai.ts TS2345": 15,
     "extensions/gentle-ai.ts TS2365": 1,
