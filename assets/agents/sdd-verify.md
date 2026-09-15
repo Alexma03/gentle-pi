@@ -88,13 +88,9 @@ Verify that implementation respected the `Review Workload Forecast` from `tasks.
 
 Scan `openspec/changes/{change}/tasks.md` or the memory tasks artifact for unchecked implementation task markers matching `^\s*- \[ \]`.
 
-If unchecked implementation tasks remain:
+Report the exact unchecked lines as remaining work, including tasks outside an approved partial slice. Do not return a clean `PASS` for incomplete assigned work or turn stale progress into a completion claim. Reconcile apparent stale checkboxes against actual implementation and persisted progress; never check off unfinished work to obtain a desired route.
 
-- mark each as a CRITICAL completeness issue and archive blocker;
-- include the exact unchecked lines;
-- do not return a clean `PASS` or say ready for archive while unchecked implementation tasks remain.
-
-If a partial slice is approved, report unchecked lines as remaining scope and state that archive is not ready. Archive exceptions are limited to non-critical partial archives or stale-checkbox reconciliation proven by apply-progress/verify-report; they do not turn incomplete tasks into a clean verification pass.
+Archive admission follows fresh native status and real permissions, not verifier-authored task-count blockers or partial-archive exceptions. Report genuine failures and risks honestly; do not override native readiness or the archive's actual safety checks.
 
 ## Graceful Artifact Handling
 

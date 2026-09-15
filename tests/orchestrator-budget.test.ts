@@ -320,6 +320,8 @@ for (const range of DISPOSITION_MAP) {
 				if (raw === undefined || !isNormativeLine(raw)) continue;
 				const trimmed = raw.trim();
 				const expected =
+					// #1051 keeps the selected store when memory is unavailable.
+					ln === 221 ? "do not switch the selected store" :
 					ln === 185 ? trimmed.replace("apply/verify/sync/archive", "apply/verify/archive") :
 					ln === 187
 						? CURRENT_SDD_WORKFLOW_PATH

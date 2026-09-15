@@ -38,9 +38,11 @@ Inputs to read (`engram`/`both`: use the injected Engram memory read tools for t
 
 Persist this phase's artifact to the active backend before returning (mandatory):
 - `engram`/`both`: call the injected Engram save tool with title and `topic_key` `"sdd/{change}/apply-progress"`, `type: "architecture"`, `project` from context, and `capture_prompt: false` when the tool schema supports it (omit the field if an older schema rejects it).
-- Also update the tasks artifact checkboxes via the injected Engram update tool (`engram`/`both`) or file edit (`openspec`).
-- `openspec`: write/update the apply-progress and tasks files under `openspec/changes/{change}/`.
+- Also update the tasks artifact checkboxes via the injected Engram update tool (`engram`/`both`) or file edit (`openspec`/`both`).
+- `openspec` / `both`: write/update the apply-progress and tasks files under `openspec/changes/{change}/`.
 - `none`: return progress inline.
+
+For `both`, read back each selected backend and report its actual result. File and Engram writes are not atomic: retain successful writes and cumulative progress, disclose failed or divergent copies, and do not claim complete persistence or switch stores to hide a failure.
 
 Never claim persistence you did not perform.
 
@@ -103,9 +105,9 @@ If `openspec/config.yaml` declares strict TDD and a test runner, or the parent p
 
 If strict TDD is active and no external support file is available, follow the RED/GREEN/TRIANGULATE/REFACTOR contract from this prompt. Do not silently fall back to standard mode.
 
-## Task Ownership Boundary
+## Task Completion Boundary
 
-Read ownership markers on every checkbox: absent markers are legacy `implementation`; only terminal `<!-- sdd-owner: implementation -->` markers are generated for new tasks. For existing task artifacts, follow the structured status for legacy non-implementation rows. A line containing an unsupported, duplicate, or non-terminal `sdd-owner` marker is malformed: stop with `fix-task-ownership-marker` and leave it unchanged. Select, check, and report only implementation-owned rows. Legacy non-implementation rows are informational and never block the SDD route.
+Use native task progress and authorized scope to select and report the assigned work. Preserve historical ownership comments and task artifacts; do not parse their spelling or position into a local admission gate. Check off only actually completed implementation work with applicable proof, and leave unfinished work unchecked.
 
 After implementation completion, return fresh native status to the parent: classically archive, with explicitly optional verification. Never bypass an older provider that still selects verify. Archive composes applicable specs and records closure without a post-SDD RDD dependency.
 
@@ -114,7 +116,7 @@ After implementation completion, return fresh native status to the parent: class
 `sdd-apply` owns persisted task completion. In all modes, including strict TDD, mark each completed implementation task in the persisted tasks artifact immediately after completion:
 
 - `openspec` / `both`: update `openspec/changes/{change}/tasks.md` from `- [ ]` to `- [x]` for completed tasks.
-- `engram`: update the `sdd/{change}/tasks` observation when memory tools are explicitly available.
+- `engram` / `both`: update the `sdd/{change}/tasks` observation when memory tools are explicitly available.
 - `none`: report task progress inline and state that no persisted task artifact was updated.
 
 Internal todos and `apply-progress.md` are not enough completion evidence.
