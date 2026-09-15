@@ -19,6 +19,7 @@ Any phase that selects, continues, applies, verifies, or archives an SDD change 
 - If native status is unavailable, malformed, or does not select the requested change/workspace, stop and report that failure. Do not construct a local status, infer readiness from artifacts, substitute continuation, or bypass it through Engram.
 - `nextRecommended`, `dependencies`, `blockedReasons`, `actionContext`, and optional `phaseInstructions` are producer facts. Route only by their typed values, never by prose or a local lifecycle graph. A genuine blocker's human-readable explanation belongs in `blockedReasons`; a non-blocking diagnostic belongs in `notes`; neither belongs in `nextRecommended`.
 - Ordinary SDD actors follow native selection and real edit grants; no attempt acquire/settle budget is required.
+- Within one Pi runner, only one managed remediation actor may be queued or live in a canonical worktree. Wait for confirmed cleanup (or cancel and wait), then request fresh human authorization. This launch-local exclusion is not a cross-process lock; historical tasks are not admission authority. Other worktrees and ordinary tasks retain their existing concurrency.
 - Only an explicitly authorized `gentle-ai sdd-continue` may prepare a missing change-instance marker. `ensureChangeInstanceMarker` has no status caller; its sole production path is `PrepareChangeInstanceConsent` through `sdd-continue`.
 
 ## Bounded Planning Routing
