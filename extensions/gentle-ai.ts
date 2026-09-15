@@ -2243,6 +2243,18 @@ function routingEntryFromModelProfile(value: unknown): AgentRoutingEntry | undef
 	return entry && !isClearRoutingEntry(entry) ? entry : undefined;
 }
 
+function mergeMaterializedRouting(
+	profile: AgentRoutingEntry | undefined,
+	frontmatter: AgentRoutingEntry | undefined,
+): AgentRoutingEntry | undefined {
+	if (!profile) return frontmatter;
+	if (!frontmatter) return profile;
+	return normalizeRoutingEntry({
+		model: profile.model ?? frontmatter.model,
+		thinking: profile.thinking ?? frontmatter.thinking,
+	});
+}
+
 function readSubagentModelProfiles(path: string): Record<string, unknown> {
 	if (!existsSync(path)) return {};
 	try {
@@ -2266,7 +2278,8 @@ async function readSubagentModelProfilesAsync(path: string): Promise<Record<stri
 /**
  * The routing an agent is materialized with — what subagent launches actually
  * resolve — regardless of what `models.json` records: the runtime reads
- * `subagents.json` model profiles first and the agent frontmatter otherwise.
+ * `subagents.json` model profiles first and the agent frontmatter otherwise,
+ * independently for each routing field.
  */
 function readMaterializedRoutingEntry(
 	cwd: string,
@@ -2280,12 +2293,11 @@ function readMaterializedRoutingEntry(
 		profilesByPath.set(profilesPath, profiles);
 	}
 	const fromProfile = routingEntryFromModelProfile(profiles[agent.name]);
-	if (fromProfile) return fromProfile;
-	if (!agent.filePath || !existsSync(agent.filePath)) return undefined;
+	if (!agent.filePath || !existsSync(agent.filePath)) return fromProfile;
 	try {
-		return readFrontmatterRouting(readFileSync(agent.filePath, "utf8"));
+		return mergeMaterializedRouting(fromProfile, readFrontmatterRouting(readFileSync(agent.filePath, "utf8")));
 	} catch {
-		return undefined;
+		return fromProfile;
 	}
 }
 
@@ -2301,12 +2313,11 @@ async function readMaterializedRoutingEntryAsync(
 		profilesByPath.set(profilesPath, profiles);
 	}
 	const fromProfile = routingEntryFromModelProfile(profiles[agent.name]);
-	if (fromProfile) return fromProfile;
-	if (!agent.filePath || !(await pathExists(agent.filePath))) return undefined;
+	if (!agent.filePath || !(await pathExists(agent.filePath))) return fromProfile;
 	try {
-		return readFrontmatterRouting(await readFile(agent.filePath, "utf8"));
+		return mergeMaterializedRouting(fromProfile, readFrontmatterRouting(await readFile(agent.filePath, "utf8")));
 	} catch {
-		return undefined;
+		return fromProfile;
 	}
 }
 
