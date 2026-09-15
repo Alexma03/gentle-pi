@@ -320,11 +320,21 @@ for (const range of DISPOSITION_MAP) {
 				if (raw === undefined || !isNormativeLine(raw)) continue;
 				const trimmed = raw.trim();
 				const expected =
+					ln === 185 ? trimmed.replace("apply/verify/sync/archive", "apply/verify/archive") :
 					ln === 187
 						? CURRENT_SDD_WORKFLOW_PATH
 						: ln === 191
 							? CURRENT_HARD_PREFLIGHT_INVARIANT
 							: trimmed;
+				// #1051 retires the standalone sync row and its artifact key, not
+				// the surrounding memory/recovery contract or historical fixture.
+				if (ln === 216 || ln === 220) {
+					assert.ok(!targetContent.includes(trimmed), `retired sync contract remains at fixture:${ln}`);
+					assert.match(targetContent, /sdd\/<change>\/archive-report/);
+					assert.match(targetContent, /sdd\/<change>\/verify-report/);
+					assert.doesNotMatch(targetContent, /sdd\/<change>\/sync-report|\| `sdd-sync`/);
+					continue;
+				}
 				if (SUPERSEDED_LIFECYCLE_REVIEW_LINES.has(ln)) {
 					assert.ok(
 						!targetContent.includes(trimmed),

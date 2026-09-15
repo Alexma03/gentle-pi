@@ -1,24 +1,24 @@
 # SDD Orchestrator Workflow
 
-This is the lazy-loaded SDD workflow surface for el Gentleman on Pi. Read this file before handling `/sdd-*`, natural-language SDD requests, SDD continuation/routing, apply/verify/sync/archive work, or SDD/Judgment-Day phase delegation.
+This is the lazy-loaded SDD workflow surface for el Gentleman on Pi. Read this file before handling `/sdd-*`, natural-language SDD requests, SDD continuation/routing, apply/verify/archive work, or SDD/Judgment-Day phase delegation.
 
 ## SDD Workflow
 
 SDD phases:
 
 ```text
-init → explore → research (optional) → proposal → spec → design → tasks → apply → verify → sync → archive
+init → explore → research (optional) → proposal → spec → design → tasks → apply → archive (verification optional)
 ```
 
 Dependency graph:
 
 ```text
 explore → research (optional) → proposal
-proposal → spec ─┬→ tasks → apply → verify → sync → archive
+proposal → spec ─┬→ tasks → apply → archive (verification optional)
 proposal → design ┘
 ```
 
-`/gentle-sdd-status [change]` is the read-only status action for resolving the active change, artifact paths, task progress, dependency readiness, and action context before apply/verify/sync/archive.
+`/gentle-sdd-status [change]` is the read-only status action for resolving the active change, artifact paths, task progress, dependency readiness, and action context before apply/verify/archive.
 
 ## Native SDD Dispatcher
 
@@ -52,22 +52,22 @@ Before any planning launch, stop for ambiguous change selection, unresolved sess
 | `remediate` | `sdd-remediate` |
 | `archive` | `sdd-archive` |
 
-Execute only the selected native action when its dependency and `actionContext` permit it. Unknown, malformed, blocked, or unsupported values stop before work; prose and local routing cannot replace them. `notes` is separate from `blockedReasons` and never gates: report a non-empty `notes` value as informational and proceed when the dependency and `blockedReasons` gates allow. Manual sdd-sync deliberately retains its local resolver and is never automatic native-status dispatch.
+For automatic continuation, execute only the selected native action when its dependency and `actionContext` permit it. Unknown, malformed, blocked, or unsupported values stop before work; prose and local routing cannot replace them. `notes` is separate from `blockedReasons` and never gates: report a non-empty `notes` value as informational and proceed when the dependency and `blockedReasons` gates allow.
 
 ## SDD Status Contract
 
-Before `/gentle-sdd-continue`, `sdd-apply`, `sdd-verify`, `sdd-sync`, or `sdd-archive`, resolve and carry structured status. Lookup order: parent-provided status, then project override `.pi/gentle-ai/support/sdd-status-contract.md`, then globally installed `~/.pi/agent/gentle-ai/support/sdd-status-contract.md`, then the embedded `sdd-status` prompt contract. Do not use `assets/support/...` as a runtime path; that is only the package source path before installation.
+Before `/gentle-sdd-continue`, `sdd-apply`, `sdd-verify`, or `sdd-archive`, resolve and carry structured status. Lookup order: parent-provided status, then project override `.pi/gentle-ai/support/sdd-status-contract.md`, then globally installed `~/.pi/agent/gentle-ai/support/sdd-status-contract.md`, then the embedded `sdd-status` prompt contract. Do not use `assets/support/...` as a runtime path; that is only the package source path before installation.
 
 Status must include:
 
 - active change selection and how it was resolved;
-- artifact store and paths/topics for proposal, specs, design, tasks, apply-progress, verify-report, and sync-report;
+- artifact store and paths/topics for proposal, specs, design, tasks, apply-progress and optional verify-report;
 - task progress with exact unchecked `- [ ]` implementation task lines;
-- dependency states for apply, verify, sync, and archive;
+- dependency states for apply, verify, and archive;
 - `actionContext` with mode, workspace root, allowed edit roots, and warnings;
 - next recommended action.
 
-Do not guess the active change. If change selection is ambiguous, ask the user and stop. If `actionContext.mode: workspace-planning` and no allowed edit roots are provided, stop before apply/verify/sync/archive and ask for an explicit implementation/edit scope.
+Do not guess the active change. If change selection is ambiguous, ask the user and stop. If `actionContext.mode: workspace-planning` and no allowed edit roots are provided, stop before apply/verify/archive and ask for an explicit implementation/edit scope.
 
 ## Lazy SDD Preflight
 
@@ -199,12 +199,12 @@ Check every phase result against the Result Contract:
 - **Contract conformance:** the phase returned `status`, `executive_summary`, `artifacts`, `next_recommended`, `risks`, and `skill_resolution`, and `status` indicates success rather than partial, failed, or blocked.
 - **Artifact existence:** every declared artifact exists and is readable in the active backend. For memory-backed flows, retrieve the topic with the available memory tools; for OpenSpec/file-backed flows, read the declared path. A successful phase with no retrievable artifact fails the gate.
 - **No hallucinated references:** spot-check concrete file paths, symbols, commands, and artifacts the phase claims it created or used. Referenced paths or artifacts that do not resolve fail the gate.
-- **No scope drift:** the output must stay consistent with its inputs and the dependency graph: spec stays within proposal scope, design answers the proposal, tasks cover spec and design, apply implements the tasks, verify checks the implementation against the spec, and sync reflects the verified state before archive.
+- **No scope drift:** the output must stay consistent with its inputs and the dependency graph: spec stays within proposal scope, design answers the proposal, tasks cover spec and design, apply implements the tasks, verify checks the implementation against the spec, and archive composes applicable specs while preserving task truth and safety.
 - **Routing coherence:** `next_recommended` must follow the SDD dependency graph, and no unaddressed critical risk may be carried silently into the next phase.
 
 Use cost-aware validation:
 
-- For lower-risk phases (`sdd-explore`, `sdd-research`, `sdd-spec`, `sdd-tasks`, `sdd-sync`, `sdd-archive`), the parent may validate inline by reading artifacts back and checking claims.
+- For lower-risk phases (`sdd-explore`, `sdd-research`, `sdd-spec`, `sdd-tasks`, `sdd-archive`), the parent may validate inline by reading artifacts back and checking claims.
 - For higher-risk phases (`sdd-design`, `sdd-apply`), validate the artifact, declared paths, task state, and focused test evidence directly before continuing because errors there compound downstream.
 - If a gate finds any smell — missing artifact, status mismatch, unresolved path, likely drift, or critical risk — rerun the same SDD phase once with corrective feedback. SDD phase validation does not start ordinary review or Judgment Day.
 
@@ -268,7 +268,6 @@ On Pi, phase model routing is user-owned and persisted, not prompt-passed: `/gen
 | sdd-tasks    | balanced       | Mechanical breakdown                       |
 | sdd-apply    | balanced       | Implementation                             |
 | sdd-verify   | balanced       | Validation against spec                    |
-| sdd-sync     | fast           | Reflect verified state                     |
 | sdd-archive  | fast           | Copy and close                             |
 | jd-judge-a   | deep-reasoning | Adversarial review                         |
 | jd-judge-b   | deep-reasoning | Adversarial review                         |
@@ -345,8 +344,12 @@ Automatic mode does not override reviewer burnout protection.
 
 ## Recovery
 
-For every store, request a fresh native v2 status projection. Artifact reads may supply phase inputs only after native selection; they never re-derive readiness, replace status, or bypass native refusal. Manual sdd-sync keeps its separate local resolver.
+For every store, request a fresh native v2 status projection. Artifact reads may supply phase inputs only after native selection; they never re-derive readiness, replace status, or bypass native refusal.
 
 ## Provider Defect Handoff
 
 When an SDD task encounters a possible Gentle AI provider defect, the full contract lives in `assets/orchestrator-delegation.md` under `#### Gentle AI Provider Defect Handoff (MANDATORY)`. This workflow intentionally provides no summary, alternate report route, or RDD lifecycle instruction.
+
+## Classical completion
+
+After completed apply, follow fresh native status to archive; verification is optional and explicitly invokable when its native dependency is ready and the provider recommends apply or archive. Never rewrite a pinned provider that still selects verify. Archive owns applicable delta-spec composition and retains task truth, dependsOn, real edit authority, confinement, collision/destructive-change consent, archive history and recovery. There is no standalone sync phase or post-SDD RDD prerequisite.

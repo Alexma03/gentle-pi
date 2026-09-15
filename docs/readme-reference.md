@@ -17,7 +17,7 @@ This reference preserves the detailed installation, configuration, SDD/OpenSpec,
 | **el Gentleman persona**       | Makes Pi behave like a senior architect and teacher, not a generic chatbot. Spanish responses use Rioplatense voseo by default; neutral mode is saved globally with project overrides. |
 | **Configurable startup intro** | Adds a rose/text-logo startup intro, compact runtime panel, color presets, and commands to hide or show the decorative parts.                  |
 | **Work routing discipline**    | Small tasks stay inline. Context-heavy exploration can be delegated. Large or risky changes go through SDD/OpenSpec.                          |
-| **SDD/OpenSpec assets**        | Installs phase agents and chains for `init`, `onboard`, `explore`, `proposal`, `spec`, `design`, `tasks`, `apply`, `verify`, `sync`, and `archive`. |
+| **SDD/OpenSpec assets**        | Installs phase agents and chains for `init`, `onboard`, `explore`, `proposal`, `spec`, `design`, `tasks`, `apply`, optional `verify` and `archive`. |
 | **Lazy SDD preflight**         | Confirms SDD mode, artifact store, delivery strategy, and review budget on the first SDD invocation of every interactive session, including saved preferences; the parent transports the confirmed block to RPC SDD children.              |
 | **Subagent orchestration**     | Keeps one parent session responsible while child agents explore, implement, test, or review with focused context.                             |
 | **Strict TDD support**         | When project config declares a test command, apply/verify phases must record RED → GREEN → TRIANGULATE → REFACTOR evidence.                   |
@@ -75,12 +75,17 @@ The native SDD status consumer accepts both the pinned producer's legacy
 selected route; it does not fabricate a remediation phase for a newer producer.
 Unknown or incomplete instruction records still fail closed.
 
-This is the first compatibility prerequisite for [SDD parity #1051](https://github.com/Gentleman-Programming/gentle-pi/issues/1051),
-not delivery of the complete simplified workflow. Both sync-local routing paths,
-mandatory verification in the shipped chain, ordinary attempt governance and
-research admission remain pending separate coherent units. The package pin is
-unchanged; compatibility evidence from an identified local build is not a
-published fix or a recommendation to replace the installed provider.
+The Pi runtime now uses native status exclusively for SDD and retires standalone
+sync. The full chain follows completed apply to archive, where applicable delta
+specs are composed; verification remains explicitly invokable. With the current
+2.9.1 pin, native still requires verification and its emitted evidence requirements;
+a plain practical PASS report does not satisfy that legacy native gate. Pi forwards
+those exact instructions without overriding readiness or inventing legacy evidence.
+Classical direct-archive behavior is compatibility-tested with an identified
+upstream development build, not presented as a published fix or version bump.
+The complete classical flow awaits a compatible published native version; this
+change does not bump the pin. Ordinary attempt governance and research/planning simplification remain separate
+work under [SDD parity #1051](https://github.com/Gentleman-Programming/gentle-pi/issues/1051).
 
 ### Pi compatibility
 
@@ -349,7 +354,7 @@ Adversarial review roles (the refuter and the targeted validator) are never Pi-a
 init
   ↓
 explore → research (optional) → proposal → spec ─┬→ design ─┐
-                                                  └─────────┴→ tasks → apply → verify → sync → archive
+                                                  └─────────┴→ tasks → apply → archive (verification optional)
 ```
 
 The main loop is intentionally file-backed when you choose `openspec` or `both`:
@@ -357,7 +362,7 @@ The main loop is intentionally file-backed when you choose `openspec` or `both`:
 ```text
 planning artifacts                implementation evidence        canonical update
 ──────────────────                ───────────────────────        ────────────────
-proposal/spec/design/tasks   →    apply-progress/verify-report → sync-report → archive-report
+proposal/spec/design/tasks   →    apply-progress → optional verify-report → archive-report + canonical update
 ```
 
 For substantial work, the parent session coordinates the flow and each phase writes artifacts. That gives you:
@@ -367,7 +372,7 @@ For substantial work, the parent session coordinates the flow and each phase wri
 - task plans reviewers can reason about;
 - implementation evidence;
 - verification reports;
-- sync reports that update canonical specs while keeping the change active;
+- archive-time canonical spec composition with explicit destructive-change consent;
 - archive notes for future agents.
 
 ### OpenSpec artifact model
@@ -387,8 +392,7 @@ openspec/
     │   ├── design.md
     │   ├── tasks.md
     │   ├── apply-progress.md
-    │   ├── verify-report.md
-    │   └── sync-report.md
+    │   └── verify-report.md                   # optional
     └── archive/YYYY-MM-DD-{change}/           # immutable audit trail
 ```
 
@@ -397,7 +401,7 @@ Delta flow:
 ```text
 openspec/changes/{change}/specs/{domain}/spec.md
         │
-        │  sdd-sync applies ADDED / MODIFIED / REMOVED
+        │  sdd-archive applies ADDED / MODIFIED / REMOVED
         ▼
 openspec/specs/{domain}/spec.md
         │
@@ -416,7 +420,7 @@ When a canonical spec already exists, change specs use requirement operation sec
 ## REMOVED Requirements
 ```
 
-`MODIFIED` requirements must include the full requirement block, including still-valid scenarios, because sync replaces the canonical block by requirement name. `sdd-sync` syncs file-backed deltas into `openspec/specs/{domain}/spec.md` while keeping the change active; `sdd-archive` then moves the synced change to `openspec/changes/archive/YYYY-MM-DD-{change}/`.
+`MODIFIED` requirements must include the full requirement block, including still-valid scenarios, because sync replaces the canonical block by requirement name. `sdd-archive` composes applicable file-backed deltas into `openspec/specs/{domain}/spec.md`, then moves the completed change to `openspec/changes/archive/YYYY-MM-DD-{change}/`.
 
 Engram-only mode is different by design: Engram is working memory and does not maintain a canonical spec merge layer. Use `openspec` or `both` (hybrid file + memory persistence) when you need canonical spec evolution.
 

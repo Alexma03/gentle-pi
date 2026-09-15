@@ -70,7 +70,6 @@ const requiredToolsByAgent: Record<string, string[]> = {
 	"sdd-research.md": ["read", "grep", "find", "edit", "write", "mem_search", "mem_get_observation", "mem_save", "fetch_content", "web_search", "source_check", "get_search_content"],
 	"sdd-spec.md": ["read", "grep", "find", "edit", "write", "mem_search", "mem_get_observation", "mem_save"],
 	"sdd-status.md": ["read", "grep", "find", "bash", "mem_search", "mem_get_observation"],
-	"sdd-sync.md": ["read", "grep", "find", "edit", "write", "bash", "mem_search", "mem_get_observation", "mem_save", "mem_update"],
 	"sdd-tasks.md": ["read", "grep", "find", "edit", "write", "mem_search", "mem_get_observation", "mem_save"],
 	"sdd-verify.md": ["read", "grep", "find", "edit", "write", "bash", "mem_search", "mem_get_observation", "mem_save"],
 };
@@ -132,39 +131,18 @@ test("generic non-SDD agents declare exact role tool allowlists", () => {
 	}
 });
 
-test("sdd-verify phase text carries the verify-result envelope and validate-before-persist rule", () => {
-	// gentle-pi#535 row 5: the phase must produce a natively admissible report
-	// on its first persistence attempt without hunting the format elsewhere.
-	const envelopeFields = [
-		"schema: gentle-ai.verify-result/v1",
-		"evidence_revision: sha256:",
-		"verdict:",
-		"blockers:",
-		"critical_findings:",
-		"requirements:",
-		"scenarios:",
-		"test_command:",
-		"test_exit_code:",
-		"test_output_hash: sha256:",
-		"build_command:",
-		"build_exit_code:",
-		"build_output_hash: sha256:",
-	];
-
-	const agentSource = readFileSync(join(assetsAgentsDir, "sdd-verify.md"), "utf8");
-	assert.match(agentSource, /```yaml\nschema: gentle-ai\.verify-result\/v1\n/);
-	for (const field of envelopeFields) {
-		assert.ok(agentSource.includes(field), `sdd-verify.md envelope must carry \`${field}\``);
+test("optional verification retains practical evidence without retired attestation admission", () => {
+	const agent = readFileSync(join(assetsAgentsDir, "sdd-verify.md"), "utf8");
+	const chain = readFileSync(join(repoRoot, "assets/chains/sdd-verify.chain.md"), "utf8");
+	for (const source of [agent, chain]) {
+		assert.doesNotMatch(source, /sdd-verify-validate|gentle-ai\.verify-result\/v1/);
+		assert.match(source, /commands/);
+		assert.match(source, /blockers/);
 	}
-	assert.match(agentSource, /first non-empty content/);
-	assert.match(
-		agentSource,
-		/gentle-ai sdd-verify-validate --input <path\|-> --requirements <n> --scenarios <n>/,
-	);
-
-	const chainSource = readFileSync(join(repoRoot, "assets", "chains", "sdd-verify.chain.md"), "utf8");
-	assert.match(chainSource, /gentle-ai\.verify-result\/v1/);
-	assert.match(chainSource, /sdd-verify-validate/);
+	assert.match(agent, /strict TDD compliance/);
+	assert.match(agent, /exit codes/);
+	assert.match(agent, /never fabricate PASS/);
+	assert.match(chain, /does not make verification mandatory/);
 });
 
 test("the retired Pi adversarial role agents are not packaged", () => {

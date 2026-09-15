@@ -16,11 +16,10 @@ Each SDD phase subagent reads its own required inputs directly from the active b
 | `sdd-tasks`    | spec + design (required)                                | `tasks`          |
 | `sdd-apply`    | tasks + spec + design + `apply-progress` (if it exists) | `apply-progress` |
 | `sdd-verify`   | spec + tasks + `apply-progress`                         | `verify-report`  |
-| `sdd-sync`     | proposal + spec + design + tasks + `verify-report`      | `sync-report`    |
 | `sdd-archive`  | all artifacts                                           | `archive-report` |
 | `sdd-status`   | change artifacts (read-only)                            | nothing          |
 
-- SDD artifact keys: in memory/hybrid mode, phase artifacts use stable topic keys such as `sdd/<change>/proposal`, `sdd/<change>/spec`, `sdd/<change>/design`, `sdd/<change>/tasks`, `sdd/<change>/apply-progress`, `sdd/<change>/verify-report`, `sdd/<change>/sync-report`, and `sdd/<change>/archive-report`.
+- SDD artifact keys: in memory/hybrid mode, phase artifacts use stable topic keys such as `sdd/<change>/proposal`, `sdd/<change>/spec`, `sdd/<change>/design`, `sdd/<change>/tasks`, `sdd/<change>/apply-progress`, `sdd/<change>/verify-report`, `sdd/<change>/archive-report`.
 - When the optional research lane is selected, `sdd-research` uses the additional topic keys `sdd/<change>/research` and `sdd/<change>/preproposal` (openspec: `openspec/changes/<change>/research.md`).
 - If memory tools are unavailable, do not pretend persistence exists; return artifacts inline and/or write OpenSpec files.
 

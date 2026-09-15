@@ -182,7 +182,7 @@ export function remediationEvidence(state: RemediationObservations) {
 export interface SddChangeSelection {
 	changeName: string;
 	workspaceRoot: string;
-	phase: "apply" | "verify" | "sync" | "archive" | "remediate";
+	phase: "apply" | "verify" | "archive" | "remediate";
 	failedEvidenceRevision?: string;
 }
 
