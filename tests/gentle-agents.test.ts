@@ -2042,3 +2042,21 @@ for (const condition of ["granted", "declined", "native-denied", "asset-drift"] 
 	await h.fire("session_shutdown", ctx);
 	assert.equal(attempts, 0, "terminal cleanup must not invoke settlement");
 });
+
+
+test("registered task actor receives ordinary checkbox and configured TDD guidance", async () => {
+ const h = fakePi(), runtime = deps(), { ctx } = fakeContext();
+ const home = join(root, "task-truth-home");
+ mkdirSync(join(home, ".pi/agent/agents"), { recursive: true });
+ writeFileSync(join(home, ".pi/agent/agents/sdd-tasks.md"), readFileSync("assets/agents/sdd-tasks.md"));
+ gentleAgents(h.pi, {}, { ...runtime.deps, home });
+ await h.fire("session_start", ctx);
+ await h.tools.get("subagent_run")!.execute("tasks", { agent: "sdd-tasks", task: "Plan ordinary tasks", context: PARENT_CONFIRMED_SDD_CONTEXT, mode: "background" }, undefined, undefined, ctx);
+ await tick();
+ assert.equal(runtime.spawned.length, 1);
+ const args = runtime.spawned[0], instructions = args[args.indexOf("--append-system-prompt") + 1];
+ assert.match(instructions, /Only when configured strict TDD is active/);
+ assert.match(instructions, /- \[ \] 1\. Implement and verify the behavior\./);
+ assert.doesNotMatch(instructions, /<!-- sdd-owner:/);
+ await h.fire("session_shutdown", ctx);
+});

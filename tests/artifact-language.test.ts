@@ -231,7 +231,8 @@ test("SDD assets route completed implementation through native archive with opti
 	]);
 	const assets = [tasks, apply, status, contract, chain].join("\n");
 
-	assert.match(tasks, /<!-- sdd-owner: implementation -->/);
+	assert.match(tasks, /- \[ \] 1\. Implement and verify the behavior\./);
+	assert.doesNotMatch(tasks, /<!-- sdd-owner:/);
 	assert.match(apply, /fresh native recommendation/);
 	assert.match(status, /gentle-ai\.sdd-status.*v2/i);
 	assert.match(status, /read-only/i);

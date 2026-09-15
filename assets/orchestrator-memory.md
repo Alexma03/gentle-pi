@@ -21,7 +21,7 @@ Each SDD phase subagent reads its own required inputs directly from the active b
 
 - SDD artifact keys: in memory/hybrid mode, phase artifacts use stable topic keys such as `sdd/<change>/proposal`, `sdd/<change>/spec`, `sdd/<change>/design`, `sdd/<change>/tasks`, `sdd/<change>/apply-progress`, `sdd/<change>/verify-report`, `sdd/<change>/archive-report`.
 - Research is output-only. The parent may persist useful findings at `sdd/<change>/research` or `openspec/changes/<change>/research.md` through actual authorized tools and read back claimed output. Historical pre-proposal records remain readable but are not prerequisites or readiness authority.
-- If memory tools are unavailable, do not pretend persistence exists; return artifacts inline and/or write OpenSpec files.
+- If memory tools are unavailable, do not pretend persistence exists and do not switch the selected store. Return useful artifacts inline with the persistence limitation; write OpenSpec files only when that backend was already selected and authorized. In hybrid mode, report each backend's actual outcome rather than presenting a one-sided write as complete persistence.
 
 Memory lifecycle rule (when Engram exposes lifecycle metadata/tooling):
 
