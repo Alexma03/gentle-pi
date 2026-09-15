@@ -454,7 +454,13 @@ test("producer instructions reach actual selected-child startup without provider
 	mkdirSync(join(change, "specs/feature"), { recursive: true });
 	for (const [path, content] of Object.entries({ "proposal.md": "# Proposal\n", "design.md": "# Design\n",
 		"specs/feature/spec.md": "# Spec\n", "tasks.md": "- [ ] 1.1 Implement\n" })) writeFileSync(join(change, path), content);
-	const native = new NativeReviewCliV216(createNodeExecFileAdapter(), process.env.SDD_TEST_PRODUCER!);
+	const invoked: string[] = [];
+	const adapter = createNodeExecFileAdapter();
+	const native = new NativeReviewCliV216(async (request) => {
+		invoked.push(request.arguments[0]!);
+		return adapter(request);
+	}, process.env.SDD_TEST_PRODUCER!);
+	t.after(() => assert.ok(invoked.every((verb) => verb === "sdd-status"), "registered startup never invokes attempt acquire/settle"));
 	const status = await native.sddStatus!({ workspaceRoot: root, changeName: "alpha" });
 	assert.equal(status.nextRecommended, "apply");
 	let selection: string | undefined = JSON.stringify({ changeName: "alpha", workspaceRoot: root, phase: "apply" });

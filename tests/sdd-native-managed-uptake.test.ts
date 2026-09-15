@@ -211,7 +211,7 @@ if (!childRole) test("installed AI producer → fixed Pi extensions → managed 
 		rmSync(definition.filePath);
 		let acquires = 0;
 		try {
-			await assert.rejects(admitManagedRemediation({ agent: definition, cwd, sddChange: { phase: "remediate", changeName: "uptake", workspaceRoot: cwd, failedEvidenceRevision: `sha256:${"a".repeat(64)}` } } as unknown as TaskRequest, {}, { ...native, sddAttemptAcquire: async () => { acquires++; throw new Error("Must not acquire"); } } as unknown as import("../lib/native-review-cli.ts").NativeReviewCli, async () => {}), /unsupported/i);
+			await assert.rejects(admitManagedRemediation({ agent: definition, cwd, sddChange: { phase: "remediate", changeName: "uptake", workspaceRoot: cwd, failedEvidenceRevision: `sha256:${"a".repeat(64)}` } } as unknown as TaskRequest, {}, { ...native, sddAttemptAcquire: async () => { acquires++; throw new Error("Must not acquire"); } } as unknown as import("../lib/native-review-cli.ts").NativeReviewCli), /unsupported/i);
 			assert.equal(acquires, 0);
 		} finally { writeFileSync(definition.filePath, bytes); }
 	});
