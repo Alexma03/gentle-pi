@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -426,7 +426,8 @@ test("producer v2 preservation: selected status is read-only and retains all sev
 	assert.equal(first, second);
 	const status = decodeNativeSddStatusV2(JSON.parse(first), { changeName: "alpha", workspaceRoot: root });
 	assert.deepEqual(Object.keys(status.dependencies).sort(), ["apply", "archive", "design", "proposal", "specs", "tasks", "verify"]);
-	assert.deepEqual(Object.keys(status.phaseInstructions!).sort(), ["apply", "archive", "remediate", "verify"]);
+	assert.deepEqual(Object.keys(status.phaseInstructions!).sort(), "remediate" in status.phaseInstructions!
+		? ["apply", "archive", "remediate", "verify"] : ["apply", "archive", "verify"]);
 	assert.equal(status.nextRecommended, "propose");
 	const verbs: string[] = [];
 	const adapter = createNodeExecFileAdapter();
@@ -472,6 +473,73 @@ function commandStatus(root: string) {
 		blockedReasons: ["prepare only; source roots remain ungranted"], nextRecommended: "propose",
 	};
 }
+
+test("classical native instructions reach selected apply, verify and archive startup unchanged", async (t) => {
+	const root = workspace(t);
+	for (const phase of ["apply", "verify", "archive"] as const) {
+		const legacy = commandStatus(root);
+		const { remediate: _legacyOnly, ...phaseInstructions } = legacy.phaseInstructions;
+		const status = { ...legacy, phaseInstructions, blockedReasons: [], nextRecommended: phase,
+			dependencies: { ...legacy.dependencies, [phase]: "ready" } };
+		const calls: unknown[] = [];
+		const result = await nativeStartup(JSON.stringify({ changeName: "alpha", workspaceRoot: root, phase }), root, `sdd-${phase}`, {
+			sddStatus: async (request) => { calls.push(request); return status; },
+		});
+		assert.equal(result.status, status, "transport preserves the provider's original object");
+		assert.equal("remediate" in result.status.phaseInstructions!, false, "never synthesize retired instructions");
+		assert.deepEqual(calls, [{ changeName: "alpha", workspaceRoot: root }]);
+	}
+});
+
+test("native instruction compatibility does not admit incomplete or foreign phase records", (t) => {
+	const root = workspace(t), legacy = commandStatus(root);
+	const { remediate: _legacyOnly, ...classical } = legacy.phaseInstructions;
+	const request = { changeName: "alpha", workspaceRoot: root };
+	assert.equal(decodeNativeSddStatusV2(legacy, request), legacy, "pinned producer remains supported");
+	for (const phaseInstructions of [
+		{ ...classical, verify: undefined }, { ...classical, remediate: undefined },
+		{ ...classical, remediate: "not an instruction list" }, { ...classical, sync: [] },
+		{ ...classical, unknown: [] },
+	]) assert.throws(() => decodeNativeSddStatusV2({ ...legacy, phaseInstructions }, request));
+	assert.throws(() => decodeNativeSddStatusV2({ ...legacy, phaseInstructions: classical,
+		nextRecommended: "remediate", remediationState: { required: true, complete: false, failedEvidenceRevision: `sha256:${"a".repeat(64)}` },
+	}, request), /remediation/i);
+});
+
+test("producer instructions reach actual selected-child startup without provider replacement", { skip: !process.env.SDD_TEST_PRODUCER }, async (t) => {
+	const root = workspace(t), change = join(root, "openspec/changes/alpha");
+	execFileSync("git", ["init", "--quiet", root]);
+	mkdirSync(join(change, "specs/feature"), { recursive: true });
+	for (const [path, content] of Object.entries({ "proposal.md": "# Proposal\n", "design.md": "# Design\n",
+		"specs/feature/spec.md": "# Spec\n", "tasks.md": "- [ ] 1.1 Implement\n" })) writeFileSync(join(change, path), content);
+	const native = new NativeReviewCliV216(createNodeExecFileAdapter(), process.env.SDD_TEST_PRODUCER!);
+	const status = await native.sddStatus!({ workspaceRoot: root, changeName: "alpha" });
+	assert.equal(status.nextRecommended, "apply");
+	let selection = JSON.stringify({ changeName: "alpha", workspaceRoot: root, phase: "apply" });
+	const hooks = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<{ systemPrompt: string }>>();
+	const pi = { on(name: string, hook: never) { hooks.set(name, hook); }, events: { emit() {} },
+		registerCommand() {}, registerTool() {}, getFlag: () => selection, getActiveTools: () => [],
+	} as unknown as ExtensionAPI;
+	const ctx = { cwd: root, hasUI: false, sessionManager: { getSessionId: () => root } } as unknown as ExtensionContext;
+	await ensureSddPreflight(ctx, { pi, installAssets: () => ({ agents: 0, chains: 0, support: 0, skipped: 0 }) });
+	createGentleAiExtension({ nativeReviewCli: native, processEnv: {},
+		resolveTelemetryTriggerBinary: () => { throw new Error("no telemetry in producer test"); },
+	})(pi);
+	const result = await hooks.get("before_agent_start")!({ systemPrompt: "SDD apply executor" }, ctx);
+	assert.doesNotMatch(result.systemPrompt, /SDD selection blocked:/);
+	assert.ok(result.systemPrompt.includes(JSON.stringify(status, null, 2)));
+	assert.match(result.systemPrompt, /### apply instructions/);
+	writeFileSync(join(change, "tasks.md"), "- [x] 1.1 Implement\n");
+	const completed = await native.sddStatus!({ workspaceRoot: root, changeName: "alpha" });
+	// The current pin requests verify; the classical producer requests archive.
+	// This slice consumes either producer, without changing its chosen route.
+	const next = "remediate" in completed.phaseInstructions! ? "verify" : "archive";
+	assert.equal(completed.nextRecommended, next);
+	selection = JSON.stringify({ changeName: "alpha", workspaceRoot: root, phase: next });
+	const completion = await hooks.get("before_agent_start")!({ systemPrompt: `SDD ${next} executor` }, ctx);
+	assert.doesNotMatch(completion.systemPrompt, /SDD selection blocked:/);
+	assert.ok(completion.systemPrompt.includes(JSON.stringify(completed, null, 2)));
+});
 
 test("status command renders native facts without confirmation, mutation, or phase launch", async (t) => {
 	const root = workspace(t);

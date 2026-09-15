@@ -69,6 +69,19 @@ The stable release is [`v2.6.0`](https://github.com/Gentleman-Programming/gentle
 
 This checkout prepares `gentle-pi` `2.7.0`; it is source state, not a published release. Its package-local native runtime pin is Gentle AI `v2.9.1`, distinct from the published `v2.6.0` pairing.
 
+The native SDD status consumer accepts both the pinned producer's legacy
+`apply`/`verify`/`remediate`/`archive` instruction record and the classical
+`apply`/`verify`/`archive` record. It preserves the provider's instructions and
+selected route; it does not fabricate a remediation phase for a newer producer.
+Unknown or incomplete instruction records still fail closed.
+
+This is the first compatibility prerequisite for [SDD parity #1051](https://github.com/Gentleman-Programming/gentle-pi/issues/1051),
+not delivery of the complete simplified workflow. Both sync-local routing paths,
+mandatory verification in the shipped chain, ordinary attempt governance and
+research admission remain pending separate coherent units. The package pin is
+unchanged; compatibility evidence from an identified local build is not a
+published fix or a recommendation to replace the installed provider.
+
 ### Pi compatibility
 
 The current package requires Pi 0.85.1 or newer (development tests pin 0.85.1). Use the latest Pi release; gentle-pi does not update your installed Pi automatically. Children, including any `GENTLE_PI_AGENTS_PI` override, must emit `agent_settled`: `agent_end` records a run's output but is not completion because retries or queued continuations may follow.

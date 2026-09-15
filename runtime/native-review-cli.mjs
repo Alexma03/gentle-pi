@@ -1460,7 +1460,7 @@ function nativeError(code                       , operation                     
 
 
 const NATIVE_SDD_DEPENDENCIES = ["proposal", "specs", "design", "tasks", "apply", "verify", "archive"]         ;
-const NATIVE_SDD_INSTRUCTION_PHASES = ["apply", "verify", "remediate", "archive"]         ;
+const NATIVE_SDD_INSTRUCTION_PHASES = ["apply", "verify", "archive"]         ;
 const NATIVE_SDD_NEXT_RECOMMENDATIONS = ["apply", "verify", "remediate", "archive", "archived", "resolve-blockers", "sdd-new", "select-change", "propose", "spec", "design", "tasks"]         ;
 const NATIVE_SDD_DEPENDENCY_STATES = ["blocked", "ready", "all_done"]         ;
 
@@ -1488,7 +1488,13 @@ export function decodeNativeSddStatusV2(value         , request                 
 	if (status.phaseInstructions !== undefined) {
 		const instructions = object(status.phaseInstructions);
 		for (const phase of NATIVE_SDD_INSTRUCTION_PHASES) stringArray(instructions[phase]);
-		if (Object.keys(instructions).length !== NATIVE_SDD_INSTRUCTION_PHASES.length) throw new Error("native SDD instructions have an unsupported shape");
+		// Classical SDD no longer emits a remediation phase. Keep the published
+		// producer's optional legacy instructions intact without inventing them
+		// for a newer producer or accepting unknown phase keys.
+		const hasRemediation = Object.hasOwn(instructions, "remediate");
+		if (hasRemediation) stringArray(instructions.remediate);
+		if (Object.keys(instructions).length !== NATIVE_SDD_INSTRUCTION_PHASES.length + Number(hasRemediation)) throw new Error("native SDD instructions have an unsupported shape");
+		if (status.nextRecommended === "remediate" && !hasRemediation) throw new Error("native SDD remediation instructions are missing");
 	}
 	if (status.nextRecommended === "remediate" || status.remediationState !== undefined) {
 		const remediation = object(status.remediationState);
